@@ -689,7 +689,6 @@ private fun UserProfileContentNormal(
                     ) {
                         pages[it].content(user, false, headerComposable, tabsComposable)
                     }
-                }
             }
         }
     }

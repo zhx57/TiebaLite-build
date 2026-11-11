@@ -258,7 +258,7 @@ fun ChatRoomPage(
                             },
                             onAvatarClick = {
                                 if (message.senderUid > 0L) {
-                                    navigator.navigate(UserProfilePageDestination(message.senderUid))
+                                    navigateToUserProfile(navigator, message.senderUid)
                                 }
                             },
                         )

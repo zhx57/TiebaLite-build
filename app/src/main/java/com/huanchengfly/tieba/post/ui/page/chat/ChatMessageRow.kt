@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
+import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
@@ -34,10 +35,12 @@ import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.ui.common.PbContentText
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
+import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.Avatar
 import com.huanchengfly.tieba.post.ui.widgets.compose.Sizes
 import com.huanchengfly.tieba.post.utils.DateTimeUtils
 import com.huanchengfly.tieba.post.utils.StringUtil
+import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 
 /**
  * 聊天消息行，群聊与私信共用。
@@ -127,6 +130,17 @@ fun ChatMessageRow(
             }
         }
     }
+}
+
+/**
+ * 打开用户资料卡。
+ *
+ * UserProfilePage 的目标地带有 ExperimentalMaterialApi 注解，
+ * 统一在这里 OptIn，避免每个调用点各写一遍。
+ */
+@OptIn(ExperimentalMaterialApi::class)
+fun navigateToUserProfile(navigator: DestinationsNavigator, uid: Long) {
+    navigator.navigate(UserProfilePageDestination(uid))
 }
 
 /**

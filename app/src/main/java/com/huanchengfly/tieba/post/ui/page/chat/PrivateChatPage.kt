@@ -186,7 +186,7 @@ fun PrivateChatPage(
                             },
                             onAvatarClick = {
                                 if (message.peerUid > 0L) {
-                                    navigator.navigate(UserProfilePageDestination(message.peerUid))
+                                    navigateToUserProfile(navigator, message.peerUid)
                                 }
                             },
                         )
