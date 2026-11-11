@@ -65,7 +65,9 @@ jobs:
             ${{ runner.os }}-android-
 
       - name: Build with Gradle
-        run: ./gradlew :app:assembleRelease --build-cache --parallel
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --build-cache --parallel
 
       - name: Verify APK signature
         run: |
