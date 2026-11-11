@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -500,6 +502,7 @@ private fun UserProfileContentNormal(
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
 
+    // heightOffset：头部被向上推走的距离，范围 [-headerHeight, 0]
     var heightOffset by rememberSaveable { mutableFloatStateOf(0f) }
     var headerHeight by rememberSaveable {
         mutableFloatStateOf(
@@ -508,6 +511,7 @@ private fun UserProfileContentNormal(
             }
         )
     }
+    var tabHeight by rememberSaveable { mutableFloatStateOf(0f) }
 
     val isShowHeaderArea by remember {
         derivedStateOf {
@@ -548,6 +552,7 @@ private fun UserProfileContentNormal(
                         available: Offset,
                         source: NestedScrollSource,
                     ): Offset {
+                        // 列表已经到顶还继续向上滑：先把头部推走，再让列表自己滚
                         if (available.y < 0) {
                             val prevHeightOffset = heightOffset
                             heightOffset = max(heightOffset + available.y, -headerHeight)
@@ -564,6 +569,7 @@ private fun UserProfileContentNormal(
                         available: Offset,
                         source: NestedScrollSource,
                     ): Offset {
+                        // 向下滑且列表无法继续滚动时，把头部放回来
                         if (available.y > 0f) {
                             val prevHeightOffset = heightOffset
                             heightOffset = min(heightOffset + available.y, 0f)
@@ -578,7 +584,10 @@ private fun UserProfileContentNormal(
             }
 
             ProvideContentColor(color = ExtendedTheme.colors.text) {
-                Column(
+                // 关键结构：分页容器始终铺满可用高度，
+                // 头部与标签栏作为覆盖层浮在分页之上。
+                // 这样列表的高度永远是满的，不存在被头部挤成 0 而滑不动的情况。
+                Box(
                     modifier = Modifier
                         .padding(paddingValues)
                         .fillMaxSize()
@@ -638,29 +647,43 @@ private fun UserProfileContentNormal(
 
                     val pagerState = rememberPagerState { pages.size }
 
-                    // 头部区域：高度随滚动收缩，滑过之后顶部标题栏才显示用户信息
-                    val containerHeight by remember {
+                    val headerVisiblePx by remember {
                         derivedStateOf {
-                            with(density) {
-                                (headerHeight + heightOffset).toDp()
-                            }
+                            (headerHeight + heightOffset).coerceAtLeast(0f)
                         }
                     }
 
+                    LazyLoadHorizontalPager(
+                        state = pagerState,
+                        key = { pages[it].id },
+                        // 列表内容从头部与标签栏下方开始：顶部留出可视头部的空间。
+                        // 头部收起时，这个间距同步收缩，列表顺势上移。
+                        contentPadding = PaddingValues(
+                            top = with(density) { (headerVisiblePx + tabHeight).toDp() }
+                        ),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        pages[it].content(user, false, null, null)
+                    }
+
+                    // 头部覆盖层：整体随 heightOffset 上移，超出部分裁掉
                     Box(
                         modifier = Modifier
-                            .height(containerHeight)
+                            .fillMaxWidth()
+                            .height(with(density) { headerVisiblePx.toDp() })
                             .clipToBounds()
                     ) {
                         Box(
                             modifier = Modifier
+                                .fillMaxWidth()
+                                // 无界测量：外层按可视高度裁剪，但这里要拿到头部完整高度，
+                                // 否则收缩到 0 时量出来也是 0，再也展不开。
                                 .wrapContentHeight(
-                                    align = Alignment.Bottom,
+                                    align = Alignment.Top,
                                     unbounded = true
                                 )
-                                .onSizeChanged {
-                                    headerHeight = it.height.toFloat()
-                                }
+                                .offset { IntOffset(0, heightOffset.toInt()) }
+                                .onSizeChanged { headerHeight = it.height.toFloat() }
                         ) {
                             UserProfileDetail(
                                 user = user,
@@ -691,23 +714,17 @@ private fun UserProfileContentNormal(
                         }
                     }
 
-                    // 标签栏放在分页外面：任何一页为空或加载失败时都保持可见，
-                    // 也能保证左右滑动只切换下方内容、头部与标签栏不动。
+                    // 标签栏覆盖层：跟在头部下面，头部收完后吸附在顶部。
+                    // 放在分页外面，任何一页为空或报错时它都不会消失。
                     UserProfileTabRow(
                         user = user,
                         pages = pages,
                         pagerState = pagerState,
-                    )
-
-                    LazyLoadHorizontalPager(
-                        state = pagerState,
-                        key = { pages[it].id },
                         modifier = Modifier
-                            .weight(1f)
                             .fillMaxWidth()
-                    ) {
-                        pages[it].content(user, false, null, null)
-                    }
+                            .offset { IntOffset(0, headerVisiblePx.toInt()) }
+                            .onSizeChanged { tabHeight = it.height.toFloat() }
+                    )
                 }
             }
         }
