@@ -57,6 +57,7 @@ fun UserLikeForumPage(
     enablePullRefresh: Boolean = false,
     header: (@Composable () -> Unit)? = null,
     tabs: (@Composable () -> Unit)? = null,
+    listState: LazyListState? = null,
     viewModel: UserLikeForumViewModel = pageViewModel(),
 ) {
     val navigator = LocalNavigator.current
@@ -146,7 +147,7 @@ fun UserLikeForumPage(
             onRefresh = ::reload
         )
 
-        val lazyListState = rememberLazyListState()
+        val lazyListState = listState ?: rememberLazyListState()
 
         val pullRefreshModifier =
             if (enablePullRefresh) Modifier.pullRefresh(pullRefreshState) else Modifier

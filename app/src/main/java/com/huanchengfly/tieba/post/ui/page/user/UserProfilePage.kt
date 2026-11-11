@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.pager.PagerState
@@ -56,6 +57,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -136,6 +138,7 @@ import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 import kotlin.math.max
@@ -424,6 +427,9 @@ private fun UserProfileToolbar(
     val context = LocalContext.current
     val account = LocalAccount.current
 
+    // 标题栏背景与标题随滚动渐变出现：向上滑过头部后由透明过渡到底色
+    val titleAlpha = if (showTitle) 1f else 0f
+
     Toolbar(
         title = {
             AnimatedVisibility(
@@ -434,6 +440,9 @@ private fun UserProfileToolbar(
                 ToolbarUserTitle(user = user)
             }
         },
+        backgroundColor = ExtendedTheme.colors.topBar.copy(
+            alpha = 0.96f * titleAlpha
+        ),
         navigationIcon = {
             BackNavigationIcon(onBackPressed = onBack)
         },
@@ -515,12 +524,23 @@ private fun UserProfileContentNormal(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
+    // 每个分页各自的列表滚动状态：头部滚出视口后标题栏才渐变出现
+    val threadListState = remember { LazyListState() }
+    val postListState = remember { LazyListState() }
+    val forumListState = remember { LazyListState() }
+    fun listStateFor(pageId: String): LazyListState = when (pageId) {
+        "threads" -> threadListState
+        "posts" -> postListState
+        else -> forumListState
+    }
+    var showToolbarTitle by remember { mutableStateOf(false) }
+
     MyScaffold(
         topBar = {
             UserProfileToolbar(
                 user = user,
                 isSelf = isSelf,
-                showTitle = true,
+                showTitle = showToolbarTitle,
                 onBack = onBack,
                 onSetUserBlack = onSetUserBlack,
             )
@@ -562,6 +582,7 @@ private fun UserProfileContentNormal(
                                         fluid = fluid,
                                         header = header,
                                         tabs = tabs,
+                                        listState = threadListState,
                                     )
                                 }
                             ),
@@ -580,6 +601,7 @@ private fun UserProfileContentNormal(
                                         fluid = fluid,
                                         header = header,
                                         tabs = tabs,
+                                        listState = postListState,
                                     )
                                 }
                             ).takeIf { isSelf },
@@ -597,6 +619,7 @@ private fun UserProfileContentNormal(
                                         fluid = fluid,
                                         header = header,
                                         tabs = tabs,
+                                        listState = forumListState,
                                     )
                                 }
                             ),
@@ -642,6 +665,21 @@ private fun UserProfileContentNormal(
                         )
                     }
 
+                    // 当前分页列表的滚动位置驱动标题栏：头部完全滚出后标题栏才渐变出现
+                    LaunchedEffect(pagerState.currentPage, pages) {
+                        val state = listStateFor(pages[pagerState.currentPage].id)
+                        snapshotFlow {
+                            val info = state.layoutInfo
+                            val headerItem = info.visibleItemsInfo.firstOrNull { it.key == "profile_header" }
+                            if (headerItem == null) {
+                                // 头部已完全移出视口
+                                info.totalItemsCount > 0
+                            } else {
+                                headerItem.offset + headerItem.size < 0
+                            }
+                        }.distinctUntilChanged().collect { showToolbarTitle = it }
+                    }
+
                     LazyLoadHorizontalPager(
                         state = pagerState,
                         key = { pages[it].id },
@@ -654,6 +692,7 @@ private fun UserProfileContentNormal(
                 }
             }
         }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)

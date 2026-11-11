@@ -77,6 +77,7 @@ fun UserPostPage(
     enablePullRefresh: Boolean = false,
     header: (@Composable () -> Unit)? = null,
     tabs: (@Composable () -> Unit)? = null,
+    listState: LazyListState? = null,
     viewModel: UserPostViewModel = pageViewModel(key = if (isThread) "user_thread_$uid" else "user_post_$uid"),
 ) {
     val navigator = LocalNavigator.current
@@ -218,7 +219,7 @@ fun UserPostPage(
             onRefresh = ::reload
         )
 
-        val lazyListState = rememberLazyListState()
+        val lazyListState = listState ?: rememberLazyListState()
 
         val pullRefreshModifier =
             if (enablePullRefresh) Modifier.pullRefresh(pullRefreshState) else Modifier

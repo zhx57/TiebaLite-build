@@ -23,6 +23,7 @@ import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.pageViewModel
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.page.ProvideNavigator
+import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.BackNavigationIcon
 import com.huanchengfly.tieba.post.ui.widgets.compose.ConfirmDialog
 import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoad
@@ -182,6 +183,11 @@ fun PrivateChatPage(
                             onRetryClick = {
                                 resendTarget = message
                                 resendDialogState.show()
+                            },
+                            onAvatarClick = {
+                                if (message.peerUid > 0L) {
+                                    navigator.navigate(UserProfilePageDestination(message.peerUid))
+                                }
                             },
                         )
                     }
