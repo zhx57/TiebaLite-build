@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package tieba.chat;
+
+option java_package = "com.huanchengfly.tieba.post.api.models.protos.chat";
+
+message UpdateClientInfoReqIdl {
+  string cuid = 1;
+
+  message DataReq {
+    string bduss = 1;
+    string device = 2;
+    bytes secretKey = 3;
+    string stoken = 12;
+  }
+
+  DataReq data = 2;
+}
