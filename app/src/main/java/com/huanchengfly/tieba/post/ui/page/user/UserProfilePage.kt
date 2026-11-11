@@ -19,15 +19,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.ExperimentalMaterialApi
@@ -54,14 +53,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -103,8 +108,10 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.ConfirmDialog
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogState
 import com.huanchengfly.tieba.post.ui.widgets.compose.ErrorScreen
 import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoad
+import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoadHorizontalPager
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyScaffold
 import com.huanchengfly.tieba.post.ui.widgets.compose.NetworkImage
+import com.huanchengfly.tieba.post.ui.widgets.compose.PagerTabIndicator
 import com.huanchengfly.tieba.post.ui.widgets.compose.ProvideContentColor
 import com.huanchengfly.tieba.post.ui.widgets.compose.PullToRefreshLayout
 import com.huanchengfly.tieba.post.ui.widgets.compose.ScrollableTabRow
@@ -126,8 +133,10 @@ import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlin.math.absoluteValue
+import kotlin.math.max
+import kotlin.math.min
 
 @ExperimentalMaterialApi
 @Destination
@@ -489,25 +498,21 @@ private fun UserProfileContentNormal(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val density = LocalDensity.current
 
-    // 整页只有一个滚动容器：头部与标签栏作为列表前两项，
-    // 三个标签共用同一个 LazyListState。
-    // 滑动时头部随列表中一起滚出屏幕（整体可滑），
-    // 切换标签只替换下方内容，头部和标签栏位置不动。
-    val listState = remember { LazyListState() }
-    var selectedPageIndex by rememberSaveable { mutableStateOf(0) }
-    var showToolbarTitle by remember { mutableStateOf(false) }
-
-    LaunchedEffect(listState) {
-        snapshotFlow {
-            val info = listState.layoutInfo
-            val headerItem = info.visibleItemsInfo.firstOrNull { it.key == "profile_header" }
-            if (headerItem == null) {
-                info.totalItemsCount > 0
-            } else {
-                headerItem.offset + headerItem.size < 0
+    var heightOffset by rememberSaveable { mutableFloatStateOf(0f) }
+    var headerHeight by rememberSaveable {
+        mutableFloatStateOf(
+            with(density) {
+                (96.dp + 16.dp).toPx()
             }
-        }.distinctUntilChanged().collect { showToolbarTitle = it }
+        )
+    }
+
+    val isShowHeaderArea by remember {
+        derivedStateOf {
+            heightOffset.absoluteValue < headerHeight
+        }
     }
 
     MyScaffold(
@@ -515,7 +520,7 @@ private fun UserProfileContentNormal(
             UserProfileToolbar(
                 user = user,
                 isSelf = isSelf,
-                showTitle = showToolbarTitle,
+                showTitle = !isShowHeaderArea,
                 onBack = onBack,
                 onSetUserBlack = onSetUserBlack,
             )
@@ -537,11 +542,47 @@ private fun UserProfileContentNormal(
                 isFakeRefreshing = true
             }
         ) {
+            val headerNestedScrollConnection = remember {
+                object : NestedScrollConnection {
+                    override fun onPreScroll(
+                        available: Offset,
+                        source: NestedScrollSource,
+                    ): Offset {
+                        if (available.y < 0) {
+                            val prevHeightOffset = heightOffset
+                            heightOffset = max(heightOffset + available.y, -headerHeight)
+                            if (prevHeightOffset != heightOffset) {
+                                return available.copy(x = 0f)
+                            }
+                        }
+
+                        return Offset.Zero
+                    }
+
+                    override fun onPostScroll(
+                        consumed: Offset,
+                        available: Offset,
+                        source: NestedScrollSource,
+                    ): Offset {
+                        if (available.y > 0f) {
+                            val prevHeightOffset = heightOffset
+                            heightOffset = min(heightOffset + available.y, 0f)
+                            if (prevHeightOffset != heightOffset) {
+                                return available.copy(x = 0f)
+                            }
+                        }
+
+                        return Offset.Zero
+                    }
+                }
+            }
+
             ProvideContentColor(color = ExtendedTheme.colors.text) {
                 Column(
                     modifier = Modifier
                         .padding(paddingValues)
                         .fillMaxSize()
+                        .nestedScroll(headerNestedScrollConnection)
                 ) {
                     val pages = remember {
                         listOfNotNull(
@@ -553,14 +594,11 @@ private fun UserProfileContentNormal(
                                         it.get { thread_num }.getShortNumString()
                                     )
                                 },
-                                content = { user, fluid, header, tabs ->
+                                content = { user, fluid, _, _ ->
                                     UserPostPage(
                                         uid = user.get { id },
                                         isThread = true,
                                         fluid = fluid,
-                                        header = header,
-                                        tabs = tabs,
-                                        listState = listState,
                                     )
                                 }
                             ),
@@ -572,14 +610,11 @@ private fun UserProfileContentNormal(
                                         it.get { post_num }.getShortNumString()
                                     )
                                 },
-                                content = { user, fluid, header, tabs ->
+                                content = { user, fluid, _, _ ->
                                     UserPostPage(
                                         uid = user.get { id },
                                         isThread = false,
                                         fluid = fluid,
-                                        header = header,
-                                        tabs = tabs,
-                                        listState = listState,
                                     )
                                 }
                             ).takeIf { isSelf },
@@ -591,60 +626,87 @@ private fun UserProfileContentNormal(
                                         it.get { my_like_num }.toString()
                                     )
                                 },
-                                content = { user, fluid, header, tabs ->
+                                content = { user, fluid, _, _ ->
                                     UserLikeForumPage(
                                         uid = user.get { id },
                                         fluid = fluid,
-                                        header = header,
-                                        tabs = tabs,
-                                        listState = listState,
                                     )
                                 }
                             ),
                         ).toImmutableList()
                     }
 
-                    val pageIndex = selectedPageIndex.coerceIn(0, pages.lastIndex)
+                    val pagerState = rememberPagerState { pages.size }
 
-                    val headerComposable: @Composable () -> Unit = {
-                        UserProfileDetail(
-                            user = user,
-                            modifier = Modifier
-                                .padding(16.dp)
-                                .padding(top = 8.dp),
-                            showBtn = showActionBtn,
-                            isSelf = isSelf,
-                            onBtnClick = {
-                                if (disableButton || !showActionBtn) {
-                                    return@UserProfileDetail
-                                }
-                                if (isSelf) {
-                                    context.goToActivity<EditProfileActivity>()
-                                } else if (user.get { has_concerned } == 0) {
-                                    onFollow()
-                                } else {
-                                    onUnfollow()
-                                }
-                            },
-                            onCopyIdClick = {
-                                TiebaUtil.copyText(
-                                    context,
-                                    user.get { id }.toString()
-                                )
+                    // 头部区域：高度随滚动收缩，滑过之后顶部标题栏才显示用户信息
+                    val containerHeight by remember {
+                        derivedStateOf {
+                            with(density) {
+                                (headerHeight + heightOffset).toDp()
                             }
-                        )
-                    }
-                    val tabsComposable: @Composable () -> Unit = {
-                        UserProfileTabRow(
-                            user = user,
-                            pages = pages,
-                            selectedPage = pageIndex,
-                            onSelect = { selectedPageIndex = it },
-                        )
+                        }
                     }
 
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        pages[pageIndex].content(user, false, headerComposable, tabsComposable)
+                    Box(
+                        modifier = Modifier
+                            .height(containerHeight)
+                            .clipToBounds()
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .wrapContentHeight(
+                                    align = Alignment.Bottom,
+                                    unbounded = true
+                                )
+                                .onSizeChanged {
+                                    headerHeight = it.height.toFloat()
+                                }
+                        ) {
+                            UserProfileDetail(
+                                user = user,
+                                modifier = Modifier
+                                    .padding(16.dp)
+                                    .padding(top = 8.dp),
+                                showBtn = showActionBtn,
+                                isSelf = isSelf,
+                                onBtnClick = {
+                                    if (disableButton || !showActionBtn) {
+                                        return@UserProfileDetail
+                                    }
+                                    if (isSelf) {
+                                        context.goToActivity<EditProfileActivity>()
+                                    } else if (user.get { has_concerned } == 0) {
+                                        onFollow()
+                                    } else {
+                                        onUnfollow()
+                                    }
+                                },
+                                onCopyIdClick = {
+                                    TiebaUtil.copyText(
+                                        context,
+                                        user.get { id }.toString()
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    // 标签栏放在分页外面：任何一页为空或加载失败时都保持可见，
+                    // 也能保证左右滑动只切换下方内容、头部与标签栏不动。
+                    UserProfileTabRow(
+                        user = user,
+                        pages = pages,
+                        pagerState = pagerState,
+                    )
+
+                    LazyLoadHorizontalPager(
+                        state = pagerState,
+                        key = { pages[it].id },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    ) {
+                        pages[it].content(user, false, null, null)
                     }
                 }
             }
@@ -810,10 +872,11 @@ data class UserProfilePageData(
 private fun UserProfileTabRow(
     user: ImmutableHolder<User>,
     pages: ImmutableList<UserProfilePageData>,
-    selectedPage: Int,
-    onSelect: (Int) -> Unit,
+    pagerState: PagerState,
     modifier: Modifier = Modifier,
 ) {
+    val coroutineScope = rememberCoroutineScope()
+
     val tabTextStyle = MaterialTheme.typography.button.copy(
         fontWeight = FontWeight.Bold,
         fontSize = 13.sp,
@@ -821,22 +884,12 @@ private fun UserProfileTabRow(
     )
 
     ScrollableTabRow(
-        selectedTabIndex = selectedPage,
+        selectedTabIndex = pagerState.currentPage,
         indicator = { tabPositions ->
-            tabPositions.getOrNull(selectedPage)?.let { tabPosition ->
-                val indicatorWidth = 16.dp
-                val left = tabPosition.left + (tabPosition.width / 2 - indicatorWidth / 2)
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .wrapContentSize(Alignment.BottomStart)
-                        .offset(x = left, y = (-8).dp)
-                        .width(indicatorWidth)
-                        .height(3.dp)
-                        .clip(RoundedCornerShape(100))
-                        .background(color = LocalContentColor.current)
-                )
-            }
+            PagerTabIndicator(
+                pagerState = pagerState,
+                tabPositions = tabPositions
+            )
         },
         divider = {},
         backgroundColor = Color.Transparent,
@@ -846,8 +899,12 @@ private fun UserProfileTabRow(
     ) {
         pages.fastForEachIndexed { i, pageData ->
             Tab(
-                selected = selectedPage == i,
-                onClick = { onSelect(i) },
+                selected = pagerState.currentPage == i,
+                onClick = {
+                    coroutineScope.launch {
+                        pagerState.animateScrollToPage(i)
+                    }
+                },
                 selectedContentColor = ExtendedTheme.colors.primary,
                 unselectedContentColor = ExtendedTheme.colors.textSecondary,
             ) {
