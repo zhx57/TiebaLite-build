@@ -51,7 +51,7 @@ class UserLikeForumViewModel @Inject constructor() :
                     UserLikeForumPartialChange.Refresh.Success(
                         page = 1,
                         hasMore = it.hasMore == "1",
-                        forums = it.forumList.forumList,
+                        forums = it.forumList.allForums(),
                     )
                 }
                 .onStart { emit(UserLikeForumPartialChange.Refresh.Start) }
@@ -64,11 +64,18 @@ class UserLikeForumViewModel @Inject constructor() :
                     UserLikeForumPartialChange.LoadMore.Success(
                         page = page + 1,
                         hasMore = it.hasMore == "1",
-                        forums = it.forumList.forumList,
+                        forums = it.forumList.allForums(),
                     )
                 }
                 .onStart { emit(UserLikeForumPartialChange.LoadMore.Start) }
                 .catch { emit(UserLikeForumPartialChange.LoadMore.Failure(it)) }
+
+        /**
+         * 关注吧分两组返回：non-gconforum 为普通吧，gconforum 为官方吧/游戏吧。
+         * 只读其中一组会导致视口内一条数据都没有。
+         */
+        private fun UserLikeForumBean.ForumListBean.allForums(): List<UserLikeForumBean.ForumBean> =
+            (forumList + gconForumList).distinctBy { it.id }
     }
 }
 
