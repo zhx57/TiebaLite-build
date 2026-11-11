@@ -806,7 +806,7 @@ private fun UserProfileContentExpanded(
                             ),
                         ).toImmutableList()
                     }
-                    var selectedPageIndex by rememberSaveable { mutableStateOf(0) }
+                    val pagerState = rememberPagerState { pages.size }
 
                     UserProfileDetail(
                         user = user,
@@ -841,13 +841,15 @@ private fun UserProfileContentExpanded(
                         UserProfileTabRow(
                             user = user,
                             pages = pages,
-                            selectedPage = selectedPageIndex,
-                            onSelect = { selectedPageIndex = it },
+                            pagerState = pagerState,
                         )
 
-                        Box(modifier = Modifier.weight(1f)) {
-                            pages[selectedPageIndex.coerceIn(0, pages.lastIndex)]
-                                .content(user, true, null, null)
+                        LazyLoadHorizontalPager(
+                            state = pagerState,
+                            key = { pages[it].id },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            pages[it].content(user, true, null, null)
                         }
                     }
                 }
