@@ -80,7 +80,6 @@ import androidx.compose.ui.util.fastForEachIndexed
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.PermissionListBean
 import com.huanchengfly.tieba.post.api.models.protos.User
-import com.huanchengfly.tieba.post.arch.BaseComposeActivity.Companion.LocalWindowSizeClass
 import com.huanchengfly.tieba.post.arch.GlobalEvent
 import com.huanchengfly.tieba.post.arch.ImmutableHolder
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
@@ -96,7 +95,6 @@ import com.huanchengfly.tieba.post.toastShort
 import com.huanchengfly.tieba.post.ui.common.prefs.widgets.TextPref
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.common.theme.compose.TiebaLiteTheme
-import com.huanchengfly.tieba.post.ui.common.windowsizeclass.WindowWidthSizeClass
 import com.huanchengfly.tieba.post.ui.page.ProvideNavigator
 import com.huanchengfly.tieba.post.ui.page.settings.LeadingIcon
 import com.huanchengfly.tieba.post.ui.page.user.edit.EditProfileActivity
@@ -385,35 +383,19 @@ private fun UserProfileContent(
     onSetUserBlack: () -> Unit,
     onSendMessage: () -> Unit,
 ) {
-    when (LocalWindowSizeClass.current.widthSizeClass) {
-        WindowWidthSizeClass.Expanded -> {
-            UserProfileContentExpanded(
-                user = user,
-                showActionBtn = showActionBtn,
-                disableButton = disableButton,
-                isSelf = isSelf,
-                onBack = onBack,
-                onFollow = onFollow,
-                onUnfollow = onUnfollow,
-                onSetUserBlack = onSetUserBlack,
-                onSendMessage = onSendMessage,
-            )
-        }
-
-        else -> {
-            UserProfileContentNormal(
-                user = user,
-                showActionBtn = showActionBtn,
-                disableButton = disableButton,
-                isSelf = isSelf,
-                onBack = onBack,
-                onFollow = onFollow,
-                onUnfollow = onUnfollow,
-                onSetUserBlack = onSetUserBlack,
-                onSendMessage = onSendMessage,
-            )
-        }
-    }
+    // 资料页统一使用单列布局：宽屏下也不再拆成左右两栏，
+    // 避免出现两套页面/两份头部的视觉分裂。
+    UserProfileContentNormal(
+        user = user,
+        showActionBtn = showActionBtn,
+        disableButton = disableButton,
+        isSelf = isSelf,
+        onBack = onBack,
+        onFollow = onFollow,
+        onUnfollow = onUnfollow,
+        onSetUserBlack = onSetUserBlack,
+        onSendMessage = onSendMessage,
+    )
 }
 
 @Composable
@@ -683,6 +665,9 @@ private fun UserProfileContentNormal(
                     LazyLoadHorizontalPager(
                         state = pagerState,
                         key = { pages[it].id },
+                        // 头部与标签栏在每页顶部各有一份，横滑会同时露出相邻页的头部，
+                        // 看起来像左右两套页面，所以只允许点击标签切换。
+                        userScrollEnabled = false,
                         modifier = Modifier
                             .padding(paddingValues)
                             .fillMaxSize(),
@@ -694,151 +679,6 @@ private fun UserProfileContentNormal(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun UserProfileContentExpanded(
-    user: ImmutableHolder<User>,
-    showActionBtn: Boolean,
-    disableButton: Boolean,
-    isSelf: Boolean,
-    onBack: () -> Unit,
-    onFollow: () -> Unit,
-    onUnfollow: () -> Unit,
-    onSetUserBlack: () -> Unit,
-    onSendMessage: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val context = LocalContext.current
-
-    MyScaffold(
-        topBar = {
-            UserProfileToolbar(
-                user = user,
-                isSelf = isSelf,
-                showTitle = false,
-                onSetUserBlack = onSetUserBlack,
-                onBack = onBack
-            )
-        }
-    ) { paddingValues ->
-        ProvideContentColor(color = ExtendedTheme.colors.text) {
-            Box(
-                modifier = Modifier.fillMaxSize()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .padding(paddingValues)
-                        .fillMaxHeight()
-                        .fillMaxWidth(0.75f)
-                        .align(Alignment.TopCenter),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    val pages = remember {
-                        listOfNotNull(
-                            UserProfilePageData(
-                                id = "threads",
-                                title = {
-                                    stringResource(
-                                        id = R.string.title_profile_threads_tab,
-                                        it.get { thread_num }.getShortNumString()
-                                    )
-                                },
-                                content = { user, expanded, _, _ ->
-                                    UserPostPage(
-                                        uid = user.get { id },
-                                        isThread = true,
-                                        fluid = expanded,
-                                        enablePullRefresh = expanded,
-                                    )
-                                }
-                            ),
-                            UserProfilePageData(
-                                id = "posts",
-                                title = {
-                                    stringResource(
-                                        id = R.string.title_profile_posts_tab,
-                                        it.get { post_num }.getShortNumString()
-                                    )
-                                },
-                                content = { user, expanded, _, _ ->
-                                    UserPostPage(
-                                        uid = user.get { id },
-                                        isThread = false,
-                                        fluid = expanded,
-                                        enablePullRefresh = expanded,
-                                    )
-                                }
-                            ).takeIf { isSelf },
-                            UserProfilePageData(
-                                id = "concern_forums",
-                                title = {
-                                    stringResource(
-                                        id = R.string.title_profile_concern_forums_tab,
-                                        it.get { my_like_num }.toString()
-                                    )
-                                },
-                                content = { user, expanded, _, _ ->
-                                    UserLikeForumPage(
-                                        uid = user.get { id },
-                                        fluid = expanded,
-                                        enablePullRefresh = expanded,
-                                    )
-                                }
-                            ),
-                        ).toImmutableList()
-                    }
-                    val pagerState = rememberPagerState { pages.size }
-
-                    UserProfileDetail(
-                        user = user,
-                        modifier = Modifier
-                            .weight(1f)
-                            .align(Alignment.Top),
-                        showBtn = showActionBtn,
-                        isSelf = isSelf,
-                        onBtnClick = {
-                            if (disableButton || !showActionBtn) {
-                                return@UserProfileDetail
-                            }
-                            if (isSelf) {
-                                context.goToActivity<EditProfileActivity>()
-                            } else if (user.get { has_concerned } == 0) {
-                                onFollow()
-                            } else {
-                                onUnfollow()
-                            }
-                        },
-                        onSendMessageClick = onSendMessage,
-                        onCopyIdClick = {
-                            TiebaUtil.copyText(
-                                context,
-                                user.get { id }.toString()
-                            )
-                        }
-                    )
-
-                    Column(
-                        modifier = Modifier.weight(2f)
-                    ) {
-                        UserProfileTabRow(
-                            user = user,
-                            pages = pages,
-                            pagerState = pagerState,
-                        )
-
-                        LazyLoadHorizontalPager(
-                            state = pagerState,
-                            key = { pages[it].id },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            pages[it].content(user, true, null, null)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 @Immutable
 data class UserProfilePageData(
