@@ -1,15 +1,18 @@
 package com.huanchengfly.tieba.post.ui.page.user.likeforum
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
@@ -22,7 +25,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.UserLikeForumBean
 import com.huanchengfly.tieba.post.arch.GlobalEvent
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
@@ -50,6 +55,9 @@ fun UserLikeForumPage(
     uid: Long,
     fluid: Boolean = false,
     enablePullRefresh: Boolean = false,
+    header: (@Composable () -> Unit)? = null,
+    tabs: (@Composable () -> Unit)? = null,
+    listState: LazyListState? = null,
     viewModel: UserLikeForumViewModel = pageViewModel(),
 ) {
     val navigator = LocalNavigator.current
@@ -104,6 +112,34 @@ fun UserLikeForumPage(
         onReload = {
             viewModel.send(UserLikeForumUiIntent.Refresh(uid))
         },
+        loadingScreen = {
+            Column(modifier = Modifier.fillMaxSize()) {
+                header?.invoke()
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator()
+                }
+            }
+        },
+        emptyScreen = {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                header?.invoke()
+                Text(
+                    text = stringResource(id = R.string.title_empty),
+                    style = MaterialTheme.typography.body2,
+                    color = ExtendedTheme.colors.textSecondary,
+                )
+            }
+        },
         errorScreen = { ErrorScreen(error = error.getOrNull()) },
     ) {
         val pullRefreshState = rememberPullRefreshState(
@@ -111,7 +147,7 @@ fun UserLikeForumPage(
             onRefresh = ::reload
         )
 
-        val lazyListState = rememberLazyListState()
+        val lazyListState = listState ?: rememberLazyListState()
 
         val pullRefreshModifier =
             if (enablePullRefresh) Modifier.pullRefresh(pullRefreshState) else Modifier
@@ -133,6 +169,8 @@ fun UserLikeForumPage(
                             navigator.navigate(ForumPageDestination(it))
                         }
                     },
+                    header = header,
+                    tabs = tabs,
                     lazyListState = lazyListState
                 )
             }
@@ -148,14 +186,24 @@ fun UserLikeForumPage(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UserLikeForumList(
     data: ImmutableList<UserLikeForumBean.ForumBean>,
     onClickForum: (UserLikeForumBean.ForumBean) -> Unit,
     fluid: Boolean = false,
+    header: (@Composable () -> Unit)? = null,
+    tabs: (@Composable () -> Unit)? = null,
     lazyListState: LazyListState = rememberLazyListState(),
 ) {
     MyLazyColumn(state = lazyListState) {
+        // 与帖子列表一致：头部和标签栏作为前两项，整页连续滚动
+        if (header != null) {
+            item(key = "profile_header") { header() }
+        }
+        if (tabs != null) {
+            item(key = "profile_tabs") { tabs() }
+        }
         items(
             items = data,
             key = { it.id }

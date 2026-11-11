@@ -247,7 +247,9 @@ object ChatApi {
 
         return ChatRoomMessage(
             msgId = json.optLong("msgid"),
-            senderUid = senderUid,
+            // from_user 是 IM 体系内的账号 id，和贴吧 uid 不是同一套；
+            // 跳转资料卡必须用 bduk 解出来的贴吧 uid，否则会进到别人主页。
+            senderUid = bdukUid ?: senderUid,
             senderName = senderName,
             senderPortrait = portrait,
             contentType = msgType,
