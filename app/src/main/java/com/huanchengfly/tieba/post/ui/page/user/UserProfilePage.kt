@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,9 +28,8 @@ import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.pager.PagerState
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.ExperimentalMaterialApi
@@ -80,6 +80,7 @@ import androidx.compose.ui.util.fastForEachIndexed
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.PermissionListBean
 import com.huanchengfly.tieba.post.api.models.protos.User
+import com.huanchengfly.tieba.post.arch.BaseComposeActivity.Companion.LocalWindowSizeClass
 import com.huanchengfly.tieba.post.arch.GlobalEvent
 import com.huanchengfly.tieba.post.arch.ImmutableHolder
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
@@ -95,6 +96,7 @@ import com.huanchengfly.tieba.post.toastShort
 import com.huanchengfly.tieba.post.ui.common.prefs.widgets.TextPref
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.common.theme.compose.TiebaLiteTheme
+import com.huanchengfly.tieba.post.ui.common.windowsizeclass.WindowWidthSizeClass
 import com.huanchengfly.tieba.post.ui.page.ProvideNavigator
 import com.huanchengfly.tieba.post.ui.page.settings.LeadingIcon
 import com.huanchengfly.tieba.post.ui.page.user.edit.EditProfileActivity
@@ -110,10 +112,8 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.ConfirmDialog
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogState
 import com.huanchengfly.tieba.post.ui.widgets.compose.ErrorScreen
 import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoad
-import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoadHorizontalPager
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyScaffold
 import com.huanchengfly.tieba.post.ui.widgets.compose.NetworkImage
-import com.huanchengfly.tieba.post.ui.widgets.compose.PagerTabIndicator
 import com.huanchengfly.tieba.post.ui.widgets.compose.ProvideContentColor
 import com.huanchengfly.tieba.post.ui.widgets.compose.PullToRefreshLayout
 import com.huanchengfly.tieba.post.ui.widgets.compose.ScrollableTabRow
@@ -383,19 +383,35 @@ private fun UserProfileContent(
     onSetUserBlack: () -> Unit,
     onSendMessage: () -> Unit,
 ) {
-    // 资料页统一使用单列布局：宽屏下也不再拆成左右两栏，
-    // 避免出现两套页面/两份头部的视觉分裂。
-    UserProfileContentNormal(
-        user = user,
-        showActionBtn = showActionBtn,
-        disableButton = disableButton,
-        isSelf = isSelf,
-        onBack = onBack,
-        onFollow = onFollow,
-        onUnfollow = onUnfollow,
-        onSetUserBlack = onSetUserBlack,
-        onSendMessage = onSendMessage,
-    )
+    when (LocalWindowSizeClass.current.widthSizeClass) {
+        WindowWidthSizeClass.Expanded -> {
+            UserProfileContentExpanded(
+                user = user,
+                showActionBtn = showActionBtn,
+                disableButton = disableButton,
+                isSelf = isSelf,
+                onBack = onBack,
+                onFollow = onFollow,
+                onUnfollow = onUnfollow,
+                onSetUserBlack = onSetUserBlack,
+                onSendMessage = onSendMessage,
+            )
+        }
+
+        else -> {
+            UserProfileContentNormal(
+                user = user,
+                showActionBtn = showActionBtn,
+                disableButton = disableButton,
+                isSelf = isSelf,
+                onBack = onBack,
+                onFollow = onFollow,
+                onUnfollow = onUnfollow,
+                onSetUserBlack = onSetUserBlack,
+                onSendMessage = onSendMessage,
+            )
+        }
+    }
 }
 
 @Composable
@@ -607,7 +623,9 @@ private fun UserProfileContentNormal(
                             ),
                         ).toImmutableList()
                     }
-                    val pagerState = rememberPagerState { pages.size }
+                    // 用选中索引代替横向分页：切标签只替换下方内容，
+                    // 头部与标签栏保持原地不动，不会像整页被换掉。
+                    var selectedPage by remember { mutableStateOf(0) }
 
                     // 头部与标签栏交给分页内的列表渲染，滑动时一起滚出屏幕
                     val headerComposable: @Composable () -> Unit = {
@@ -643,13 +661,14 @@ private fun UserProfileContentNormal(
                         UserProfileTabRow(
                             user = user,
                             pages = pages,
-                            pagerState = pagerState,
+                            selectedPage = selectedPage,
+                            onSelect = { selectedPage = it },
                         )
                     }
 
                     // 当前分页列表的滚动位置驱动标题栏：头部完全滚出后标题栏才渐变出现
-                    LaunchedEffect(pagerState.currentPage, pages) {
-                        val state = listStateFor(pages[pagerState.currentPage].id)
+                    LaunchedEffect(selectedPage, pages) {
+                        val state = listStateFor(pages[selectedPage].id)
                         snapshotFlow {
                             val info = state.layoutInfo
                             val headerItem = info.visibleItemsInfo.firstOrNull { it.key == "profile_header" }
@@ -662,23 +681,167 @@ private fun UserProfileContentNormal(
                         }.distinctUntilChanged().collect { showToolbarTitle = it }
                     }
 
-                    LazyLoadHorizontalPager(
-                        state = pagerState,
-                        key = { pages[it].id },
-                        // 头部与标签栏在每页顶部各有一份，横滑会同时露出相邻页的头部，
-                        // 看起来像左右两套页面，所以只允许点击标签切换。
-                        userScrollEnabled = false,
+                    // 只保留下方内容区的一个容器：切换标签时直接换内容，
+                    // 不再横向平移整页，头部与标签栏位置保持不动。
+                    Box(
                         modifier = Modifier
                             .padding(paddingValues)
                             .fillMaxSize(),
                     ) {
-                        pages[it].content(user, false, headerComposable, tabsComposable)
+                        pages[selectedPage].content(
+                            user,
+                            false,
+                            headerComposable,
+                            tabsComposable
+                        )
                     }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun UserProfileContentExpanded(
+    user: ImmutableHolder<User>,
+    showActionBtn: Boolean,
+    disableButton: Boolean,
+    isSelf: Boolean,
+    onBack: () -> Unit,
+    onFollow: () -> Unit,
+    onUnfollow: () -> Unit,
+    onSetUserBlack: () -> Unit,
+    onSendMessage: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+
+    MyScaffold(
+        topBar = {
+            UserProfileToolbar(
+                user = user,
+                isSelf = isSelf,
+                showTitle = false,
+                onSetUserBlack = onSetUserBlack,
+                onBack = onBack
+            )
+        }
+    ) { paddingValues ->
+        ProvideContentColor(color = ExtendedTheme.colors.text) {
+            Box(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .padding(paddingValues)
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.75f)
+                        .align(Alignment.TopCenter),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    val pages = remember {
+                        listOfNotNull(
+                            UserProfilePageData(
+                                id = "threads",
+                                title = {
+                                    stringResource(
+                                        id = R.string.title_profile_threads_tab,
+                                        it.get { thread_num }.getShortNumString()
+                                    )
+                                },
+                                content = { user, expanded, _, _ ->
+                                    UserPostPage(
+                                        uid = user.get { id },
+                                        isThread = true,
+                                        fluid = expanded,
+                                        enablePullRefresh = expanded,
+                                    )
+                                }
+                            ),
+                            UserProfilePageData(
+                                id = "posts",
+                                title = {
+                                    stringResource(
+                                        id = R.string.title_profile_posts_tab,
+                                        it.get { post_num }.getShortNumString()
+                                    )
+                                },
+                                content = { user, expanded, _, _ ->
+                                    UserPostPage(
+                                        uid = user.get { id },
+                                        isThread = false,
+                                        fluid = expanded,
+                                        enablePullRefresh = expanded,
+                                    )
+                                }
+                            ).takeIf { isSelf },
+                            UserProfilePageData(
+                                id = "concern_forums",
+                                title = {
+                                    stringResource(
+                                        id = R.string.title_profile_concern_forums_tab,
+                                        it.get { my_like_num }.toString()
+                                    )
+                                },
+                                content = { user, expanded, _, _ ->
+                                    UserLikeForumPage(
+                                        uid = user.get { id },
+                                        fluid = expanded,
+                                        enablePullRefresh = expanded,
+                                    )
+                                }
+                            ),
+                        ).toImmutableList()
+                    }
+                    var selectedPage by remember { mutableStateOf(0) }
+
+                    UserProfileDetail(
+                        user = user,
+                        modifier = Modifier
+                            .weight(1f)
+                            .align(Alignment.Top),
+                        showBtn = showActionBtn,
+                        isSelf = isSelf,
+                        onBtnClick = {
+                            if (disableButton || !showActionBtn) {
+                                return@UserProfileDetail
+                            }
+                            if (isSelf) {
+                                context.goToActivity<EditProfileActivity>()
+                            } else if (user.get { has_concerned } == 0) {
+                                onFollow()
+                            } else {
+                                onUnfollow()
+                            }
+                        },
+                        onSendMessageClick = onSendMessage,
+                        onCopyIdClick = {
+                            TiebaUtil.copyText(
+                                context,
+                                user.get { id }.toString()
+                            )
+                        }
+                    )
+
+                    Column(
+                        modifier = Modifier.weight(2f)
+                    ) {
+                        UserProfileTabRow(
+                            user = user,
+                            pages = pages,
+                            selectedPage = selectedPage,
+                            onSelect = { selectedPage = it },
+                        )
+
+                        Box(modifier = Modifier.weight(1f)) {
+                            pages[selectedPage].content(user, true, null, null)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 @Immutable
 data class UserProfilePageData(
@@ -697,11 +860,10 @@ data class UserProfilePageData(
 private fun UserProfileTabRow(
     user: ImmutableHolder<User>,
     pages: ImmutableList<UserProfilePageData>,
-    pagerState: PagerState,
+    selectedPage: Int,
+    onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val coroutineScope = rememberCoroutineScope()
-
     val tabTextStyle = MaterialTheme.typography.button.copy(
         fontWeight = FontWeight.Bold,
         fontSize = 13.sp,
@@ -709,12 +871,22 @@ private fun UserProfileTabRow(
     )
 
     ScrollableTabRow(
-        selectedTabIndex = pagerState.currentPage,
+        selectedTabIndex = selectedPage,
         indicator = { tabPositions ->
-            PagerTabIndicator(
-                pagerState = pagerState,
-                tabPositions = tabPositions
-            )
+            tabPositions.getOrNull(selectedPage)?.let { tabPosition ->
+                val indexWidth = 16.dp
+                val left = tabPosition.left + (tabPosition.width / 2 - indexWidth / 2)
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .wrapContentSize(Alignment.BottomStart)
+                        .offset(x = left, y = (-8).dp)
+                        .width(indexWidth)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(100))
+                        .background(color = LocalContentColor.current)
+                )
+            }
         },
         divider = {},
         backgroundColor = Color.Transparent,
@@ -724,12 +896,8 @@ private fun UserProfileTabRow(
     ) {
         pages.fastForEachIndexed { i, pageData ->
             Tab(
-                selected = pagerState.currentPage == i,
-                onClick = {
-                    coroutineScope.launch {
-                        pagerState.animateScrollToPage(i)
-                    }
-                },
+                selected = selectedPage == i,
+                onClick = { onSelect(i) },
                 selectedContentColor = ExtendedTheme.colors.primary,
                 unselectedContentColor = ExtendedTheme.colors.textSecondary,
             ) {
