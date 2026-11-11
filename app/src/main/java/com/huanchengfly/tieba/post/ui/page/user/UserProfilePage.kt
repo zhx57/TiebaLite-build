@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -509,9 +510,13 @@ private fun UserProfileContentNormal(
         )
     }
 
+    // 头部高度上限：可用高度的 55%。小屏上头部一旦超过这个值，
+    // 下面的分页区域会被压成 0 高度，表现为「列表加载了但滑不动」。
+    var maxHeaderHeightPx by remember { mutableFloatStateOf(Float.MAX_VALUE) }
+
     val isShowHeaderArea by remember {
         derivedStateOf {
-            heightOffset.absoluteValue < headerHeight
+            heightOffset.absoluteValue < min(headerHeight, maxHeaderHeightPx)
         }
     }
 
@@ -550,7 +555,8 @@ private fun UserProfileContentNormal(
                     ): Offset {
                         if (available.y < 0) {
                             val prevHeightOffset = heightOffset
-                            heightOffset = max(heightOffset + available.y, -headerHeight)
+                            val foldLimit = min(headerHeight, maxHeaderHeightPx)
+                            heightOffset = max(heightOffset + available.y, -foldLimit)
                             if (prevHeightOffset != heightOffset) {
                                 return available.copy(x = 0f)
                             }
@@ -578,12 +584,15 @@ private fun UserProfileContentNormal(
             }
 
             ProvideContentColor(color = ExtendedTheme.colors.text) {
-                Column(
-                    modifier = Modifier
-                        .padding(paddingValues)
-                        .fillMaxSize()
-                        .nestedScroll(headerNestedScrollConnection)
-                ) {
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    val availableHeightPx = with(density) { maxHeight.toPx() }
+                    maxHeaderHeightPx = availableHeightPx * 0.55f
+                    Column(
+                        modifier = Modifier
+                            .padding(paddingValues)
+                            .fillMaxSize()
+                            .nestedScroll(headerNestedScrollConnection)
+                    ) {
                     val pages = remember {
                         listOfNotNull(
                             UserProfilePageData(
@@ -638,11 +647,14 @@ private fun UserProfileContentNormal(
 
                     val pagerState = rememberPagerState { pages.size }
 
-                    // 头部区域：高度随滚动收缩，滑过之后顶部标题栏才显示用户信息
+                    // 头部区域：高度随滚动收缩，滑过之后顶部标题栏才显示用户信息。
+                    // 高度同时受 maxHeaderHeightPx 限制，避免小屏把列表挤没。
                     val containerHeight by remember {
                         derivedStateOf {
                             with(density) {
-                                (headerHeight + heightOffset).toDp()
+                                min(headerHeight + heightOffset, maxHeaderHeightPx)
+                                    .coerceAtLeast(0f)
+                                    .toDp()
                             }
                         }
                     }
@@ -655,7 +667,9 @@ private fun UserProfileContentNormal(
                         Box(
                             modifier = Modifier
                                 .wrapContentHeight(
-                                    align = Alignment.Bottom,
+                                    // 顶部对齐：高度被上限裁剪时优先保住头像和昵称，
+                                    // 用 Bottom 会把顶部内容裁掉。
+                                    align = Alignment.Top,
                                     unbounded = true
                                 )
                                 .onSizeChanged {
@@ -707,6 +721,7 @@ private fun UserProfileContentNormal(
                             .fillMaxWidth()
                     ) {
                         pages[it].content(user, false, null, null)
+                    }
                     }
                 }
             }
