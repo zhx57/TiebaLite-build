@@ -1,6 +1,5 @@
 package com.huanchengfly.tieba.post.ui.page.user.post
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -75,9 +74,6 @@ fun UserPostPage(
     isThread: Boolean = true,
     fluid: Boolean = false,
     enablePullRefresh: Boolean = false,
-    header: (@Composable () -> Unit)? = null,
-    tabs: (@Composable () -> Unit)? = null,
-    listState: LazyListState? = null,
     viewModel: UserPostViewModel = pageViewModel(key = if (isThread) "user_thread_$uid" else "user_post_$uid"),
 ) {
     val navigator = LocalNavigator.current
@@ -138,32 +134,26 @@ fun UserPostPage(
             viewModel.send(UserPostUiIntent.Refresh(uid, isThread))
         },
         loadingScreen = {
-            Column(
+            Box(
                 modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.TopCenter
             ) {
-                header?.invoke()
-                Box(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = Alignment.TopCenter
-                ) {
-                    Column {
-                        repeat(4) {
-                            FeedCardPlaceholder()
-                        }
+                Column {
+                    repeat(4) {
+                        FeedCardPlaceholder()
                     }
                 }
             }
         },
         errorScreen = { ErrorScreen(error = error.getOrNull()) },
         emptyScreen = {
-            Column(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
                     .padding(vertical = 16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+                contentAlignment = Alignment.TopCenter
             ) {
-                header?.invoke()
                 if (hidePost) {
                     TipScreen(
                         title = { Text(text = stringResource(id = R.string.title_user_hide_post)) },
@@ -219,7 +209,7 @@ fun UserPostPage(
             onRefresh = ::reload
         )
 
-        val lazyListState = listState ?: rememberLazyListState()
+        val lazyListState = rememberLazyListState()
 
         val pullRefreshModifier =
             if (enablePullRefresh) Modifier.pullRefresh(pullRefreshState) else Modifier
@@ -237,8 +227,6 @@ fun UserPostPage(
                     data = posts,
                     fluid = fluid,
                     lazyListState = lazyListState,
-                    header = header,
-                    tabs = tabs,
                     onClickItem = { threadId, postId, isSubPost ->
                         if (postId == null) {
                             navigator.navigate(ThreadPageDestination(threadId))
@@ -303,14 +291,11 @@ fun UserPostPage(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UserPostList(
     data: ImmutableList<PostListItemData>,
     fluid: Boolean = false,
     lazyListState: LazyListState = rememberLazyListState(),
-    header: (@Composable () -> Unit)? = null,
-    tabs: (@Composable () -> Unit)? = null,
     onClickItem: (threadId: Long, postId: Long?, isSubPost: Boolean) -> Unit = { _, _, _ -> },
     onAgreeItem: (PostInfoList) -> Unit = {},
     onClickReply: (PostInfoList) -> Unit = {},
@@ -319,13 +304,6 @@ private fun UserPostList(
     onClickOriginThread: (threadId: Long) -> Unit = {},
 ) {
     MyLazyColumn(state = lazyListState) {
-        // 头部与标签栏作为列表的前两项，让整个主页成为一条连续滚动的内容
-        if (header != null) {
-            item(key = "profile_header") { header() }
-        }
-        if (tabs != null) {
-            item(key = "profile_tabs") { tabs() }
-        }
         items(
             items = data,
             key = {

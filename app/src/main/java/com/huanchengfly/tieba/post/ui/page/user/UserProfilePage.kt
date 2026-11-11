@@ -9,7 +9,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -20,17 +19,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentWidth
-import androidx.compose.foundation.layout.wrapContentSize
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.ExperimentalMaterialApi
@@ -58,7 +54,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -113,8 +108,10 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.ConfirmDialog
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogState
 import com.huanchengfly.tieba.post.ui.widgets.compose.ErrorScreen
 import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoad
+import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoadHorizontalPager
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyScaffold
 import com.huanchengfly.tieba.post.ui.widgets.compose.NetworkImage
+import com.huanchengfly.tieba.post.ui.widgets.compose.PagerTabIndicator
 import com.huanchengfly.tieba.post.ui.widgets.compose.ProvideContentColor
 import com.huanchengfly.tieba.post.ui.widgets.compose.PullToRefreshLayout
 import com.huanchengfly.tieba.post.ui.widgets.compose.ScrollableTabRow
@@ -131,13 +128,11 @@ import com.huanchengfly.tieba.post.utils.StringUtil.getShortNumString
 import com.huanchengfly.tieba.post.utils.TiebaUtil
 import com.huanchengfly.tieba.post.ui.page.LocalNavigator
 import com.huanchengfly.tieba.post.ui.page.destinations.FollowListPageDestination
-import com.huanchengfly.tieba.post.ui.page.destinations.PrivateChatPageDestination
 import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 import kotlin.math.max
@@ -234,15 +229,6 @@ fun UserProfilePage(
                         )
                     },
                     onSetUserBlack = { viewModel.send(UserProfileUiIntent.GetUserBlackInfo(uid)) },
-                    onSendMessage = {
-                        navigator.navigate(
-                            PrivateChatPageDestination(
-                                peerUid = it.get { id },
-                                peerName = it.get { nameShow }.ifBlank { it.get { name } },
-                                peerPortrait = it.get { portrait },
-                            )
-                        )
-                    },
                 )
             }
         }
@@ -382,7 +368,6 @@ private fun UserProfileContent(
     onFollow: () -> Unit,
     onUnfollow: () -> Unit,
     onSetUserBlack: () -> Unit,
-    onSendMessage: () -> Unit,
 ) {
     when (LocalWindowSizeClass.current.widthSizeClass) {
         WindowWidthSizeClass.Expanded -> {
@@ -395,7 +380,6 @@ private fun UserProfileContent(
                 onFollow = onFollow,
                 onUnfollow = onUnfollow,
                 onSetUserBlack = onSetUserBlack,
-                onSendMessage = onSendMessage,
             )
         }
 
@@ -409,7 +393,6 @@ private fun UserProfileContent(
                 onFollow = onFollow,
                 onUnfollow = onUnfollow,
                 onSetUserBlack = onSetUserBlack,
-                onSendMessage = onSendMessage,
             )
         }
     }
@@ -426,9 +409,6 @@ private fun UserProfileToolbar(
     val context = LocalContext.current
     val account = LocalAccount.current
 
-    // 标题栏背景与标题随滚动渐变出现：向上滑过头部后由透明过渡到底色
-    val titleAlpha = if (showTitle) 1f else 0f
-
     Toolbar(
         title = {
             AnimatedVisibility(
@@ -439,9 +419,6 @@ private fun UserProfileToolbar(
                 ToolbarUserTitle(user = user)
             }
         },
-        backgroundColor = ExtendedTheme.colors.topBar.copy(
-            alpha = 0.96f * titleAlpha
-        ),
         navigationIcon = {
             BackNavigationIcon(onBackPressed = onBack)
         },
@@ -517,29 +494,33 @@ private fun UserProfileContentNormal(
     onFollow: () -> Unit,
     onUnfollow: () -> Unit,
     onSetUserBlack: () -> Unit,
-    onSendMessage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val density = LocalDensity.current
 
-    // 每个分页各自的列表滚动状态：头部滚出视口后标题栏才渐变出现
-    val threadListState = remember { LazyListState() }
-    val postListState = remember { LazyListState() }
-    val forumListState = remember { LazyListState() }
-    fun listStateFor(pageId: String): LazyListState = when (pageId) {
-        "threads" -> threadListState
-        "posts" -> postListState
-        else -> forumListState
+    var heightOffset by rememberSaveable { mutableFloatStateOf(0f) }
+    var headerHeight by rememberSaveable {
+        mutableFloatStateOf(
+            with(density) {
+                (96.dp + 16.dp).toPx()
+            }
+        )
     }
-    var showToolbarTitle by remember { mutableStateOf(false) }
+
+    val isShowHeaderArea by remember {
+        derivedStateOf {
+            heightOffset.absoluteValue < headerHeight
+        }
+    }
 
     MyScaffold(
         topBar = {
             UserProfileToolbar(
                 user = user,
                 isSelf = isSelf,
-                showTitle = showToolbarTitle,
+                showTitle = !isShowHeaderArea,
                 onBack = onBack,
                 onSetUserBlack = onSetUserBlack,
             )
@@ -554,8 +535,6 @@ private fun UserProfileContentNormal(
             }
         }
 
-        // 整页做成一条连续滚动的列表：头部和标签栏进入每个分页列表的头部，
-        // 滑动列表时头部自然滚出屏幕，不会出现上下两块的情况。
         PullToRefreshLayout(
             refreshing = isFakeRefreshing,
             onRefresh = {
@@ -563,7 +542,49 @@ private fun UserProfileContentNormal(
                 isFakeRefreshing = true
             }
         ) {
+            val headerNestedScrollConnection = remember {
+                object : NestedScrollConnection {
+                    override fun onPreScroll(
+                        available: Offset,
+                        source: NestedScrollSource,
+                    ): Offset {
+                        if (available.y < 0) {
+                            val prevHeightOffset = heightOffset
+                            heightOffset = max(heightOffset + available.y, -headerHeight)
+                            if (prevHeightOffset != heightOffset) {
+                                return available.copy(x = 0f)
+                            }
+                        }
+
+                        return Offset.Zero
+                    }
+
+                    override fun onPostScroll(
+                        consumed: Offset,
+                        available: Offset,
+                        source: NestedScrollSource,
+                    ): Offset {
+                        if (available.y > 0f) {
+                            // Adjust the height offset in case the consumed delta Y is less than what was
+                            // recorded as available delta Y in the pre-scroll.
+                            val prevHeightOffset = heightOffset
+                            heightOffset = min(heightOffset + available.y, 0f)
+                            if (prevHeightOffset != heightOffset) {
+                                return available.copy(x = 0f)
+                            }
+                        }
+
+                        return Offset.Zero
+                    }
+                }
+            }
+
             ProvideContentColor(color = ExtendedTheme.colors.text) {
+                Column(
+                    modifier = Modifier
+                        .padding(paddingValues)
+                        .nestedScroll(headerNestedScrollConnection)
+                ) {
                     val pages = remember {
                         listOfNotNull(
                             UserProfilePageData(
@@ -574,14 +595,11 @@ private fun UserProfileContentNormal(
                                         it.get { thread_num }.getShortNumString()
                                     )
                                 },
-                                content = { user, fluid, header, tabs ->
+                                content = { user, fluid ->
                                     UserPostPage(
                                         uid = user.get { id },
                                         isThread = true,
                                         fluid = fluid,
-                                        header = header,
-                                        tabs = tabs,
-                                        listState = threadListState,
                                     )
                                 }
                             ),
@@ -593,14 +611,11 @@ private fun UserProfileContentNormal(
                                         it.get { post_num }.getShortNumString()
                                     )
                                 },
-                                content = { user, fluid, header, tabs ->
+                                content = { user, fluid ->
                                     UserPostPage(
                                         uid = user.get { id },
                                         isThread = false,
                                         fluid = fluid,
-                                        header = header,
-                                        tabs = tabs,
-                                        listState = postListState,
                                     )
                                 }
                             ).takeIf { isSelf },
@@ -612,90 +627,84 @@ private fun UserProfileContentNormal(
                                         it.get { my_like_num }.toString()
                                     )
                                 },
-                                content = { user, fluid, header, tabs ->
+                                content = { user, fluid ->
                                     UserLikeForumPage(
                                         uid = user.get { id },
                                         fluid = fluid,
-                                        header = header,
-                                        tabs = tabs,
-                                        listState = forumListState,
                                     )
                                 }
                             ),
                         ).toImmutableList()
                     }
-                    // 用选中索引代替横向分页：切标签只替换下方内容，
-                    // 头部与标签栏保持原地不动，不会像整页被换掉。
-                    var selectedPage by remember { mutableStateOf(0) }
+                    val pagerState = rememberPagerState { pages.size }
 
-                    // 头部与标签栏交给分页内的列表渲染，滑动时一起滚出屏幕
-                    val headerComposable: @Composable () -> Unit = {
-                        UserProfileDetail(
-                            user = user,
-                            modifier = Modifier
-                                .padding(16.dp)
-                                .padding(top = 8.dp),
-                            showBtn = showActionBtn,
-                            isSelf = isSelf,
-                            onBtnClick = {
-                                if (disableButton || !showActionBtn) {
-                                    return@UserProfileDetail
-                                }
-                                if (isSelf) {
-                                    context.goToActivity<EditProfileActivity>()
-                                } else if (user.get { has_concerned } == 0) {
-                                    onFollow()
-                                } else {
-                                    onUnfollow()
-                                }
-                            },
-                            onSendMessageClick = onSendMessage,
-                            onCopyIdClick = {
-                                TiebaUtil.copyText(
-                                    context,
-                                    user.get { id }.toString()
-                                )
+                    val containerHeight by remember {
+                        derivedStateOf {
+                            with(density) {
+                                (headerHeight + heightOffset).toDp()
                             }
-                        )
-                    }
-                    val tabsComposable: @Composable () -> Unit = {
-                        UserProfileTabRow(
-                            user = user,
-                            pages = pages,
-                            selectedPage = selectedPage,
-                            onSelect = { selectedPage = it },
-                        )
+                        }
                     }
 
-                    // 当前分页列表的滚动位置驱动标题栏：头部完全滚出后标题栏才渐变出现
-                    LaunchedEffect(selectedPage, pages) {
-                        val state = listStateFor(pages[selectedPage].id)
-                        snapshotFlow {
-                            val info = state.layoutInfo
-                            val headerItem = info.visibleItemsInfo.firstOrNull { it.key == "profile_header" }
-                            if (headerItem == null) {
-                                // 头部已完全移出视口
-                                info.totalItemsCount > 0
-                            } else {
-                                headerItem.offset + headerItem.size < 0
-                            }
-                        }.distinctUntilChanged().collect { showToolbarTitle = it }
-                    }
-
-                    // 只保留下方内容区的一个容器：切换标签时直接换内容，
-                    // 不再横向平移整页，头部与标签栏位置保持不动。
                     Box(
                         modifier = Modifier
-                            .padding(paddingValues)
-                            .fillMaxSize(),
+                            .height(containerHeight)
+                            .clipToBounds()
                     ) {
-                        pages[selectedPage].content(
-                            user,
-                            false,
-                            headerComposable,
-                            tabsComposable
-                        )
+                        Box(
+                            modifier = Modifier
+                                .wrapContentHeight(
+                                    align = Alignment.Bottom,
+                                    unbounded = true
+                                )
+                                .onSizeChanged {
+                                    headerHeight = it.height.toFloat()
+                                }
+                        ) {
+                            UserProfileDetail(
+                                user = user,
+                                modifier = Modifier
+                                    .padding(16.dp)
+                                    .padding(top = 8.dp),
+                                showBtn = showActionBtn,
+                                isSelf = isSelf,
+                                onBtnClick = {
+                                    if (disableButton || !showActionBtn) {
+                                        return@UserProfileDetail
+                                    }
+                                    if (isSelf) {
+                                        context.goToActivity<EditProfileActivity>()
+                                    } else if (user.get { has_concerned } == 0) {
+                                        onFollow()
+                                    } else {
+                                        onUnfollow()
+                                    }
+                                },
+                                onCopyIdClick = {
+                                    TiebaUtil.copyText(
+                                        context,
+                                        user.get { id }.toString()
+                                    )
+                                }
+                            )
+                        }
                     }
+
+                    UserProfileTabRow(
+                        user = user,
+                        pages = pages,
+                        pagerState = pagerState,
+//                                    modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+
+                    LazyLoadHorizontalPager(
+                        state = pagerState,
+                        key = { pages[it].id },
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        pages[it].content(user, false)
+                    }
+                }
             }
         }
     }
@@ -712,7 +721,6 @@ private fun UserProfileContentExpanded(
     onFollow: () -> Unit,
     onUnfollow: () -> Unit,
     onSetUserBlack: () -> Unit,
-    onSendMessage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -750,7 +758,7 @@ private fun UserProfileContentExpanded(
                                         it.get { thread_num }.getShortNumString()
                                     )
                                 },
-                                content = { user, expanded, _, _ ->
+                                content = { user, expanded ->
                                     UserPostPage(
                                         uid = user.get { id },
                                         isThread = true,
@@ -767,7 +775,7 @@ private fun UserProfileContentExpanded(
                                         it.get { post_num }.getShortNumString()
                                     )
                                 },
-                                content = { user, expanded, _, _ ->
+                                content = { user, expanded ->
                                     UserPostPage(
                                         uid = user.get { id },
                                         isThread = false,
@@ -784,7 +792,7 @@ private fun UserProfileContentExpanded(
                                         it.get { my_like_num }.toString()
                                     )
                                 },
-                                content = { user, expanded, _, _ ->
+                                content = { user, expanded ->
                                     UserLikeForumPage(
                                         uid = user.get { id },
                                         fluid = expanded,
@@ -794,7 +802,7 @@ private fun UserProfileContentExpanded(
                             ),
                         ).toImmutableList()
                     }
-                    var selectedPage by remember { mutableStateOf(0) }
+                    val pagerState = rememberPagerState { pages.size }
 
                     UserProfileDetail(
                         user = user,
@@ -815,7 +823,6 @@ private fun UserProfileContentExpanded(
                                 onUnfollow()
                             }
                         },
-                        onSendMessageClick = onSendMessage,
                         onCopyIdClick = {
                             TiebaUtil.copyText(
                                 context,
@@ -830,12 +837,15 @@ private fun UserProfileContentExpanded(
                         UserProfileTabRow(
                             user = user,
                             pages = pages,
-                            selectedPage = selectedPage,
-                            onSelect = { selectedPage = it },
+                            pagerState = pagerState,
                         )
 
-                        Box(modifier = Modifier.weight(1f)) {
-                            pages[selectedPage].content(user, true, null, null)
+                        LazyLoadHorizontalPager(
+                            state = pagerState,
+                            key = { pages[it].id },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            pages[it].content(user, true)
                         }
                     }
                 }
@@ -848,12 +858,7 @@ private fun UserProfileContentExpanded(
 data class UserProfilePageData(
     val id: String,
     val title: @Composable (ImmutableHolder<User>) -> String,
-    val content: @Composable (
-        user: ImmutableHolder<User>,
-        fluid: Boolean,
-        header: (@Composable () -> Unit)?,
-        tabs: (@Composable () -> Unit)?,
-    ) -> Unit,
+    val content: @Composable (ImmutableHolder<User>, Boolean) -> Unit,
 )
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -861,10 +866,11 @@ data class UserProfilePageData(
 private fun UserProfileTabRow(
     user: ImmutableHolder<User>,
     pages: ImmutableList<UserProfilePageData>,
-    selectedPage: Int,
-    onSelect: (Int) -> Unit,
+    pagerState: PagerState,
     modifier: Modifier = Modifier,
 ) {
+    val coroutineScope = rememberCoroutineScope()
+
     val tabTextStyle = MaterialTheme.typography.button.copy(
         fontWeight = FontWeight.Bold,
         fontSize = 13.sp,
@@ -872,22 +878,12 @@ private fun UserProfileTabRow(
     )
 
     ScrollableTabRow(
-        selectedTabIndex = selectedPage,
+        selectedTabIndex = pagerState.currentPage,
         indicator = { tabPositions ->
-            tabPositions.getOrNull(selectedPage)?.let { tabPosition ->
-                val indexWidth = 16.dp
-                val left = tabPosition.left + (tabPosition.width / 2 - indexWidth / 2)
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .wrapContentSize(Alignment.BottomStart)
-                        .offset(x = left, y = (-8).dp)
-                        .width(indexWidth)
-                        .height(3.dp)
-                        .clip(RoundedCornerShape(100))
-                        .background(color = LocalContentColor.current)
-                )
-            }
+            PagerTabIndicator(
+                pagerState = pagerState,
+                tabPositions = tabPositions
+            )
         },
         divider = {},
         backgroundColor = Color.Transparent,
@@ -897,8 +893,12 @@ private fun UserProfileTabRow(
     ) {
         pages.fastForEachIndexed { i, pageData ->
             Tab(
-                selected = selectedPage == i,
-                onClick = { onSelect(i) },
+                selected = pagerState.currentPage == i,
+                onClick = {
+                    coroutineScope.launch {
+                        pagerState.animateScrollToPage(i)
+                    }
+                },
                 selectedContentColor = ExtendedTheme.colors.primary,
                 unselectedContentColor = ExtendedTheme.colors.textSecondary,
             ) {
@@ -950,7 +950,6 @@ private fun UserProfileDetail(
     showBtn: Boolean = true,
     isSelf: Boolean = false,
     onBtnClick: () -> Unit = {},
-    onSendMessageClick: () -> Unit = {},
     onCopyIdClick: () -> Unit = {},
 ) {
     val navigator = LocalNavigator.current
@@ -999,16 +998,6 @@ private fun UserProfileDetail(
                 )
             }
             Spacer(modifier = Modifier.weight(1f))
-            if (showBtn && !isSelf) {
-                // 私信入口：带用户信息直接进入私信页
-                Button(
-                    onClick = onSendMessageClick,
-                    colors = ButtonDefaults.outlinedButtonColors(),
-                    border = ButtonDefaults.outlinedBorder,
-                ) {
-                    Text(text = stringResource(id = R.string.title_private_chat))
-                }
-            }
             if (showBtn) {
                 Button(
                     onClick = onBtnClick,

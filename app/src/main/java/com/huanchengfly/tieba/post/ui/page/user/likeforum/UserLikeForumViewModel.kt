@@ -51,7 +51,7 @@ class UserLikeForumViewModel @Inject constructor() :
                     UserLikeForumPartialChange.Refresh.Success(
                         page = 1,
                         hasMore = it.hasMore == "1",
-                        forums = it.forumList.allForums(),
+                        forums = it.forumList.forumList,
                     )
                 }
                 .onStart { emit(UserLikeForumPartialChange.Refresh.Start) }
@@ -64,15 +64,11 @@ class UserLikeForumViewModel @Inject constructor() :
                     UserLikeForumPartialChange.LoadMore.Success(
                         page = page + 1,
                         hasMore = it.hasMore == "1",
-                        forums = it.forumList.allForums(),
+                        forums = it.forumList.forumList,
                     )
                 }
                 .onStart { emit(UserLikeForumPartialChange.LoadMore.Start) }
                 .catch { emit(UserLikeForumPartialChange.LoadMore.Failure(it)) }
-
-        /** 关注吧分散在 gconforum 与 non-gconforum 两个分组，合并后再去重。 */
-        private fun UserLikeForumBean.ForumListBean.allForums(): List<UserLikeForumBean.ForumBean> =
-            (forumList + gconForumList).distinctBy { it.id }
     }
 }
 

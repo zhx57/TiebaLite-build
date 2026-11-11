@@ -38,13 +38,6 @@ data class UserLikeForumBean(
         @SerialName("non-gconforum")
         @SerializedName("non-gconforum")
         val forumList: List<ForumBean> = persistentListOf(),
-
-        // 部分账号（如关注了官方吧/游戏吧）的数据会落在这个分组里，
-        // 只读 non-gconforum 会导致关注列表为空。
-        @JvmField
-        @SerialName("gconforum")
-        @SerializedName("gconforum")
-        val gconForumList: List<ForumBean> = persistentListOf(),
     )
 
     @Immutable
