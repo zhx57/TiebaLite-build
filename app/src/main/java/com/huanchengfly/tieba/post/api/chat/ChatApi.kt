@@ -346,10 +346,10 @@ object ChatApi {
     }
 
     /**
-     * 把群聊里的表情 id 转成渲染层认识的 (#表情名)。
+     * 把群聊里的表情 id 转成渲染层认识的表情标记。
      *
      * 群聊表情消息的正文形如 image_emoticon25，而 PbContentText 只识别
-     * (#滑稽) 这类名字；不转换会显示成不支持的消息。单条消息可能同时含
+     * #(滑稽) 这类标记；不转换会显示成不支持的消息。单条消息可能同时含
      * 文本与多个表情，这里逐个替换。
      */
     private fun replaceEmoticonIds(raw: String): String {
@@ -357,7 +357,7 @@ object ChatApi {
         return EMOTICON_ID_REGEX.replace(raw) { match ->
             val id = match.value
             val name = EmoticonManager.getEmoticonNameById(id)
-            if (name != null) "(#$name)" else id
+            if (name != null) "#($name)" else id
         }
     }
 
