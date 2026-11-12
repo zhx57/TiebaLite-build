@@ -48,16 +48,18 @@ fun PrivateChatListPage(
     viewModel: PrivateChatListViewModel = pageViewModel(),
 ) {
     val cookie = remember { AccountUtil.getCookie().orEmpty() }
-    LazyLoad(loaded = viewModel.initialized) {
-        viewModel.send(PrivateChatListUiIntent.Load(cookie))
-        viewModel.initialized = true
-    }
     val navigator = LocalNavigator.current
     val sessions by viewModel.uiState.collectPartialAsState(
         prop1 = PrivateChatListUiState::sessions,
         initial = persistentListOf(),
     )
     val lazyListState = rememberLazyListState()
+
+    LazyLoad(loaded = viewModel.initialized) {
+        viewModel.bindPushNotify(cookie)
+        viewModel.send(PrivateChatListUiIntent.Load(cookie))
+        viewModel.initialized = true
+    }
 
     // 页面存活期间定时静默刷新会话列表，收到新私信时也会即时刷新
     LaunchedEffect(cookie) {

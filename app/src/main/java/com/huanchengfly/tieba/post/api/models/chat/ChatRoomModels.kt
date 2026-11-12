@@ -25,6 +25,8 @@ data class ChatRoomMessage(
     val text: String,
     val msgTime: Long,
     val isSelf: Boolean,
+    /** 图片消息的图片地址，多图时有多项；非图片消息为空。 */
+    val images: List<String> = emptyList(),
     /** 本地发送状态；服务端返回的消息恒为 [SendState.SENT]。 */
     val sendState: SendState = SendState.SENT,
     /** 是否是本地插入的占位消息；服务端返回的消息恒为 false。 */

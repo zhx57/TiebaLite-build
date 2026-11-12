@@ -46,6 +46,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.NoAccounts
 import androidx.compose.material.icons.rounded.Verified
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
@@ -122,6 +123,7 @@ import com.huanchengfly.tieba.post.utils.StringUtil.getShortNumString
 import com.huanchengfly.tieba.post.utils.TiebaUtil
 import com.huanchengfly.tieba.post.ui.page.LocalNavigator
 import com.huanchengfly.tieba.post.ui.page.destinations.FollowListPageDestination
+import com.huanchengfly.tieba.post.ui.page.destinations.PrivateChatPageDestination
 import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.collections.immutable.ImmutableList
@@ -948,6 +950,28 @@ private fun UserProfileDetail(
                 )
             }
             Spacer(modifier = Modifier.weight(1f))
+            if (showBtn && !isSelf) {
+                // 私信入口：只有看别人资料时出现，与关注按钮并排
+                Button(
+                    onClick = {
+                        navigator.navigate(
+                            PrivateChatPageDestination(
+                                peerUid = user.get { id },
+                                peerName = user.get { name },
+                                peerPortrait = user.get { portrait },
+                            )
+                        )
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(),
+                    border = ButtonDefaults.outlinedBorder,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ChatBubbleOutline,
+                        contentDescription = stringResource(id = R.string.title_private_chat),
+                    )
+                }
+            }
             if (showBtn) {
                 Button(
                     onClick = onBtnClick,

@@ -2,6 +2,7 @@ package com.huanchengfly.tieba.post.ui.page.chat
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,19 +28,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.chat.SendState
+import com.huanchengfly.tieba.post.models.PhotoViewData
+import com.huanchengfly.tieba.post.models.PicItem
 import com.huanchengfly.tieba.post.ui.common.PbContentText
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.Avatar
+import com.huanchengfly.tieba.post.ui.widgets.compose.NetworkImage
 import com.huanchengfly.tieba.post.ui.widgets.compose.Sizes
 import com.huanchengfly.tieba.post.utils.DateTimeUtils
 import com.huanchengfly.tieba.post.utils.StringUtil
+import com.huanchengfly.tieba.post.utils.appPreferences
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 
 /**
@@ -58,11 +64,16 @@ fun ChatMessageRow(
     sendState: SendState,
     onRetryClick: () -> Unit,
     modifier: Modifier = Modifier,
+    images: List<String> = emptyList(),
     onAvatarClick: () -> Unit = {},
 ) {
     val bubbleColor = if (isSelf) ExtendedTheme.colors.primary else ExtendedTheme.colors.chip
     val textColor = if (isSelf) ExtendedTheme.colors.onPrimary else ExtendedTheme.colors.onChip
-    val displayText = text.ifBlank { stringResource(id = R.string.text_chat_unsupported_message) }
+    val hasImages = images.isNotEmpty()
+    val displayText = when {
+        hasImages -> text
+        else -> text.ifBlank { stringResource(id = R.string.text_chat_unsupported_message) }
+    }
 
     Row(
         modifier = modifier
@@ -109,16 +120,25 @@ fun ChatMessageRow(
                         onRetryClick = onRetryClick,
                     )
                 }
-                PbContentText(
-                    text = displayText,
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(bubbleColor)
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    color = textColor,
-                    style = MaterialTheme.typography.body2,
-                )
+                if (hasImages) {
+                    ChatMessageImages(
+                        images = images,
+                        isSelf = isSelf,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+                if (!hasImages || text.isNotBlank()) {
+                    PbContentText(
+                        text = displayText,
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(bubbleColor)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        color = textColor,
+                        style = MaterialTheme.typography.body2,
+                    )
+                }
             }
             if (msgTime > 0 && sendState == SendState.SENT) {
                 Text(
@@ -128,6 +148,56 @@ fun ChatMessageRow(
                     fontSize = 11.sp,
                 )
             }
+        }
+    }
+}
+
+/**
+ * 图片消息内容。
+ *
+ * 群聊图片地址是完整的 CDN 链接，直接交给 NetworkImage 加载；
+ * 传入 photoViewData 后点击即可全屏查看大图。
+ */
+@Composable
+private fun ChatMessageImages(
+    images: List<String>,
+    isSelf: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val radius = context.appPreferences.radius.dp
+    val picItems = remember(images) {
+        images.mapIndexed { index, url ->
+            PicItem(
+                picId = index.toString(),
+                picIndex = index,
+                url = url,
+                originUrl = url,
+                showOriginBtn = false,
+                originSize = 0,
+            )
+        }
+    }
+    val single = images.size == 1
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalAlignment = if (isSelf) Alignment.End else Alignment.Start,
+    ) {
+        images.forEachIndexed { index, url ->
+            NetworkImage(
+                imageUri = url,
+                contentDescription = stringResource(id = R.string.desc_image),
+                modifier = Modifier
+                    .focusable()
+                    .clip(RoundedCornerShape(radius))
+                    .size(if (single) 180.dp else 96.dp),
+                photoViewData = PhotoViewData(
+                    picItems = picItems,
+                    index = index,
+                ),
+                contentScale = ContentScale.Crop,
+            )
         }
     }
 }

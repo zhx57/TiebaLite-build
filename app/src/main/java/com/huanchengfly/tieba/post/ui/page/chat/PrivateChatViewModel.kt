@@ -73,7 +73,7 @@ class PrivateChatViewModel @Inject constructor() :
      */
     fun bindPeer(peerUid: Long) {
         activePeerUid = peerUid
-        obtainSocket().onPushNotify = {
+        obtainSocket().onPushNotify = { _ ->
             val uid = activePeerUid
             if (uid != 0L) {
                 send(PrivateChatUiIntent.Poll(uid))
@@ -120,12 +120,9 @@ class PrivateChatViewModel @Inject constructor() :
                 }
 
                 client.connect(AccountUtil.getCookie().orEmpty())
-                // 握手拿到的游标已是最新一条，先用增量拉；为空说明没有新消息，
-                // 再回退到从 0 拉取历史，避免进入会话后一片空白。
-                var incoming = client.fetchPrivateMessages()
-                if (incoming.isEmpty()) {
-                    incoming = client.fetchPrivateMessages(fromStart = true)
-                }
+                // 握手游标已是最新一条，单次请求拿不到历史；
+                // 从头按批拉取才能补齐整个会话，避免进入会话看到空白。
+                val incoming = client.fetchPrivateHistory()
                 val peerMessages = incoming
                     .filter { it.isSelf || it.peerUid == peerUid }
                     .map { if (it.isSelf) it.copy(peerUid = peerUid) else it }

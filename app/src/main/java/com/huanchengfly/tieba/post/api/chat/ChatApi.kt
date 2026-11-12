@@ -233,6 +233,10 @@ object ChatApi {
             rawContent?.takeUnless { it.startsWith("{") || it.startsWith("[") }.orEmpty()
         }
 
+        // 图片消息：content 的 text.content_type 为 1，图片地址放在 src 里，
+        // 多图时可能是数组或逗号拼接，这里统一收集。
+        val images = extractImages(content)
+
         // 是否为自己：优先用 baidu_uk 解密出的 uid 判定，其次比对 from_user
         val bdukUid = if (senderBduk.isNotBlank()) {
             runCatching { BlcpCrypto.bduk2UserId(senderBduk) }.getOrNull()
@@ -254,9 +258,74 @@ object ChatApi {
             senderPortrait = portrait,
             contentType = msgType,
             text = text,
+            images = images,
             msgTime = json.optLong("create_time") * 1000L,
             isSelf = isSelf,
         )
+    }
+
+    /**
+     * 提取图片消息的图片地址。
+     *
+     * 群聊图片消息的正文结构与文本消息相同，只是 text 层带
+     * content_type=1 且 src 指向图片；正文通常为空。这里逐层向内找 src/img，
+     * 兼容字符串、数组与逗号拼接三种形态，非图片消息返回空列表。
+     */
+    private fun extractImages(node: Any?): List<String> = when (node) {
+        null -> emptyList()
+
+        is JSONObject -> {
+            val body = node.opt("content_body")
+            val nested = if (body != null) extractImages(body) else emptyList()
+            if (nested.isNotEmpty()) {
+                nested
+            } else {
+                val direct = mutableListOf<String>()
+                collectImageUrls(node.opt("src"), direct)
+                collectImageUrls(node.opt("img"), direct)
+                collectImageUrls(node.opt("image"), direct)
+                if (direct.isEmpty()) extractImages(node.opt("text")) else direct
+            }
+        }
+
+        is JSONArray -> buildList {
+            for (i in 0 until node.length()) {
+                addAll(extractImages(node.opt(i)))
+            }
+        }
+
+        is String -> {
+            val trimmed = node.trim()
+            if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                runCatching { extractImages(JSONTokener(trimmed).nextValue()) }.getOrDefault(emptyList())
+            } else if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+                listOf(trimmed)
+            } else {
+                emptyList()
+            }
+        }
+
+        else -> emptyList()
+    }
+
+    private fun collectImageUrls(value: Any?, out: MutableList<String>) {
+        when (value) {
+            is String -> value.split(",")
+                .map { it.trim() }
+                .filter { it.startsWith("http://") || it.startsWith("https://") }
+                .forEach(out::add)
+
+            is JSONArray -> for (i in 0 until value.length()) {
+                collectImageUrls(value.opt(i), out)
+            }
+
+            is JSONObject -> {
+                collectImageUrls(value.opt("url"), out)
+                collectImageUrls(value.opt("src"), out)
+            }
+
+            else -> Unit
+        }
     }
 
     /**

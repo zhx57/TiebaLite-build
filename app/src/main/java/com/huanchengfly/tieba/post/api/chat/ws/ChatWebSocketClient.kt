@@ -17,7 +17,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okio.ByteString.Companion.toByteString
+import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -144,6 +146,13 @@ class ChatWebSocketClient {
             }
             groupMsgIds[gid] = group.lastMsgId ?: 0L
         }
+        // 兜底：部分账号的私信组 groupType 不是 6（或字段缺失），
+        // 若没拿到私信组则取第一个非 0 的组，避免私信列表永远为空。
+        if (privateGroupId == 0L) {
+            privateGroupId = data.groupInfo.orEmpty()
+                .mapNotNull { it.groupId }
+                .firstOrNull { it != 0L } ?: 0L
+        }
     }
 
     /**
@@ -155,12 +164,65 @@ class ChatWebSocketClient {
     suspend fun fetchPrivateMessages(fromStart: Boolean = false): List<ChatWsMessage> {
         if (privateGroupId == 0L) return emptyList()
         val lastMsgId = if (fromStart) 0L else (groupMsgIds[privateGroupId] ?: 0L)
+        val result = fetchPrivateMessages(privateGroupId, lastMsgId)
+        return result.sortedBy { it.msgTime }
+    }
+
+    /**
+     * 从最早一条开始按批拉取历史，直到追上握手时记录的最新游标。
+     *
+     * 单次请求只返回一小批（约 60 条）且是从 lastMsgId 往后取，
+     * 只请求一次 lastMsgId=0 拿到的是很久以前的消息，会话列表里看不到最近联系人。
+     * 这里逐批推进游标，最多 [maxPages] 批，兼顾完整性与耗时。
+     */
+    suspend fun fetchPrivateHistory(maxPages: Int = 10): List<ChatWsMessage> {
+        if (privateGroupId == 0L) return emptyList()
+        val target = groupMsgIds[privateGroupId] ?: 0L
+        val merged = LinkedHashMap<Long, ChatWsMessage>()
+        var cursor = 0L
+        repeat(maxPages.coerceAtLeast(1)) {
+            val batch = fetchPrivateMessages(privateGroupId, cursor)
+            if (batch.isEmpty()) return@repeat
+            var maxMsgId = cursor
+            batch.forEach { message ->
+                merged[message.msgId] = message
+                if (message.msgId > maxMsgId) maxMsgId = message.msgId
+            }
+            // 没有推进说明服务端反复返回同一批，避免死循环
+            if (maxMsgId <= cursor) return@repeat
+            cursor = maxMsgId
+            if (target > 0L && cursor >= target) return@repeat
+        }
+        return merged.values.sortedBy { it.msgTime }
+    }
+
+    /**
+     * 从指定游标拉取私信增量，供后台通知统计未读使用。
+     *
+     * 与 [fetchPrivateMessages] 不同，这里不回退历史，只返回 [cursor] 之后的新消息；
+     * cursor 为 0 时调用方应先通过 [privateLastMsgId] 取当前最新游标建基线。
+     */
+    suspend fun fetchPrivateMessagesSince(cursor: Long): List<ChatWsMessage> {
+        if (privateGroupId == 0L) return emptyList()
+        return fetchPrivateMessages(privateGroupId, cursor)
+    }
+
+    /** 私信消息组当前已知的最新游标，未握手时为 0。 */
+    val privateLastMsgId: Long
+        get() = groupMsgIds[privateGroupId] ?: 0L
+
+    /**
+     * 用指定游标拉一批私信消息，返回结果不做时间排序。
+     *
+     * gettype 固定为 1（增量游标模式），游标为 0 时服务端从最早一条开始返回。
+     */
+    private suspend fun fetchPrivateMessages(groupId: Long, lastMsgId: Long): List<ChatWsMessage> {
         val request = GetGroupMsgReqIdl(
             cuid = "${CuidUtils.getNewCuid()}|com.baidu.tieba_mini${ChatWsConstants.CHAT_VERSION}",
             data_ = GetGroupMsgReqIdl.DataReq(
                 groupMids = listOf(
                     GetGroupMsgReqIdl.DataReq.GroupLastId(
-                        groupId = privateGroupId,
+                        groupId = groupId,
                         lastMsgId = lastMsgId,
                     )
                 ),
@@ -181,21 +243,56 @@ class ChatWebSocketClient {
             group.msgList.orEmpty().forEach { msg ->
                 val msgId = msg.msgId ?: 0L
                 val fromUid = msg.userInfo?.userId ?: 0L
+                val msgType = msg.msgType ?: 0
+                // 已读回执等系统消息不是聊天内容，留在列表里会显示成 JSON
+                if (msgType == ChatWsConstants.MSG_TYPE_READED || msgType == ChatWsConstants.MSG_TYPE_MISC) {
+                    return@forEach
+                }
                 result += ChatWsMessage(
                     msgId = msgId,
+                    msgType = msgType,
                     peerUid = fromUid,
                     peerName = msg.userInfo?.userName.orEmpty(),
                     peerPortrait = msg.userInfo?.portrait.orEmpty(),
-                    content = msg.content.orEmpty(),
+                    content = normalizePrivateContent(msg.content.orEmpty(), msgType),
                     msgTime = (msg.createTime ?: 0) * 1000L,
                     isSelf = fromUid == selfUid,
                 )
-                if (msgId > (groupMsgIds[privateGroupId] ?: 0L)) {
-                    groupMsgIds[privateGroupId] = msgId
+                if (msgId > (groupMsgIds[groupId] ?: 0L)) {
+                    groupMsgIds[groupId] = msgId
                 }
             }
         }
-        return result.sortedBy { it.msgTime }
+        return result
+    }
+
+    /**
+     * 清洗私信正文。
+     *
+     * 服务端把部分非文本消息（撤回提示、系统提示等）也塞进 content，
+     * 内容是 JSON。这里只保留可读文本，避免会话列表出现大段 JSON。
+     */
+    private fun normalizePrivateContent(raw: String, msgType: Int): String {
+        val trimmed = raw.trim()
+        if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return trimmed
+        return runCatching {
+            val node = JSONTokener(trimmed).nextValue()
+            extractPrivateText(node).ifBlank { "" }
+        }.getOrDefault("")
+    }
+
+    private fun extractPrivateText(node: Any?): String = when (node) {
+        null -> ""
+        is String -> node.trim()
+        is JSONObject -> listOf("text", "content", "msg", "toast")
+            .asSequence()
+            .map { extractPrivateText(node.opt(it)) }
+            .firstOrNull { it.isNotBlank() }
+            .orEmpty()
+        is JSONArray -> buildString {
+            for (i in 0 until node.length()) append(extractPrivateText(node.opt(i)))
+        }
+        else -> ""
     }
 
     /**

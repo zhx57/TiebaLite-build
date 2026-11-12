@@ -60,6 +60,18 @@ class PrivateChatListViewModel @Inject constructor() :
     private fun obtainSocket(): ChatWebSocketClient =
         socket ?: ChatWebSocketClient().also { socket = it }
 
+    /** 页面存活期间收到服务端推送就立即刷新，轮询只作为兜底。 */
+    private var pollCookie: String = ""
+
+    fun bindPushNotify(cookie: String) {
+        pollCookie = cookie
+        obtainSocket().onPushNotify = { _ ->
+            if (pollCookie.isNotEmpty()) {
+                send(PrivateChatListUiIntent.Poll(pollCookie))
+            }
+        }
+    }
+
     private class PrivateChatListPartialChangeProducer(
         private val socketProvider: () -> ChatWebSocketClient?,
     ) : PartialChangeProducer<PrivateChatListUiIntent, PrivateChatListPartialChange, PrivateChatListUiState> {
@@ -94,11 +106,9 @@ class PrivateChatListViewModel @Inject constructor() :
                 emit(PrivateChatListPartialChange.Load.Start)
                 val client = socketProvider() ?: throw IllegalStateException("chat socket unavailable")
                 client.connect(cookie)
-                // 握手游标已是最新，先增量；为空则从 0 拉历史，否则列表永远是空的
-                var messages = client.fetchPrivateMessages()
-                if (messages.isEmpty()) {
-                    messages = client.fetchPrivateMessages(fromStart = true)
-                }
+                // 握手游标已是最新，直接增量只会拿到空列表；
+                // 从头按批拉历史，才能看到所有历史会话与最近联系人。
+                val messages = client.fetchPrivateHistory()
                 emit(
                     PrivateChatListPartialChange.Load.Success(messages.toSessions())
                 )

@@ -264,6 +264,7 @@ fun ChatRoomPage(
                             avatarUrl = message.senderPortrait,
                             msgTime = message.msgTime,
                             sendState = message.sendState,
+                            images = message.images,
                             onRetryClick = {
                                 resendTarget = message
                                 resendDialogState.show()
