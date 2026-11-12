@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package tieba.chat;
+
+option java_package = "com.huanchengfly.tieba.post.api.models.protos.chat";
+
+message CommitPersonalMsgReqIdl {
+  message DataReq {
+    int64 toUid = 2;
+    int32 msgType = 3;
+    string content = 4;
+    int64 recordId = 6;
+  }
+
+  DataReq data = 1;
+}

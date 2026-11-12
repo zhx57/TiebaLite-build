@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package tieba.chat;
+
+option java_package = "com.huanchengfly.tieba.post.api.models.protos.chat";
+
+message PushNotifyResIdl {
+  message PusherMsg {
+    message PusherMsgInfo {
+      int64 groupId = 1;
+      int64 msgId = 2;
+      int32 type = 4;
+      string et = 6;
+      int32 groupType = 7;
+    }
+
+    PusherMsgInfo data = 2;
+  }
+
+  repeated PusherMsg multiMsg = 2;
+}
