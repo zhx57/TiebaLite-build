@@ -433,4 +433,6 @@ data class ChatWsMessage(
     val sendState: SendState = SendState.SENT,
     /** 是否是本地插入的占位消息；服务端返回的消息恒为 false。 */
     val isLocal: Boolean = false,
+    /** 消息类型，见 [ChatWsConstants]；0 表示旧数据/未知。 */
+    val msgType: Int = 0,
 )
