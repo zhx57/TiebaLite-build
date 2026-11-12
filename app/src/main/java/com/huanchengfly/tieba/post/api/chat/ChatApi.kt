@@ -5,6 +5,7 @@ import com.huanchengfly.tieba.post.api.models.chat.ChatRoom
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.CuidUtils
+import com.huanchengfly.tieba.post.utils.EmoticonManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -228,14 +229,17 @@ object ChatApi {
         }
 
         val rawContent = (json.opt("content") as? String)?.trim()
-        val text = extractText(content).trim().ifBlank {
+        val rawText = extractText(content).trim().ifBlank {
             // content 本身不是 JSON 时按纯文本处理，但仍要排除 JSON 原文
             rawContent?.takeUnless { it.startsWith("{") || it.startsWith("[") }.orEmpty()
         }
 
-        // 图片消息：content 的 text.content_type 为 1，图片地址放在 src 里，
-        // 多图时可能是数组或逗号拼接，这里统一收集。
+        // 图片消息：图片地址在 content_body 的 src 上，多图时可能是数组或逗号拼接。
         val images = extractImages(content)
+
+        // 表情消息：content_body 的 text 是 image_emoticon25 这类表情 id，
+        // 需要转成渲染层认识的 (#表情名)，否则正文为空会被显示成不支持的消息。
+        val text = replaceEmoticonIds(rawText)
 
         // 是否为自己：优先用 baidu_uk 解密出的 uid 判定，其次比对 from_user
         val bdukUid = if (senderBduk.isNotBlank()) {
@@ -267,24 +271,22 @@ object ChatApi {
     /**
      * 提取图片消息的图片地址。
      *
-     * 群聊图片消息的正文结构与文本消息相同，只是 text 层带
-     * content_type=1 且 src 指向图片；正文通常为空。这里逐层向内找 src/img，
-     * 兼容字符串、数组与逗号拼接三种形态，非图片消息返回空列表。
+     * 群聊图片消息的 content_body 里带 src（可能是完整链接或相对路径），
+     * 多图时可能是数组或逗号拼接。这里逐层向内找 src/img，非图片消息返回空列表。
      */
     private fun extractImages(node: Any?): List<String> = when (node) {
         null -> emptyList()
 
         is JSONObject -> {
-            val body = node.opt("content_body")
-            val nested = if (body != null) extractImages(body) else emptyList()
-            if (nested.isNotEmpty()) {
-                nested
+            val direct = mutableListOf<String>()
+            collectImageUrls(node.opt("src"), direct)
+            collectImageUrls(node.opt("img"), direct)
+            collectImageUrls(node.opt("image"), direct)
+            if (direct.isNotEmpty()) {
+                direct
             } else {
-                val direct = mutableListOf<String>()
-                collectImageUrls(node.opt("src"), direct)
-                collectImageUrls(node.opt("img"), direct)
-                collectImageUrls(node.opt("image"), direct)
-                if (direct.isEmpty()) extractImages(node.opt("text")) else direct
+                val body = node.opt("content_body")
+                extractImages(body).ifEmpty { extractImages(node.opt("text")) }
             }
         }
 
@@ -296,23 +298,38 @@ object ChatApi {
 
         is String -> {
             val trimmed = node.trim()
-            if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-                runCatching { extractImages(JSONTokener(trimmed).nextValue()) }.getOrDefault(emptyList())
-            } else if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-                listOf(trimmed)
-            } else {
-                emptyList()
+            when {
+                trimmed.startsWith("{") || trimmed.startsWith("[") ->
+                    runCatching { extractImages(JSONTokener(trimmed).nextValue()) }
+                        .getOrDefault(emptyList())
+
+                else -> normalizeImageUrl(trimmed)?.let(::listOf).orEmpty()
             }
         }
 
         else -> emptyList()
     }
 
+    /**
+     * 规范化图片地址。
+     *
+     * 部分群聊图片只返回 /c/p/xxx 这样的相对路径，需要补上贴吧图床域名；
+     * 完全不相关的字符串直接丢弃，避免把表情 id 误当图片。
+     */
+    private fun normalizeImageUrl(raw: String): String? {
+        val url = raw.trim()
+        return when {
+            url.startsWith("http://") || url.startsWith("https://") -> url
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("/") -> "https://tiebac.baidu.com$url"
+            else -> null
+        }
+    }
+
     private fun collectImageUrls(value: Any?, out: MutableList<String>) {
         when (value) {
             is String -> value.split(",")
-                .map { it.trim() }
-                .filter { it.startsWith("http://") || it.startsWith("https://") }
+                .mapNotNull { normalizeImageUrl(it) }
                 .forEach(out::add)
 
             is JSONArray -> for (i in 0 until value.length()) {
@@ -327,6 +344,24 @@ object ChatApi {
             else -> Unit
         }
     }
+
+    /**
+     * 把群聊里的表情 id 转成渲染层认识的 (#表情名)。
+     *
+     * 群聊表情消息的正文形如 image_emoticon25，而 PbContentText 只识别
+     * (#滑稽) 这类名字；不转换会显示成不支持的消息。单条消息可能同时含
+     * 文本与多个表情，这里逐个替换。
+     */
+    private fun replaceEmoticonIds(raw: String): String {
+        if (raw.isBlank() || !raw.contains("image_emoticon")) return raw
+        return EMOTICON_ID_REGEX.replace(raw) { match ->
+            val id = match.value
+            val name = EmoticonManager.getEmoticonNameById(id)
+            if (name != null) "(#$name)" else id
+        }
+    }
+
+    private val EMOTICON_ID_REGEX = Regex("image_emoticon\\d+")
 
     /**
      * 解析正文，与 aiotieba 的 ChatroomMsg.from_json 保持一致。

@@ -231,7 +231,7 @@ object EmoticonManager {
         return emoticonMapping[name]
     }
 
-    private fun getEmoticonNameById(id: String): String? {
+    fun getEmoticonNameById(id: String): String? {
         return emoticonMapping.firstNotNullOfOrNull { (name, emoticonId) ->
             if (emoticonId == id) {
                 name

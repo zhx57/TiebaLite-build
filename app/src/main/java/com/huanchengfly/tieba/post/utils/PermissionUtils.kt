@@ -422,6 +422,8 @@ class ShowPermissionTipInterceptor(val permissions: List<String>, val descriptio
                 PermissionUtils.PermissionData(permissions, this.description)
             ).apply { show() }
         }, 300)
+        // 必须显式转派，否则系统权限弹窗永远不会出现，只剩我们自己的提示框
+        dispatchPermissionRequest(activity, allPermissions, factory, description, callback)
     }
 
     override fun onRequestPermissionEnd(
@@ -434,6 +436,9 @@ class ShowPermissionTipInterceptor(val permissions: List<String>, val descriptio
     ) {
         mRequestFlag = false
         runCatching { tipDialog?.dismiss() }
+        tipDialog = null
+        // 手动转派后需要自己把结果回传给 XXPermissions 的回调
+        callback?.onResult(grantedPermissions, deniedPermissions)
     }
 }
 
