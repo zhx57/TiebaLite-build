@@ -696,7 +696,7 @@ private fun UserProfileContentExpanded(
                                         it.get { thread_num }.getShortNumString()
                                     )
                                 },
-                                content = { user, expanded, _, _ ->
+                                content = { user, expanded, _, _, _ ->
                                     UserPostPage(
                                         uid = user.get { id },
                                         isThread = true,
@@ -713,7 +713,7 @@ private fun UserProfileContentExpanded(
                                         it.get { post_num }.getShortNumString()
                                     )
                                 },
-                                content = { user, expanded, _, _ ->
+                                content = { user, expanded, _, _, _ ->
                                     UserPostPage(
                                         uid = user.get { id },
                                         isThread = false,
@@ -730,7 +730,7 @@ private fun UserProfileContentExpanded(
                                         it.get { my_like_num }.toString()
                                     )
                                 },
-                                content = { user, expanded, _, _ ->
+                                content = { user, expanded, _, _, _ ->
                                     UserLikeForumPage(
                                         uid = user.get { id },
                                         fluid = expanded,
