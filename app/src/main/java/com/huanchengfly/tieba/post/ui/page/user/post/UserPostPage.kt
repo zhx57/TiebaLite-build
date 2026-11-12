@@ -7,11 +7,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -34,7 +32,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEach
 import com.airbnb.lottie.compose.LottieAnimation
@@ -81,7 +78,6 @@ fun UserPostPage(
     header: (@Composable () -> Unit)? = null,
     tabs: (@Composable () -> Unit)? = null,
     listState: LazyListState? = null,
-    topSpacerHeight: Dp = 0.dp,
     viewModel: UserPostViewModel = pageViewModel(key = if (isThread) "user_thread_$uid" else "user_post_$uid"),
 ) {
     val navigator = LocalNavigator.current
@@ -143,9 +139,7 @@ fun UserPostPage(
         },
         loadingScreen = {
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = topSpacerHeight),
+                modifier = Modifier.fillMaxSize(),
             ) {
                 header?.invoke()
                 Box(
@@ -166,7 +160,6 @@ fun UserPostPage(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(top = topSpacerHeight)
                     .padding(vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -244,7 +237,6 @@ fun UserPostPage(
                     data = posts,
                     fluid = fluid,
                     lazyListState = lazyListState,
-                    topSpacerHeight = topSpacerHeight,
                     header = header,
                     tabs = tabs,
                     onClickItem = { threadId, postId, isSubPost ->
@@ -317,7 +309,6 @@ private fun UserPostList(
     data: ImmutableList<PostListItemData>,
     fluid: Boolean = false,
     lazyListState: LazyListState = rememberLazyListState(),
-    topSpacerHeight: Dp = 0.dp,
     header: (@Composable () -> Unit)? = null,
     tabs: (@Composable () -> Unit)? = null,
     onClickItem: (threadId: Long, postId: Long?, isSubPost: Boolean) -> Unit = { _, _, _ -> },
@@ -328,19 +319,13 @@ private fun UserPostList(
     onClickOriginThread: (threadId: Long) -> Unit = {},
 ) {
     MyLazyColumn(state = lazyListState) {
-        // 首项占位：为覆盖在列表之上的资料头部与标签栏腾出空间。
-        // 用真实 item 而非 contentPadding，滚动距离才能和头部折叠量一一对应。
-        if (topSpacerHeight > 0.dp) {
-            item(key = "profile_top_spacer") {
-                Spacer(modifier = Modifier.height(topSpacerHeight))
-            }
-        }
-        // 头部与标签栏作为列表的前两项，让整个主页成为一条连续滚动的内容
+        // 头部是列表的真实首项，跟着列表一起滚走，几何上不会多出空白
         if (header != null) {
             item(key = "profile_header") { header() }
         }
+        // 标签栏吸顶：滚过头部后固定在顶部，任何内容状态都不会消失
         if (tabs != null) {
-            item(key = "profile_tabs") { tabs() }
+            stickyHeader(key = "profile_tabs") { tabs() }
         }
         items(
             items = data,

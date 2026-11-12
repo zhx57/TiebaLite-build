@@ -7,7 +7,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,25 +54,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.fastForEachIndexed
@@ -499,16 +489,6 @@ private fun UserProfileContentNormal(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val density = LocalDensity.current
-
-    var headerHeight by rememberSaveable {
-        mutableFloatStateOf(
-            with(density) {
-                (96.dp + 16.dp).toPx()
-            }
-        )
-    }
-    var tabHeight by rememberSaveable { mutableFloatStateOf(0f) }
 
     val pages = remember {
         listOfNotNull(
@@ -520,13 +500,14 @@ private fun UserProfileContentNormal(
                         it.get { thread_num }.getShortNumString()
                     )
                 },
-                content = { user, fluid, listState, topSpacerHeight ->
+                content = { user, fluid, listState, header, tabs ->
                     UserPostPage(
                         uid = user.get { id },
                         isThread = true,
                         fluid = fluid,
                         listState = listState,
-                        topSpacerHeight = topSpacerHeight,
+                        header = header,
+                        tabs = tabs,
                     )
                 }
             ),
@@ -538,13 +519,14 @@ private fun UserProfileContentNormal(
                         it.get { post_num }.getShortNumString()
                     )
                 },
-                content = { user, fluid, listState, topSpacerHeight ->
+                content = { user, fluid, listState, header, tabs ->
                     UserPostPage(
                         uid = user.get { id },
                         isThread = false,
                         fluid = fluid,
                         listState = listState,
-                        topSpacerHeight = topSpacerHeight,
+                        header = header,
+                        tabs = tabs,
                     )
                 }
             ).takeIf { isSelf },
@@ -556,12 +538,13 @@ private fun UserProfileContentNormal(
                         it.get { my_like_num }.toString()
                     )
                 },
-                content = { user, fluid, listState, topSpacerHeight ->
+                content = { user, fluid, listState, header, tabs ->
                     UserLikeForumPage(
                         uid = user.get { id },
                         fluid = fluid,
                         listState = listState,
-                        topSpacerHeight = topSpacerHeight,
+                        header = header,
+                        tabs = tabs,
                     )
                 }
             ),
@@ -570,32 +553,39 @@ private fun UserProfileContentNormal(
 
     val pagerState = rememberPagerState { pages.size }
 
-    // 每个标签页各自持有一个列表状态。头部折叠量直接由当前页列表的滚动距离推导，
-    // 不拦截任何滚动手势：列表滚多少，头部就让出多少。
+    // 每个标签页各自持有一个列表状态，切换标签时各自的滚动位置互不干扰
     val listStates = remember(pages.size) { List(pages.size) { LazyListState() } }
     val currentListState = listStates[pagerState.currentPage.coerceIn(listStates.indices)]
 
-    val collapsePx = remember(currentListState) {
-        derivedStateOf {
-            if (currentListState.firstVisibleItemIndex > 0) {
-                headerHeight
-            } else {
-                currentListState.firstVisibleItemScrollOffset.toFloat().coerceAtMost(headerHeight)
-            }
-        }
-    }
-    val showToolbarTitle by remember(collapsePx) {
-        derivedStateOf { collapsePx.value >= headerHeight - 1f }
+    // 头部滚出视口后，标题栏才显示头像和昵称
+    val showToolbarTitle by remember(currentListState) {
+        derivedStateOf { currentListState.firstVisibleItemIndex > 0 }
     }
 
-    // 头部与标签栏是覆盖层，落在它们上面的拖动默认到不了下面的列表。
-    // 这里把垂直拖动直接转发给当前页的列表，避免顶部出现滑不动的死区。
-    val currentListStateRef = rememberUpdatedState(currentListState)
-    val forwardDragToCurrentList = Modifier.pointerInput(Unit) {
-        detectVerticalDragGestures { change, dragAmount ->
-            change.consume()
-            currentListStateRef.value.dispatchRawDelta(-dragAmount)
-        }
+    val profileHeader: @Composable () -> Unit = {
+        UserProfileDetail(
+            user = user,
+            modifier = Modifier
+                .padding(horizontal = 16.dp)
+                .padding(top = 8.dp, bottom = 8.dp),
+            showBtn = showActionBtn,
+            isSelf = isSelf,
+            onBtnClick = {
+                if (disableButton || !showActionBtn) {
+                    return@UserProfileDetail
+                }
+                if (isSelf) {
+                    context.goToActivity<EditProfileActivity>()
+                } else if (user.get { has_concerned } == 0) {
+                    onFollow()
+                } else {
+                    onUnfollow()
+                }
+            },
+            onCopyIdClick = {
+                TiebaUtil.copyText(context, user.get { id }.toString())
+            }
+        )
     }
 
     MyScaffold(
@@ -626,96 +616,31 @@ private fun UserProfileContentNormal(
             }
         ) {
             ProvideContentColor(color = ExtendedTheme.colors.text) {
-                // 分页铺满整页，头部与标签栏作为覆盖层。
-                // 列表自己持有真实的顶部内边距并负责滚动，头部按列表滚动量同步位移，
-                // 不再拦截滚动手势，避免出现滑不动的观感。
-                Box(
+                // 头部与标签栏都作为每个分页列表的真实项：
+                // 头部随列表滚走，标签栏 stickyHeader 吸顶，
+                // 几何上不存在覆盖层与占位错位导致的空白。
+                LazyLoadHorizontalPager(
+                    state = pagerState,
+                    key = { pages[it].id },
                     modifier = Modifier
                         .padding(paddingValues)
-                        .fillMaxSize()
-                        .clipToBounds()
-                ) {
-                    val headerTabSpacer = with(density) { (headerHeight + tabHeight).toDp() }
-
-                    LazyLoadHorizontalPager(
-                        state = pagerState,
-                        key = { pages[it].id },
-                        modifier = Modifier.fillMaxSize(),
-                    ) { index ->
-                        pages[index].content(user, false, listStates[index], headerTabSpacer)
-                    }
-
-                    // 头部覆盖层：被列表滚动推着上移，超出顶部的部分裁掉。
-                    // 高度取剩余可见量，收完后不再拦截下方列表的点击。
-                    val headerVisiblePx by remember(collapsePx) {
-                        derivedStateOf {
-                            (headerHeight - collapsePx.value).coerceAtLeast(0f)
-                        }
-                    }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(with(density) { headerVisiblePx.toDp() })
-                            .clipToBounds()
-                            .then(forwardDragToCurrentList)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                // 无界测量：外层按列表遮盖的高度裁剪，这里仍要拿到头部完整高度
-                                .wrapContentHeight(
-                                    align = Alignment.Top,
-                                    unbounded = true
-                                )
-                                .offset { IntOffset(0, -collapsePx.value.toInt()) }
-                                .onSizeChanged { headerHeight = it.height.toFloat() }
-                        ) {
-                            UserProfileDetail(
+                        .fillMaxSize(),
+                ) { index ->
+                    pages[index].content(
+                        user,
+                        false,
+                        listStates[index],
+                        profileHeader,
+                        {
+                            UserProfileTabRow(
                                 user = user,
+                                pages = pages,
+                                pagerState = pagerState,
                                 modifier = Modifier
-                                    .padding(16.dp)
-                                    .padding(top = 8.dp),
-                                showBtn = showActionBtn,
-                                isSelf = isSelf,
-                                onBtnClick = {
-                                    if (disableButton || !showActionBtn) {
-                                        return@UserProfileDetail
-                                    }
-                                    if (isSelf) {
-                                        context.goToActivity<EditProfileActivity>()
-                                    } else if (user.get { has_concerned } == 0) {
-                                        onFollow()
-                                    } else {
-                                        onUnfollow()
-                                    }
-                                },
-                                onCopyIdClick = {
-                                    TiebaUtil.copyText(
-                                        context,
-                                        user.get { id }.toString()
-                                    )
-                                }
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colors.background)
                             )
-                        }
-                    }
-
-                    // 标签栏覆盖层：跟着头部一起上移，头部收完后吸附在顶部。
-                    // 放在分页外面，任何一页为空或报错时它都不会消失。
-                    val tabOffsetPx by remember(collapsePx) {
-                        derivedStateOf {
-                            (headerHeight - collapsePx.value).coerceAtLeast(0f)
-                        }
-                    }
-                    UserProfileTabRow(
-                        user = user,
-                        pages = pages,
-                        pagerState = pagerState,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colors.background)
-                            .offset { IntOffset(0, tabOffsetPx.toInt()) }
-                            .onSizeChanged { tabHeight = it.height.toFloat() }
-                            .then(forwardDragToCurrentList)
+                        },
                     )
                 }
             }
@@ -859,7 +784,13 @@ private fun UserProfileContentExpanded(
                             key = { pages[it].id },
                             modifier = Modifier.weight(1f)
                         ) { index ->
-                            pages[index].content(user, true, pageListStates[index], 0.dp)
+                            pages[index].content(
+                                user,
+                                true,
+                                pageListStates[index],
+                                {},
+                                {},
+                            )
                         }
                     }
                 }
@@ -876,7 +807,8 @@ data class UserProfilePageData(
         user: ImmutableHolder<User>,
         fluid: Boolean,
         listState: LazyListState,
-        topSpacerHeight: Dp,
+        header: @Composable () -> Unit,
+        tabs: @Composable () -> Unit,
     ) -> Unit,
 )
 

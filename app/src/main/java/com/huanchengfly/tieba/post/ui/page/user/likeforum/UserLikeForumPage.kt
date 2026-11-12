@@ -6,10 +6,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -28,7 +26,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.UserLikeForumBean
@@ -61,7 +58,6 @@ fun UserLikeForumPage(
     header: (@Composable () -> Unit)? = null,
     tabs: (@Composable () -> Unit)? = null,
     listState: LazyListState? = null,
-    topSpacerHeight: Dp = 0.dp,
     viewModel: UserLikeForumViewModel = pageViewModel(),
 ) {
     val navigator = LocalNavigator.current
@@ -118,9 +114,7 @@ fun UserLikeForumPage(
         },
         loadingScreen = {
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = topSpacerHeight)
+                modifier = Modifier.fillMaxSize()
             ) {
                 header?.invoke()
                 Box(
@@ -137,7 +131,6 @@ fun UserLikeForumPage(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(top = topSpacerHeight)
                     .padding(vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -173,7 +166,6 @@ fun UserLikeForumPage(
                 UserLikeForumList(
                     data = forums,
                     fluid = fluid,
-                    topSpacerHeight = topSpacerHeight,
                     onClickForum = { forumBean ->
                         forumBean.name?.let {
                             navigator.navigate(ForumPageDestination(it))
@@ -202,24 +194,18 @@ private fun UserLikeForumList(
     data: ImmutableList<UserLikeForumBean.ForumBean>,
     onClickForum: (UserLikeForumBean.ForumBean) -> Unit,
     fluid: Boolean = false,
-    topSpacerHeight: Dp = 0.dp,
     header: (@Composable () -> Unit)? = null,
     tabs: (@Composable () -> Unit)? = null,
     lazyListState: LazyListState = rememberLazyListState(),
 ) {
     MyLazyColumn(state = lazyListState) {
-        // 首项占位：为覆盖在列表之上的资料头部与标签栏腾出空间
-        if (topSpacerHeight > 0.dp) {
-            item(key = "profile_top_spacer") {
-                Spacer(modifier = Modifier.height(topSpacerHeight))
-            }
-        }
-        // 与帖子列表一致：头部和标签栏作为前两项，整页连续滚动
+        // 头部是列表的真实首项，跟着列表一起滚走，几何上不会多出空白
         if (header != null) {
             item(key = "profile_header") { header() }
         }
+        // 标签栏吸顶：滚过头部后固定在顶部，任何内容状态都不会消失
         if (tabs != null) {
-            item(key = "profile_tabs") { tabs() }
+            stickyHeader(key = "profile_tabs") { tabs() }
         }
         items(
             items = data,
