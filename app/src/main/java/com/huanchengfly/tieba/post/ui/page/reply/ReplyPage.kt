@@ -318,6 +318,14 @@ internal fun ReplyPageContent(
     }
 
     var waitUploadSuccessToSend by remember { mutableStateOf(false) }
+    // 楼中楼回复需要带上被回复人的引用前缀，带图和不带图两条路径都要用
+    fun buildReplyContent(text: String): String =
+        if (subPostId == null || subPostId == 0L) {
+            text
+        } else {
+            "回复 #(reply, ${replyUserPortrait}, ${replyUserName}) :$text"
+        }
+
     viewModel.onEvent<ReplyUiEvent.UploadSuccess> {
         if (waitUploadSuccessToSend) {
             waitUploadSuccessToSend = false
@@ -327,7 +335,7 @@ internal fun ReplyPageContent(
                 }
             viewModel.send(
                 ReplyUiIntent.Send(
-                    "${getText()}\n$imageContent",
+                    buildReplyContent("${getText()}\n$imageContent"),
                     forumId,
                     forumName,
                     threadId,
@@ -602,32 +610,30 @@ internal fun ReplyPageContent(
                     modifier = Modifier.size(24.dp)
                 )
             }
-            if (postId == null || postId == 0L) {
-                IconButton(
-                    onClick = { switchToPanel(IMAGE) },
-                    modifier = Modifier.size(24.dp)
-                ) {
-                    BadgedBox(
-                        badge = {
-                            if (selectedImageList.isNotEmpty()) {
-                                Badge(
-                                    backgroundColor = ExtendedTheme.colors.accent,
-                                    contentColor = ExtendedTheme.colors.background,
-                                ) {
-                                    Text(
-                                        text = "${selectedImageList.size}",
-                                        style = MaterialTheme.typography.caption
-                                    )
-                                }
+            IconButton(
+                onClick = { switchToPanel(IMAGE) },
+                modifier = Modifier.size(24.dp)
+            ) {
+                BadgedBox(
+                    badge = {
+                        if (selectedImageList.isNotEmpty()) {
+                            Badge(
+                                backgroundColor = ExtendedTheme.colors.accent,
+                                contentColor = ExtendedTheme.colors.background,
+                            ) {
+                                Text(
+                                    text = "${selectedImageList.size}",
+                                    style = MaterialTheme.typography.caption
+                                )
                             }
                         }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.InsertPhoto,
-                            contentDescription = stringResource(id = R.string.insert_photo),
-                            modifier = Modifier.size(24.dp)
-                        )
                     }
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.InsertPhoto,
+                        contentDescription = stringResource(id = R.string.insert_photo),
+                        modifier = Modifier.size(24.dp)
+                    )
                 }
             }
 //            IconButton(
@@ -650,11 +656,7 @@ internal fun ReplyPageContent(
             } else {
                 IconButton(
                     onClick = {
-                        val replyContent = if (subPostId == null || subPostId == 0L) {
-                            getText()
-                        } else {
-                            "回复 #(reply, ${replyUserPortrait}, ${replyUserName}) :${getText()}"
-                        }
+                        val replyContent = buildReplyContent(getText())
                         if (selectedImageList.isEmpty()) {
                             viewModel.send(
                                 ReplyUiIntent.Send(
