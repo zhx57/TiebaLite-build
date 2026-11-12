@@ -1,27 +1,43 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.AlertDialog
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
+import androidx.compose.material.TextButton
+import androidx.compose.material.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.huanchengfly.tieba.post.R
+import com.huanchengfly.tieba.post.api.models.chat.ChatMention
+import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.pageViewModel
@@ -90,10 +106,64 @@ fun ChatRoomPage(
         initial = persistentListOf(),
     )
 
+    val robots by viewModel.uiState.collectPartialAsState(
+        prop1 = ChatRoomUiState::robots, initial = persistentListOf(),
+    )
+    val isLoadingRobots by viewModel.uiState.collectPartialAsState(
+        prop1 = ChatRoomUiState::isLoadingRobots, initial = false,
+    )
+    val robotError by viewModel.uiState.collectPartialAsState(
+        prop1 = ChatRoomUiState::robotError, initial = null,
+    )
+    val sendRequestId by viewModel.uiState.collectPartialAsState(
+        prop1 = ChatRoomUiState::sendRequestId, initial = 0L,
+    )
     val account = LocalAccount.current
-    var input by remember { mutableStateOf("") }
+    var input by rememberSaveable(roomId, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue())
+    }
+    var mentions by rememberSaveable(roomId, stateSaver = ChatMentionsSaver) {
+        mutableStateOf(emptyList<ChatMention>())
+    }
+    var robotSkill by rememberSaveable(roomId) { mutableStateOf<Int?>(null) }
+    var robotTargetUk by rememberSaveable(roomId) { mutableStateOf<String?>(null) }
+    var robotCommandName by rememberSaveable(roomId) { mutableStateOf("") }
+    var picker by remember { mutableStateOf<String?>(null) }
     var showEmoticonPanel by remember { mutableStateOf(false) }
     var resendTarget by remember { mutableStateOf<ChatRoomMessage?>(null) }
+    var requestedLatest by remember { mutableStateOf(false) }
+    val mentionCandidates = remember(messages, robots) {
+        (robots.map { it.user } + messages.asReversed().mapNotNull { message ->
+            message.senderBaiduUk.takeIf { it.isNotBlank() && message.senderName.isNotBlank() }
+                ?.let { ChatMention(message.senderUid, it, message.senderName, message.senderPortrait) }
+        } + messages.flatMap { it.mentions }).distinctBy { it.baiduUk }
+    }
+    fun updateInput(value: TextFieldValue) {
+        input = value
+        mentions = mentions.filter {
+            Regex("@${Regex.escape(it.name)}(?=\\s|$)").containsMatchIn(value.text)
+        }
+        if (mentions.none { it.baiduUk == robotTargetUk }) {
+            robotSkill = null
+            robotTargetUk = null
+            robotCommandName = ""
+        }
+    }
+    fun insertMention(user: ChatMention, command: String = "") {
+        val token = "@${user.name} "
+        val addition = token + command
+        val start = if (input.selection.collapsed && input.selection.start > 0 &&
+            input.text[input.selection.start - 1] == '@'
+        ) input.selection.start - 1 else input.selection.min
+        val end = input.selection.max
+        updateInput(TextFieldValue(
+            input.text.replaceRange(start, end, addition),
+            TextRange(start + addition.length),
+        ))
+        mentions = (mentions + user).distinctBy { it.baiduUk }
+    }
+
+    LaunchedEffect(roomId) { viewModel.send(ChatRoomUiIntent.LoadRobots(roomId)) }
 
     val listState = rememberLazyListState()
     // 倒序数据：index 0 是最新消息，贴在底部
@@ -114,24 +184,24 @@ fun ChatRoomPage(
             }
     }
 
-    // 新消息到达：贴底时跟随到底部；用户正在翻历史时保持原地不跳。
-    // 自己发出的消息无论当前位置都滚过去，避免发完看不到。
-    // lastHandledMsgId 记录已处理的最新消息：从其他页面返回时组合会重建，
-    // 首次执行不应滚动，否则会强行把用户拽回底部。
-    var lastHandledMsgId by rememberSaveable { mutableStateOf(0L) }
+    // 主动发送与轮询分开：只有本页发送请求允许从历史位置跳回。
+    var handledSendRequest by rememberSaveable(roomId) { mutableStateOf(sendRequestId) }
+    var lastHandledMsgId by rememberSaveable(roomId) { mutableStateOf(0L) }
     val newestMsgId = messages.lastOrNull()?.msgId
-    LaunchedEffect(newestMsgId) {
+    LaunchedEffect(newestMsgId, sendRequestId) {
         val newest = messages.lastOrNull() ?: return@LaunchedEffect
-        if (lastHandledMsgId == 0L) {
-            lastHandledMsgId = newest.msgId
-            return@LaunchedEffect
-        }
-        if (newest.msgId == lastHandledMsgId) return@LaunchedEffect
+        val ownSend = requestedLatest && sendRequestId != handledSendRequest
+        handledSendRequest = sendRequestId
+        val initial = lastHandledMsgId == 0L
+        val changed = newest.msgId != lastHandledMsgId
         lastHandledMsgId = newest.msgId
-        if (!followBottom && !newest.isSelf) return@LaunchedEffect
-        // 用户正在拖动时不抢滚动，等下一次消息再跟随
-        if (listState.isScrollInProgress) return@LaunchedEffect
-        listState.animateScrollToItem(0)
+        if (ownSend) {
+            requestedLatest = false
+            followBottom = true
+            listState.scrollToLatest()
+        } else if (!initial && changed && followBottom && !listState.isScrollInProgress) {
+            listState.scrollToLatest()
+        }
     }
 
     // 定时增量拉取：进入页面立刻刷一次，之后每 3 秒一次
@@ -175,6 +245,7 @@ fun ChatRoomPage(
             val target = resendTarget
             val acc = account
             if (target != null && acc != null) {
+                requestedLatest = true
                 viewModel.send(
                     ChatRoomUiIntent.Resend(
                         roomId = roomId,
@@ -186,6 +257,8 @@ fun ChatRoomPage(
                         selfPortrait = acc.portrait,
                         selfUid = acc.uid.toLongOrNull() ?: 0L,
                         cuidGalaxy2 = CuidUtils.getNewCuid(),
+                        mentions = target.mentions,
+                        robotSkill = target.robotSkill,
                     )
                 )
             }
@@ -196,6 +269,29 @@ fun ChatRoomPage(
         cancelText = stringResource(id = R.string.button_cancel),
     ) {
         Text(text = stringResource(id = R.string.tip_resend_message))
+    }
+
+    if (picker != null) {
+        ChatRecipientPicker(
+            robotMode = picker == "robot",
+            candidates = mentionCandidates,
+            robots = robots,
+            loading = isLoadingRobots,
+            error = robotError,
+            onReload = { viewModel.send(ChatRoomUiIntent.LoadRobots(roomId)) },
+            onDismiss = { picker = null },
+            onMention = { user ->
+                insertMention(user)
+                picker = null
+            },
+            onCommand = { robot, type, name, alias ->
+                insertMention(robot.user, alias.ifBlank { name } + " ")
+                robotSkill = type
+                robotTargetUk = robot.user.baiduUk
+                robotCommandName = name
+                picker = null
+            },
+        )
     }
 
     ProvideNavigator(navigator = navigator) {
@@ -211,34 +307,73 @@ fun ChatRoomPage(
             },
             bottomBar = {
                 if (account != null) {
-                    ChatComposer(
-                        value = input,
-                        onValueChange = { input = it },
-                        onSend = {
-                            val text = input.trim()
-                            if (text.isNotEmpty()) {
-                                viewModel.send(
-                                    ChatRoomUiIntent.Send(
-                                        roomId = roomId,
-                                        text = text,
-                                        forumId = fid,
-                                        bduss = account.bduss,
-                                        selfName = account.nameShow ?: account.name,
-                                        selfPortrait = account.portrait,
-                                        selfUid = account.uid.toLongOrNull() ?: 0L,
-                                        cuidGalaxy2 = CuidUtils.getNewCuid(),
-                                    )
-                                )
-                                input = ""
-                                showEmoticonPanel = false
+                    Column {
+                        if (robotSkill != null) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("机器人命令：$robotCommandName", style = MaterialTheme.typography.caption)
+                                TextButton(onClick = {
+                                    robotSkill = null
+                                    robotTargetUk = null
+                                    robotCommandName = ""
+                                }) { Text("取消命令") }
                             }
-                        },
-                        showEmoticonPanel = showEmoticonPanel,
-                        onToggleEmoticonPanel = { showEmoticonPanel = !showEmoticonPanel },
-                        onEmoticonClick = { emoticon: Emoticon ->
-                            input += "#(${emoticon.name})"
-                        },
-                    )
+                        }
+                        ChatComposer(
+                            value = input,
+                            onValueChange = { value ->
+                                val insertedAt = value.composition == null &&
+                                    value.text.length > input.text.length &&
+                                    value.selection.collapsed && value.selection.start > 0 &&
+                                    value.text[value.selection.start - 1] == '@'
+                                updateInput(value)
+                                if (insertedAt) picker = "mention"
+                            },
+                            onSend = {
+                                val text = input.text.trim()
+                                if (text.isNotEmpty()) {
+                                    requestedLatest = true
+                                    viewModel.send(
+                                        ChatRoomUiIntent.Send(
+                                            roomId = roomId,
+                                            text = text,
+                                            forumId = fid,
+                                            bduss = account.bduss,
+                                            selfName = account.nameShow ?: account.name,
+                                            selfPortrait = account.portrait,
+                                            selfUid = account.uid.toLongOrNull() ?: 0L,
+                                            cuidGalaxy2 = CuidUtils.getNewCuid(),
+                                            mentions = if (robotSkill != null) {
+                                                mentions.sortedBy { it.baiduUk != robotTargetUk }
+                                            } else mentions,
+                                            robotSkill = robotSkill,
+                                        )
+                                    )
+                                    input = TextFieldValue()
+                                    mentions = emptyList()
+                                    robotSkill = null
+                                    robotTargetUk = null
+                                    robotCommandName = ""
+                                }
+                            },
+                            showEmoticonPanel = showEmoticonPanel,
+                            onToggleEmoticonPanel = { showEmoticonPanel = !showEmoticonPanel },
+                            onDismissEmoticonPanel = { showEmoticonPanel = false },
+                            onMentionClick = { picker = "mention" },
+                            onRobotClick = { picker = "robot" },
+                            onEmoticonClick = { emoticon: Emoticon ->
+                                val insertion = "#(${emoticon.name})"
+                                val start = input.selection.min
+                                updateInput(TextFieldValue(
+                                    input.text.replaceRange(start, input.selection.max, insertion),
+                                    TextRange(start + insertion.length),
+                                ))
+                            },
+                        )
+                    }
                 }
             },
         ) { paddingValues ->
@@ -304,4 +439,101 @@ fun ChatRoomPage(
             }
         }
     }
+}
+
+private suspend fun LazyListState.scrollToLatest() {
+    val visibleCount = layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
+    if (firstVisibleItemIndex > visibleCount) scrollToItem(0)
+    else animateScrollToItem(0)
+}
+
+private val ChatMentionsSaver = listSaver<List<ChatMention>, String>(
+    save = { mentions ->
+        mentions.flatMap { listOf(it.uid.toString(), it.baiduUk, it.name, it.portrait) }
+    },
+    restore = { values ->
+        values.chunked(4).map { ChatMention(it[0].toLong(), it[1], it[2], it[3]) }
+    },
+)
+
+@Composable
+private fun ChatRecipientPicker(
+    robotMode: Boolean,
+    candidates: List<ChatMention>,
+    robots: List<ChatRobot>,
+    loading: Boolean,
+    error: String?,
+    onReload: () -> Unit,
+    onDismiss: () -> Unit,
+    onMention: (ChatMention) -> Unit,
+    onCommand: (ChatRobot, Int, String, String) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (robotMode) "机器人命令" else "选择艾特对象") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text(if (robotMode) "搜索机器人或技能" else "搜索昵称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (loading) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Text("正在加载机器人…", Modifier.padding(start = 8.dp))
+                    }
+                }
+                if (error != null) {
+                    Text("机器人加载失败：$error", color = MaterialTheme.colors.error)
+                    TextButton(onClick = onReload) { Text("重试") }
+                }
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
+                    if (robotMode) {
+                        if (robots.isEmpty() && !loading && error == null) {
+                            item { Text("该群未提供机器人技能") }
+                        }
+                        robots.forEach { robot ->
+                            val skills = robot.skills.filter {
+                                robot.user.name.contains(query, true) || it.name.contains(query, true) ||
+                                    it.alias.contains(query, true)
+                            }
+                            if (skills.isNotEmpty()) {
+                                item { Text(robot.user.name, style = MaterialTheme.typography.subtitle2) }
+                                items(skills, key = { "${robot.user.baiduUk}_${it.type}" }) { skill ->
+                                    Column(
+                                        Modifier.fillMaxWidth().clickable {
+                                            onCommand(robot, skill.type, skill.name, skill.alias)
+                                        }.padding(vertical = 10.dp),
+                                    ) {
+                                        Text(skill.name.ifBlank { skill.alias })
+                                        if (skill.description.isNotBlank()) {
+                                            Text(skill.description, style = MaterialTheme.typography.caption)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        val users = candidates.filter { it.name.contains(query, true) }
+                        if (users.isEmpty()) item { Text("未找到对象，请先加载相关聊天记录") }
+                        items(users, key = { it.baiduUk }) { user ->
+                            Text(
+                                "@${user.name}",
+                                Modifier.fillMaxWidth().clickable { onMention(user) }
+                                    .padding(vertical = 12.dp),
+                            )
+                        }
+                    }
+                }
+                if (!robotMode) {
+                    Text("候选来自已加载消息和群机器人", style = MaterialTheme.typography.caption)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
 }

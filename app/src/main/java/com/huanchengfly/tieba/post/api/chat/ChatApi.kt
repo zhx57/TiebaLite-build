@@ -1,7 +1,11 @@
 package com.huanchengfly.tieba.post.api.chat
 
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpCrypto
+import com.huanchengfly.tieba.post.api.models.chat.ChatMention
+import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
+import com.huanchengfly.tieba.post.api.models.chat.ChatRobotSkill
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoom
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.CuidUtils
@@ -112,6 +116,45 @@ object ChatApi {
         rooms
     }
 
+    suspend fun getChatRoomRobots(roomId: Long): List<ChatRobot> = withContext(Dispatchers.IO) {
+        val params = linkedMapOf(
+            "_client_version" to CHAT_VERSION,
+            "chatroom_id" to roomId.toString(),
+        )
+        val url = "https://tiebac.baidu.com/c/f/chat/getChatRoomDetail".toHttpUrl().newBuilder().apply {
+            params.forEach { (key, value) -> addQueryParameter(key, value) }
+            addQueryParameter("sign", ChatSignUtil.sign(params, APP_SALT))
+        }.build()
+        val root = JSONObject(execute(Request.Builder().url(url)
+            .header("Cookie", "BDUSS=${AccountUtil.getBduss() ?: ""}")
+            .header("User-Agent", "bdtb for Android $CHAT_VERSION").build()))
+        val code = root.optInt("error_code")
+        if (code != 0) throw ChatApiException(code, root.optString("error_msg"))
+        val bots = root.optJSONObject("data")?.optJSONObject("bots")?.optJSONArray("bot_list")
+            ?: return@withContext emptyList()
+        buildList {
+            for (i in 0 until bots.length()) {
+                val bot = bots.optJSONObject(i) ?: continue
+                val user = bot.optJSONObject("user") ?: continue
+                val bduk = user.optString("uk")
+                val name = user.optString("name_show").ifBlank { user.optString("name") }
+                if (bduk.isBlank() || name.isBlank()) continue
+                val skills = bot.optJSONArray("skill") ?: JSONArray()
+                add(ChatRobot(
+                    ChatMention(decodeUid(bduk), bduk, name, user.optString("portrait")),
+                    buildList {
+                        for (j in 0 until skills.length()) {
+                            val skill = skills.optJSONObject(j) ?: continue
+                            if (skill.optInt("is_show") != 1) continue
+                            add(ChatRobotSkill(skill.optInt("type"), skill.optString("name"),
+                                skill.optString("alias"), skill.optString("desc")))
+                        }
+                    },
+                ))
+            }
+        }
+    }
+
     /**
      * 拉取群最近消息。接口一次返回最多 60 条（count 为负表示取最新）。
      *
@@ -176,11 +219,11 @@ object ChatApi {
      * 这里递归提取，避免正常文本被误判成不支持的消息。
      * from_user 为 0 的是系统消息（入群、退群等），直接丢弃。
      */
-    private fun parseMessage(json: JSONObject, myUid: Long?): ChatRoomMessage? {
+    internal fun parseMessage(json: JSONObject, myUid: Long?): ChatRoomMessage? {
         val senderUid = json.optLong("from_user")
         if (senderUid == 0L) return null
 
-        val msgType = json.optInt("type", 0)
+        var msgType = json.optInt("type", 0)
         val content = runCatching {
             when (val raw = json.opt("content")) {
                 is String -> if (raw.isBlank()) null else JSONTokener(raw).nextValue()
@@ -188,45 +231,28 @@ object ChatApi {
             }
         }.getOrNull()
 
-        var senderName = ""
-        var portrait = ""
-        var senderBduk = ""
-        if (content is JSONObject) {
-            senderName = content.optString("name")
-            portrait = content.optString("portrait")
-            senderBduk = content.optString("baidu_uk")
-            // 用户信息常位于 content["text"] 这层，且该字段往往是 JSON 字符串
-            val textNode = content.opt("text")
-            val textObj = when (textNode) {
-                is JSONObject -> textNode
-                is String -> runCatching {
-                    JSONTokener(textNode).nextValue() as? JSONObject
-                }.getOrNull()
-                else -> null
-            }
-            if (textObj != null) {
-                if (senderName.isBlank()) senderName = textObj.optString("name")
-                if (portrait.isBlank()) portrait = textObj.optString("portrait")
-                if (senderBduk.isBlank()) senderBduk = textObj.optString("baidu_uk")
-            }
-            // 昵称兜底：部分消息放在 ext 里
-            if (senderName.isBlank()) {
-                val ext = content.opt("ext")
-                val extObj = when (ext) {
-                    is JSONObject -> ext
-                    is String -> runCatching {
-                        JSONTokener(ext).nextValue() as? JSONObject
-                    }.getOrNull()
-                    else -> null
-                }
-                if (extObj != null) {
-                    senderName = extObj.optString("user_name").ifBlank {
-                        extObj.optString("name")
-                    }
-                    if (portrait.isBlank()) portrait = extObj.optString("portrait")
-                }
+        val envelope = content as? JSONObject
+        val textObj = decodeJson(envelope?.opt("text")) as? JSONObject ?: envelope
+        val ext = decodeJson(textObj?.opt("ext")) as? JSONObject
+        val senderName = textObj?.optString("name").orEmpty().ifBlank {
+            ext?.optString("user_name").orEmpty().ifBlank { ext?.optString("name").orEmpty() }
+        }
+        val portrait = textObj?.optString("portrait").orEmpty().ifBlank {
+            ext?.optString("portrait").orEmpty()
+        }
+        val senderBduk = textObj?.optString("baidu_uk").orEmpty()
+        msgType = textObj?.optInt("content_type", msgType) ?: msgType
+        val atData = decodeJson(textObj?.opt("at_data")) as? JSONArray
+        val mentions = buildList {
+            if (atData != null) for (i in 0 until atData.length()) {
+                val user = atData.optJSONObject(i) ?: continue
+                val bduk = user.optString("at_baidu_uk")
+                if (bduk.isBlank()) continue
+                add(ChatMention(decodeUid(bduk), bduk, user.optString("at_name"), user.optString("at_portrait")))
             }
         }
+        val robotParams = (decodeJson(ext?.opt("content")) as? JSONObject)?.optJSONObject("robot_params")
+        val robotSkill = robotParams?.takeIf { it.has("type") }?.optInt("type")
 
         val rawContent = (json.opt("content") as? String)?.trim()
         val rawText = extractText(content).trim().ifBlank {
@@ -241,7 +267,7 @@ object ChatApi {
         // 需要转成渲染层认识的 (#表情名)，否则正文为空会被显示成不支持的消息。
         val text = replaceEmoticonIds(rawText)
 
-        // 是否为自己：优先用 baidu_uk 解密出的 uid 判定，其次比对 from_user
+        // from_user 属于 IM 身份体系，只用可解密的贴吧身份判断自己。
         val bdukUid = if (senderBduk.isNotBlank()) {
             runCatching { BlcpCrypto.bduk2UserId(senderBduk) }.getOrNull()
         } else {
@@ -249,7 +275,6 @@ object ChatApi {
         }
         val isSelf = when {
             bdukUid != null && myUid != null -> bdukUid == myUid
-            myUid != null -> senderUid == myUid
             else -> false
         }
 
@@ -257,23 +282,29 @@ object ChatApi {
             msgId = json.optLong("msgid"),
             // from_user 是 IM 体系内的账号 id，和贴吧 uid 不是同一套；
             // 跳转资料卡必须用 bduk 解出来的贴吧 uid，否则会进到别人主页。
-            senderUid = bdukUid ?: senderUid,
+            senderUid = bdukUid ?: 0L,
             senderName = senderName,
             senderPortrait = portrait,
             contentType = msgType,
-            text = text,
+            text = text.ifBlank {
+                if (images.isEmpty()) "[暂未支持的消息类型 $msgType]" else ""
+            },
             images = images,
             msgTime = json.optLong("create_time") * 1000L,
             isSelf = isSelf,
+            mentions = mentions,
+            robotSkill = robotSkill,
+            senderBaiduUk = senderBduk,
         )
     }
 
-    /**
-     * 提取图片消息的图片地址。
-     *
-     * 群聊图片消息的 content_body 里带 src（可能是完整链接或相对路径），
-     * 多图时可能是数组或逗号拼接。这里逐层向内找 src/img，非图片消息返回空列表。
-     */
+    private fun decodeJson(node: Any?): Any? = if (node is String &&
+        (node.trimStart().startsWith("{") || node.trimStart().startsWith("["))
+    ) runCatching { JSONTokener(node).nextValue() }.getOrNull() else node
+
+    private fun decodeUid(bduk: String): Long =
+        runCatching { BlcpCrypto.bduk2UserId(bduk) }.getOrDefault(0L)
+
     private fun extractImages(node: Any?): List<String> = when (node) {
         null -> emptyList()
 
@@ -303,7 +334,7 @@ object ChatApi {
                     runCatching { extractImages(JSONTokener(trimmed).nextValue()) }
                         .getOrDefault(emptyList())
 
-                else -> normalizeImageUrl(trimmed)?.let(::listOf).orEmpty()
+                else -> emptyList()
             }
         }
 
@@ -374,12 +405,14 @@ object ChatApi {
         null -> ""
         is JSONObject -> {
             val body = node.opt("content_body")
-            if (body != null) {
-                extractText(body).ifBlank { extractText(node.opt("text")) }
-            } else {
-                extractText(node.opt("text")).ifBlank { node.optString("msg").trim() }
-                    .takeUnless { it.startsWith("{") || it.startsWith("[") }
-                    .orEmpty()
+            when {
+                body != null && body != JSONObject.NULL -> extractText(body)
+                node.has("text") -> extractText(node.opt("text"))
+                node.has("str") -> node.optString("str")
+                node.has("msg") -> node.optString("msg")
+                else -> listOf("title", "description", "desc", "url")
+                    .mapNotNull { key -> node.optString(key).takeIf { it.isNotBlank() } }
+                    .distinct().joinToString("\n")
             }
         }
 

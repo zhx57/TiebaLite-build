@@ -248,6 +248,7 @@ dependencies {
 
     //Test
     testImplementation(libs.junit.junit)
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.rules)

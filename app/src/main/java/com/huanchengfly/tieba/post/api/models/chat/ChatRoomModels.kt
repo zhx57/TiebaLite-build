@@ -16,6 +16,22 @@ data class ChatRoom(
     val announce: String,
 )
 
+data class ChatMention(
+    val uid: Long,
+    val baiduUk: String,
+    val name: String,
+    val portrait: String,
+)
+
+data class ChatRobotSkill(
+    val type: Int,
+    val name: String,
+    val alias: String,
+    val description: String,
+)
+
+data class ChatRobot(val user: ChatMention, val skills: List<ChatRobotSkill>)
+
 data class ChatRoomMessage(
     val msgId: Long,
     val senderUid: Long,
@@ -31,6 +47,11 @@ data class ChatRoomMessage(
     val sendState: SendState = SendState.SENT,
     /** 是否是本地插入的占位消息；服务端返回的消息恒为 false。 */
     val isLocal: Boolean = false,
+    val mentions: List<ChatMention> = emptyList(),
+    val robotSkill: Int? = null,
+    val senderBaiduUk: String = "",
+    /** 回显早于发送确认时，保留一对一对应关系。 */
+    val echoForPendingId: Long? = null,
 )
 
 /**

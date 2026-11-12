@@ -1,5 +1,6 @@
 package com.huanchengfly.tieba.post.api.chat.blcp
 
+import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -76,6 +77,8 @@ object ChatSendApi {
         selfPortrait: String,
         selfUid: Long,
         cuidGalaxy2: String,
+        mentions: List<ChatMention> = emptyList(),
+        robotSkill: Int? = null,
     ) = withContext(Dispatchers.IO) {
         val blcp = BlcpClient()
         try {
@@ -98,6 +101,8 @@ object ChatSendApi {
                 selfName = selfName,
                 selfPortrait = selfPortrait,
                 bduss = accountBduss,
+                mentions = mentions,
+                robotSkill = robotSkill,
             )
             blcp.sendMcastMsg(chatroomId, payload)
         } finally {
@@ -110,7 +115,7 @@ object ChatSendApi {
      *
      * content.text 与 ext 都需要二次 JSON 编码，字段需与官方客户端一致。
      */
-    private fun buildMessagePayload(
+    internal fun buildMessagePayload(
         chatroomId: Long,
         text: String,
         forumId: Long,
@@ -121,6 +126,8 @@ object ChatSendApi {
         selfName: String,
         selfPortrait: String,
         bduss: String,
+        mentions: List<ChatMention>,
+        robotSkill: Int?,
     ): JSONObject {
         val nowMs = System.currentTimeMillis()
         val nowSec = nowMs / 1000
@@ -188,7 +195,14 @@ object ChatSendApi {
             put("session_id", chatroomId)
             put("type", 1)
             put("user_name", selfName)
-            put("content", JSONObject())
+            put("content", JSONObject().apply {
+                if (robotSkill != null) {
+                    put("robot_params", JSONObject().apply {
+                        put("scene", "tieba_group_chat")
+                        put("type", robotSkill)
+                    })
+                }
+            })
             put("level", forumLevel)
             put("forum_id", forumId)
         }
@@ -204,6 +218,18 @@ object ChatSendApi {
             put("content_body", JSONObject().put("text", text).toString())
             put("src", "")
             put("baidu_uk", bduk)
+            put("at_data", JSONArray().apply {
+                mentions.forEachIndexed { index, user ->
+                    put(JSONObject().apply {
+                        put("at_type", "user")
+                        put("at_baidu_uk", user.baiduUk)
+                        put("at_name", user.name)
+                        put("at_portrait", user.portrait)
+                        // position 是接收者序号，不是正文字符偏移。
+                        put("position", index.toString())
+                    })
+                }
+            })
             put("ext", extData.toString())
         }
 

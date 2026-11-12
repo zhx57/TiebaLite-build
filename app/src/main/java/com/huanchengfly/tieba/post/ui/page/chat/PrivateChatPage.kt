@@ -12,11 +12,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
@@ -65,7 +68,9 @@ fun PrivateChatPage(
         initial = persistentListOf(),
     )
 
-    var input by remember { mutableStateOf("") }
+    var input by rememberSaveable(peerUid, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue())
+    }
     var showEmoticonPanel by remember { mutableStateOf(false) }
     var resendTarget by remember { mutableStateOf<ChatWsMessage?>(null) }
 
@@ -143,18 +148,25 @@ fun PrivateChatPage(
                     value = input,
                     onValueChange = { input = it },
                     onSend = {
-                        val text = input.trim()
+                        val text = input.text.trim()
                         if (text.isNotEmpty()) {
                             viewModel.send(PrivateChatUiIntent.Send(peerUid, text))
-                            input = ""
+                            input = TextFieldValue()
                             showEmoticonPanel = false
                         }
                     },
                     showEmoticonPanel = showEmoticonPanel,
                     onToggleEmoticonPanel = { showEmoticonPanel = !showEmoticonPanel },
                     onEmoticonClick = { emoticon: Emoticon ->
-                        input += "#(${emoticon.name})"
+                        val token = "#(${emoticon.name})"
+                        val selection = input.selection
+                        input = TextFieldValue(
+                            text = input.text.replaceRange(selection.min, selection.max, token),
+                            selection = TextRange(selection.min + token.length),
+                            composition = null,
+                        )
                     },
+                    onDismissEmoticonPanel = { showEmoticonPanel = false },
                 )
             },
         ) { paddingValues ->

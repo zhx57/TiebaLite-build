@@ -5,6 +5,8 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
+import com.huanchengfly.tieba.post.api.models.chat.ChatMention
+import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
@@ -61,7 +63,7 @@ class ChatRoomViewModel @Inject constructor() :
         /** 本地占位用递减负数，避免与服务端正数 msgId 冲突。 */
         private val pendingSeq = AtomicLong(0)
 
-        private fun newPendingId(): Long = -pendingSeq.decrementAndGet()
+        private fun newPendingId(): Long = pendingSeq.decrementAndGet()
 
         @OptIn(ExperimentalCoroutinesApi::class)
         override fun toPartialChangeFlow(intentFlow: Flow<ChatRoomUiIntent>): Flow<ChatRoomPartialChange> =
@@ -75,6 +77,8 @@ class ChatRoomViewModel @Inject constructor() :
                 intentFlow.filterIsInstance<ChatRoomUiIntent.Send>()
                     .flatMapMerge { it.producePartialChange() },
                 intentFlow.filterIsInstance<ChatRoomUiIntent.Resend>()
+                    .flatMapMerge { it.producePartialChange() },
+                intentFlow.filterIsInstance<ChatRoomUiIntent.LoadRobots>()
                     .flatMapMerge { it.producePartialChange() },
             )
 
@@ -112,6 +116,12 @@ class ChatRoomViewModel @Inject constructor() :
                 emit(ChatRoomPartialChange.LoadMore.Failure(it))
             }
 
+        private fun ChatRoomUiIntent.LoadRobots.producePartialChange(): Flow<ChatRoomPartialChange.Robots> =
+            flow<ChatRoomPartialChange.Robots> {
+                emit(ChatRoomPartialChange.Robots.Start)
+                emit(ChatRoomPartialChange.Robots.Success(ChatApi.getChatRoomRobots(roomId).toImmutableList()))
+            }.catch { emit(ChatRoomPartialChange.Robots.Failure(it.getErrorMessage())) }
+
         private fun ChatRoomUiIntent.Send.producePartialChange(): Flow<ChatRoomPartialChange.Send> {
             val pendingId = newPendingId()
             return flow {
@@ -122,6 +132,8 @@ class ChatRoomViewModel @Inject constructor() :
                         selfUid = selfUid,
                         selfName = selfName,
                         selfPortrait = selfPortrait,
+                        mentions = mentions,
+                        robotSkill = robotSkill,
                     )
                 )
                 ChatSendApi.sendChatRoomMessage(
@@ -134,6 +146,8 @@ class ChatRoomViewModel @Inject constructor() :
                     selfPortrait = selfPortrait,
                     selfUid = selfUid,
                     cuidGalaxy2 = cuidGalaxy2,
+                    mentions = mentions,
+                    robotSkill = robotSkill,
                 )
                 emit(ChatRoomPartialChange.Send.Success(pendingId))
             }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
@@ -149,6 +163,8 @@ class ChatRoomViewModel @Inject constructor() :
                         selfUid = selfUid,
                         selfName = selfName,
                         selfPortrait = selfPortrait,
+                        mentions = mentions,
+                        robotSkill = robotSkill,
                         removeMsgId = failedMsgId,
                     )
                 )
@@ -162,6 +178,8 @@ class ChatRoomViewModel @Inject constructor() :
                     selfPortrait = selfPortrait,
                     selfUid = selfUid,
                     cuidGalaxy2 = cuidGalaxy2,
+                    mentions = mentions,
+                    robotSkill = robotSkill,
                 )
                 emit(ChatRoomPartialChange.Send.Success(pendingId))
             }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
@@ -172,6 +190,8 @@ class ChatRoomViewModel @Inject constructor() :
 sealed interface ChatRoomUiIntent : UiIntent {
     /** 首次进入，加载最新一页。 */
     data class Load(val roomId: Long) : ChatRoomUiIntent
+
+    data class LoadRobots(val roomId: Long) : ChatRoomUiIntent
 
     /** 定时增量拉取，不得清空已有历史。 */
     data class Poll(val roomId: Long) : ChatRoomUiIntent
@@ -188,6 +208,8 @@ sealed interface ChatRoomUiIntent : UiIntent {
         val selfPortrait: String,
         val selfUid: Long,
         val cuidGalaxy2: String,
+        val mentions: List<ChatMention> = emptyList(),
+        val robotSkill: Int? = null,
     ) : ChatRoomUiIntent
 
     data class Resend(
@@ -201,26 +223,50 @@ sealed interface ChatRoomUiIntent : UiIntent {
         val selfPortrait: String,
         val selfUid: Long,
         val cuidGalaxy2: String,
+        val mentions: List<ChatMention> = emptyList(),
+        val robotSkill: Int? = null,
     ) : ChatRoomUiIntent
 }
 
-/**
- * 把服务端一页消息增量合并进现有列表。
- *
- * 已有消息一律保留，只按 msgId 去重；已成功的本地占位在服务端回显同内容后被移除。
- * 排序用 msgTime，保证刚发送的本地占位（当前时间）落在最新的位置。
- */
-private fun mergeServerMessages(
+/** 只插入新 ID；轮询无变化时保留列表引用，不重排整份历史。 */
+internal fun mergeServerMessages(
     current: List<ChatRoomMessage>,
     incoming: List<ChatRoomMessage>,
 ): ImmutableList<ChatRoomMessage> {
     val existingIds = current.mapTo(HashSet()) { it.msgId }
-    val serverSelfTexts = incoming.filter { it.isSelf }.mapTo(HashSet()) { it.text }
-    val kept = current.filterNot { local ->
-        local.isLocal && local.sendState == SendState.SENT && local.text in serverSelfTexts
+    val added = incoming.filter { !it.isLocal && existingIds.add(it.msgId) }
+    if (added.isEmpty()) return current as? ImmutableList<ChatRoomMessage> ?: current.toImmutableList()
+    val reserved = current.mapNotNullTo(HashSet()) { it.echoForPendingId }
+    val locals = current.filter {
+        it.isLocal && it.sendState != SendState.FAILED && it.msgId !in reserved
+    }.toMutableList()
+    val merged = current.toMutableList()
+    for (server in added.sortedBy { it.msgTime }) {
+        val candidate = if (server.isSelf) locals.firstOrNull { local ->
+            local.text == server.text && local.robotSkill == server.robotSkill &&
+                local.mentions.map { it.baiduUk } == server.mentions.map { it.baiduUk } &&
+                server.msgTime >= local.msgTime - 5_000L &&
+                server.msgTime <= local.msgTime + 120_000L
+        } else null
+        var message = server
+        if (candidate != null) {
+            locals.remove(candidate)
+            if (candidate.sendState == SendState.SENT) {
+                merged.remove(candidate)
+            } else {
+                // BLCP 确认与轮询可交错，先占用这条回显，确认后再移除占位。
+                message = server.copy(echoForPendingId = candidate.msgId)
+            }
+        }
+        var low = 0
+        var high = merged.size
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            if (merged[mid].msgTime <= message.msgTime) low = mid + 1 else high = mid
+        }
+        merged.add(low, message)
     }
-    val added = incoming.filterNot { it.msgId in existingIds }
-    return (kept + added).sortedBy { it.msgTime }.toImmutableList()
+    return merged.toImmutableList()
 }
 
 sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
@@ -273,6 +319,17 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
         data class Failure(val error: Throwable) : LoadMore()
     }
 
+    sealed class Robots : ChatRoomPartialChange {
+        override fun reduce(oldState: ChatRoomUiState): ChatRoomUiState = when (this) {
+            Start -> oldState.copy(isLoadingRobots = true, robotError = null)
+            is Success -> oldState.copy(isLoadingRobots = false, robots = robots, robotError = null)
+            is Failure -> oldState.copy(isLoadingRobots = false, robotError = message)
+        }
+        data object Start : Robots()
+        data class Success(val robots: ImmutableList<ChatRobot>) : Robots()
+        data class Failure(val message: String) : Robots()
+    }
+
     sealed class Send : ChatRoomPartialChange {
         override fun reduce(oldState: ChatRoomUiState): ChatRoomUiState =
             when (this) {
@@ -290,21 +347,34 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                             isSelf = true,
                             sendState = SendState.SENDING,
                             isLocal = true,
+                            mentions = mentions,
+                            robotSkill = robotSkill,
                         )).toImmutableList(),
+                        sendRequestId = oldState.sendRequestId + 1,
                     )
                 }
 
-                is Success -> oldState.copy(
-                    messages = oldState.messages.map {
-                        if (it.msgId == pendingId) it.copy(sendState = SendState.SENT) else it
-                    }.toImmutableList(),
-                )
+                is Success -> {
+                    val echo = oldState.messages.firstOrNull { it.echoForPendingId == pendingId }
+                    oldState.copy(messages = oldState.messages.mapNotNull {
+                        when {
+                            it.msgId == pendingId && echo != null -> null
+                            it.msgId == pendingId -> it.copy(sendState = SendState.SENT)
+                            else -> it
+                        }
+                    }.toImmutableList())
+                }
 
-                is Failure -> oldState.copy(
-                    messages = oldState.messages.map {
-                        if (it.msgId == pendingId) it.copy(sendState = SendState.FAILED) else it
-                    }.toImmutableList(),
-                )
+                is Failure -> {
+                    val echoed = oldState.messages.any { it.echoForPendingId == pendingId }
+                    oldState.copy(messages = oldState.messages.mapNotNull {
+                        when {
+                            it.msgId == pendingId && echoed -> null
+                            it.msgId == pendingId -> it.copy(sendState = SendState.FAILED)
+                            else -> it
+                        }
+                    }.toImmutableList())
+                }
             }
 
         data class Start(
@@ -314,6 +384,8 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
             val selfName: String,
             val selfPortrait: String,
             val removeMsgId: Long? = null,
+            val mentions: List<ChatMention> = emptyList(),
+            val robotSkill: Int? = null,
         ) : Send()
 
         data class Success(val pendingId: Long) : Send()
@@ -327,6 +399,10 @@ data class ChatRoomUiState(
     val isLoadingMore: Boolean = false,
     val hasMore: Boolean = true,
     val messages: ImmutableList<ChatRoomMessage> = persistentListOf(),
+    val robots: ImmutableList<ChatRobot> = persistentListOf(),
+    val isLoadingRobots: Boolean = false,
+    val robotError: String? = null,
+    val sendRequestId: Long = 0L,
 ) : UiState
 
 sealed interface ChatRoomUiEvent : UiEvent
