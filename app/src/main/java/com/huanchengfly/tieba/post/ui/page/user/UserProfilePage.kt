@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -30,6 +31,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.ExperimentalMaterialApi
@@ -59,7 +62,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -612,21 +619,50 @@ private fun UserProfileContentNormal(
             }
         ) {
             ProvideContentColor(color = ExtendedTheme.colors.text) {
-                Column(modifier = modifier.padding(paddingValues).fillMaxSize()) {
-                    profileHeader()
-                    UserProfileTabRow(
-                        user = user,
-                        pages = pages,
-                        pagerState = pagerState,
-                        modifier = Modifier.fillMaxWidth()
-                            .background(MaterialTheme.colors.background),
-                    )
-                    LazyLoadHorizontalPager(
-                        state = pagerState,
-                        key = { pages[it].id },
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                    ) { index ->
-                        pages[index].content(user, false, listStates[index], null, null)
+                BoxWithConstraints(modifier = modifier.padding(paddingValues).fillMaxSize()) {
+                    val viewportHeight = maxHeight
+                    val headerScrollState = rememberScrollState()
+                    val headerScrollConnection = remember(headerScrollState) {
+                        object : NestedScrollConnection {
+                            override fun onPreScroll(
+                                available: Offset,
+                                source: NestedScrollSource,
+                            ): Offset {
+                                // 上划先收起共享资料头部，下划由列表到顶后的剩余滚动展开。
+                                return if (available.y < 0f) {
+                                    Offset(0f, -headerScrollState.dispatchRawDelta(-available.y))
+                                } else {
+                                    Offset.Zero
+                                }
+                            }
+                        }
+                    }
+                    Column(
+                        modifier = Modifier.fillMaxSize().verticalScroll(headerScrollState),
+                    ) {
+                        profileHeader()
+                        // 分页始终拥有完整视口，避免长资料或小屏把列表压成零高度。
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(viewportHeight)
+                                .nestedScroll(headerScrollConnection),
+                        ) {
+                            UserProfileTabRow(
+                                user = user,
+                                pages = pages,
+                                pagerState = pagerState,
+                                modifier = Modifier.fillMaxWidth()
+                                    .background(MaterialTheme.colors.background),
+                            )
+                            LazyLoadHorizontalPager(
+                                state = pagerState,
+                                key = { pages[it].id },
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                            ) { index ->
+                                pages[index].content(user, false, listStates[index], null, null)
+                            }
+                        }
                     }
                 }
             }
