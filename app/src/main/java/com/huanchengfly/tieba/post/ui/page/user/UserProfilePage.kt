@@ -557,12 +557,6 @@ private fun UserProfileContentNormal(
 
     // 每个标签页各自持有一个列表状态，切换标签时各自的滚动位置互不干扰
     val listStates = remember(pages.size) { List(pages.size) { LazyListState() } }
-    val currentListState = listStates[pagerState.currentPage.coerceIn(listStates.indices)]
-
-    // 头部滚出视口后，标题栏才显示头像和昵称
-    val showToolbarTitle by remember(currentListState) {
-        derivedStateOf { currentListState.firstVisibleItemIndex > 0 }
-    }
 
     val profileHeader: @Composable () -> Unit = {
         UserProfileDetail(
@@ -595,7 +589,7 @@ private fun UserProfileContentNormal(
             UserProfileToolbar(
                 user = user,
                 isSelf = isSelf,
-                showTitle = showToolbarTitle,
+                showTitle = false,
                 onBack = onBack,
                 onSetUserBlack = onSetUserBlack,
             )
@@ -618,32 +612,22 @@ private fun UserProfileContentNormal(
             }
         ) {
             ProvideContentColor(color = ExtendedTheme.colors.text) {
-                // 头部与标签栏都作为每个分页列表的真实项：
-                // 头部随列表滚走，标签栏 stickyHeader 吸顶，
-                // 几何上不存在覆盖层与占位错位导致的空白。
-                LazyLoadHorizontalPager(
-                    state = pagerState,
-                    key = { pages[it].id },
-                    modifier = Modifier
-                        .padding(paddingValues)
-                        .fillMaxSize(),
-                ) { index ->
-                    pages[index].content(
-                        user,
-                        false,
-                        listStates[index],
-                        profileHeader,
-                        {
-                            UserProfileTabRow(
-                                user = user,
-                                pages = pages,
-                                pagerState = pagerState,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(MaterialTheme.colors.background)
-                            )
-                        },
+                Column(modifier = modifier.padding(paddingValues).fillMaxSize()) {
+                    profileHeader()
+                    UserProfileTabRow(
+                        user = user,
+                        pages = pages,
+                        pagerState = pagerState,
+                        modifier = Modifier.fillMaxWidth()
+                            .background(MaterialTheme.colors.background),
                     )
+                    LazyLoadHorizontalPager(
+                        state = pagerState,
+                        key = { pages[it].id },
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                    ) { index ->
+                        pages[index].content(user, false, listStates[index], null, null)
+                    }
                 }
             }
         }
@@ -809,8 +793,8 @@ data class UserProfilePageData(
         user: ImmutableHolder<User>,
         fluid: Boolean,
         listState: LazyListState,
-        header: @Composable () -> Unit,
-        tabs: @Composable () -> Unit,
+        header: (@Composable () -> Unit)?,
+        tabs: (@Composable () -> Unit)?,
     ) -> Unit,
 )
 

@@ -1,7 +1,6 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.interaction.FocusInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
@@ -9,11 +8,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
@@ -33,7 +30,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,7 +43,6 @@ import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.widgets.compose.EmoticonPickerPanel
 import com.huanchengfly.tieba.post.utils.Emoticon
-import kotlinx.coroutines.flow.first
 
 /**
  * 聊天输入栏，群聊与私信共用。
@@ -73,14 +68,13 @@ fun ChatComposer(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val inputInteractionSource = remember { MutableInteractionSource() }
-    val imeVisible by rememberUpdatedState(WindowInsets.isImeVisible)
     val emoticonPanelVisible by rememberUpdatedState(showEmoticonPanel)
     val dismissEmoticonPanel by rememberUpdatedState(onDismissEmoticonPanel)
 
     LaunchedEffect(inputInteractionSource) {
         inputInteractionSource.interactions.collect { interaction ->
             if (emoticonPanelVisible &&
-                (interaction is PressInteraction.Press || interaction is FocusInteraction.Focus)
+                interaction is PressInteraction.Press
             ) {
                 dismissEmoticonPanel()
             }
@@ -88,12 +82,9 @@ fun ChatComposer(
     }
     LaunchedEffect(showEmoticonPanel) {
         if (showEmoticonPanel) {
-            focusManager.clearFocus()
+            focusManager.clearFocus(force = true)
             keyboardController?.hide()
-            // 先观察 IME 隐藏，避免残留的可见状态关闭刚打开的面板。
-            snapshotFlow { imeVisible }.first { !it }
-            snapshotFlow { imeVisible }.first { it }
-            dismissEmoticonPanel()
+            // IME 动画会反复上报可见状态，只由显式输入操作关闭面板。
         }
     }
 

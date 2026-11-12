@@ -182,6 +182,64 @@ class ChatRoomStateTest {
         assertTrue(parsed.text.isEmpty())
     }
 
+    private fun imagePayload(type: Int, body: Any, source: Any = ""): JSONObject {
+        val payload = payload()
+        val content = JSONObject(JSONObject(payload.getString("content")).getString("text"))
+        content.put("content_type", type.toString())
+        content.put("content_body", body)
+        content.put("src", source)
+        return payload.put("content", JSONObject().put("text", content.toString()).toString())
+    }
+
+    @Test
+    fun imageUrlInTextRendersAsImageWithoutDuplicatingCdnAddress() {
+        val url = "https://example.com/photo.jpg"
+        val parsed = received(imagePayload(1, JSONObject().put("text", url).toString()))
+        assertEquals(listOf(url), parsed.images)
+        assertEquals("", parsed.text)
+    }
+
+    @Test
+    fun outerImageSourceAndEncodedImageArraysAreRead() {
+        val urls = org.json.JSONArray().put("https://example.com/one.jpg").put("https://example.com/two.jpg")
+        val parsed = received(imagePayload(1, JSONObject().put("text", "图片说明").toString(), urls.toString()))
+        assertEquals(listOf("https://example.com/one.jpg", "https://example.com/two.jpg"), parsed.images)
+        assertEquals("图片说明", parsed.text)
+    }
+
+    @Test
+    fun imageCaptionKeepsLineBreaksAndSpacing() {
+        val url = "https://example.com/photo.jpg"
+        val parsed = received(imagePayload(1,
+            JSONObject().put("text", "第一行  说明\n第二行\n$url").toString()))
+        assertEquals(listOf(url), parsed.images)
+        assertEquals("第一行  说明\n第二行", parsed.text)
+    }
+
+    @Test
+    fun knownTiebaCdnTextBecomesImageEvenWhenContentTypeIsText() {
+        val url = "https://tiebapic.baidu.com/forum/pic/item/example.jpg"
+        val parsed = received(payload(text = url))
+        assertEquals(listOf(url), parsed.images)
+        assertEquals("", parsed.text)
+    }
+
+    @Test
+    fun signInSkillIsNotDiscardedBecauseItsOfficialEntryIsHidden() {
+        val bot = JSONObject().put("user", JSONObject()
+            .put("uk", BlcpCrypto.userId2Bduk(99L)).put("name_show", "签到机器人"))
+            .put("skill", org.json.JSONArray().put(JSONObject()
+                .put("type", 10005).put("name", "签到").put("alias", "签到").put("is_show", 0)))
+        val robots = ChatApi.parseRobots(JSONObject().put("bots", JSONObject()
+            .put("bot_list", org.json.JSONArray().put(bot))))
+        val robot = robots.single()
+        val skill = robot.skills.single()
+        assertEquals(10005, skill.type)
+        val parsed = received(payload(listOf(robot.user), skill.type, "@签到机器人 签到"))
+        assertEquals(10005, parsed.robotSkill)
+        assertEquals(listOf(robot.user), parsed.mentions)
+    }
+
     @Test
     fun confirmationAndFailureDoNotClearSendingParameters() {
         val mention = ChatMention(99L, "target-bduk", "机器人", "robot-portrait")

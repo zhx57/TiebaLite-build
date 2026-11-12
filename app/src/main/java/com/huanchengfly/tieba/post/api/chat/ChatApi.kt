@@ -130,9 +130,12 @@ object ChatApi {
             .header("User-Agent", "bdtb for Android $CHAT_VERSION").build()))
         val code = root.optInt("error_code")
         if (code != 0) throw ChatApiException(code, root.optString("error_msg"))
-        val bots = root.optJSONObject("data")?.optJSONObject("bots")?.optJSONArray("bot_list")
-            ?: return@withContext emptyList()
-        buildList {
+        parseRobots(root.optJSONObject("data") ?: JSONObject())
+    }
+
+    internal fun parseRobots(data: JSONObject): List<ChatRobot> {
+        val bots = data.optJSONObject("bots")?.optJSONArray("bot_list") ?: return emptyList()
+        return buildList {
             for (i in 0 until bots.length()) {
                 val bot = bots.optJSONObject(i) ?: continue
                 val user = bot.optJSONObject("user") ?: continue
@@ -145,7 +148,7 @@ object ChatApi {
                     buildList {
                         for (j in 0 until skills.length()) {
                             val skill = skills.optJSONObject(j) ?: continue
-                            if (skill.optInt("is_show") != 1) continue
+                            // is_show 控制官方入口展示，不代表技能不可调用。
                             add(ChatRobotSkill(skill.optInt("type"), skill.optString("name"),
                                 skill.optString("alias"), skill.optString("desc")))
                         }
@@ -261,11 +264,22 @@ object ChatApi {
         }
 
         // 图片消息：图片地址在 content_body 的 src 上，多图时可能是数组或逗号拼接。
-        val images = extractImages(content)
+        val bodyImages = extractImages(textObj?.opt("content_body"))
+        val sourceImages = extractImageSources(textObj?.opt("src"))
+        val textImages = if (msgType == 1) extractImageSources(rawText) else
+            extractImageSources(rawText).filter { url ->
+                val host = runCatching { url.toHttpUrl().host }.getOrDefault("")
+                host in setOf("imgsa.baidu.com", "imgsrc.baidu.com", "tiebapic.baidu.com")
+            }
+        val images = (bodyImages + sourceImages + textImages).distinct()
 
         // 表情消息：content_body 的 text 是 image_emoticon25 这类表情 id，
         // 需要转成渲染层认识的 (#表情名)，否则正文为空会被显示成不支持的消息。
-        val text = replaceEmoticonIds(rawText)
+        val visibleText = if (images.isEmpty()) rawText else
+            Regex("[^\\s,]+").replace(rawText) { match ->
+                if (normalizeImageUrl(match.value) in images) "" else match.value
+            }.trim()
+        val text = replaceEmoticonIds(visibleText)
 
         // from_user 属于 IM 身份体系，只用可解密的贴吧身份判断自己。
         val bdukUid = if (senderBduk.isNotBlank()) {
@@ -305,14 +319,21 @@ object ChatApi {
     private fun decodeUid(bduk: String): Long =
         runCatching { BlcpCrypto.bduk2UserId(bduk) }.getOrDefault(0L)
 
+    private fun extractImageSources(node: Any?): List<String> = when (val value = decodeJson(node)) {
+        is String -> value.split(Regex("[\\s,]+"))
+            .mapNotNull(::normalizeImageUrl)
+        is JSONArray -> (0 until value.length()).flatMap { extractImageSources(value.opt(it)) }
+        is JSONObject -> listOf("src", "url", "original", "big", "small")
+            .flatMap { extractImageSources(value.opt(it)) }
+        else -> emptyList()
+    }
+
     private fun extractImages(node: Any?): List<String> = when (node) {
         null -> emptyList()
 
         is JSONObject -> {
-            val direct = mutableListOf<String>()
-            collectImageUrls(node.opt("src"), direct)
-            collectImageUrls(node.opt("img"), direct)
-            collectImageUrls(node.opt("image"), direct)
+            val direct = listOf("src", "img", "image", "images", "img_url", "image_url", "pic_list", "pic_infos")
+                .flatMap { extractImageSources(node.opt(it)) }
             if (direct.isNotEmpty()) {
                 direct
             } else {
@@ -354,25 +375,6 @@ object ChatApi {
             url.startsWith("//") -> "https:$url"
             url.startsWith("/") -> "https://tiebac.baidu.com$url"
             else -> null
-        }
-    }
-
-    private fun collectImageUrls(value: Any?, out: MutableList<String>) {
-        when (value) {
-            is String -> value.split(",")
-                .mapNotNull { normalizeImageUrl(it) }
-                .forEach(out::add)
-
-            is JSONArray -> for (i in 0 until value.length()) {
-                collectImageUrls(value.opt(i), out)
-            }
-
-            is JSONObject -> {
-                collectImageUrls(value.opt("url"), out)
-                collectImageUrls(value.opt("src"), out)
-            }
-
-            else -> Unit
         }
     }
 
