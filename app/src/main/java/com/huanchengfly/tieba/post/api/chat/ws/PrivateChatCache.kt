@@ -62,15 +62,16 @@ object PrivateChatCache {
     }
 
     /**
-     * 覆盖写入某个会话的消息列表，只保留最近 [MAX_MESSAGES] 条。
+     * 合并写入某个会话，避免通知和详情并发保存时覆盖新消息。
      */
+    @Synchronized
     fun save(selfUid: Long, peerUid: Long, messages: List<ChatWsMessage>) {
         if (selfUid == 0L) return
-        val trimmed = if (messages.size > MAX_MESSAGES) {
-            messages.takeLast(MAX_MESSAGES)
-        } else {
-            messages
-        }
+        val trimmed = (load(selfUid, peerUid) + messages)
+            .associateBy { it.msgId }
+            .values
+            .sortedBy { it.msgTime }
+            .takeLast(MAX_MESSAGES)
         val array = JSONArray()
         trimmed.forEach { message ->
             array.put(JSONObject().apply {

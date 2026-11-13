@@ -328,6 +328,56 @@ class ChatRoomStateTest {
     }
 
     @Test
+    fun privateIncomingDoesNotMixOtherPeersOrUnaddressedSelfMessages() {
+        val incoming = privateMessage(1L, 7L, 100L, "来信")
+        val other = privateMessage(2L, 8L, 200L, "其他会话")
+        val self = privateMessage(3L, 9L, 300L, "自己发给未知联系人").copy(isSelf = true)
+        assertEquals(listOf(incoming), listOf(incoming, other, self).forPrivatePeer(7L))
+    }
+
+    @Test
+    fun privateEmptyPollPreservesHistoryAndPendingMessages() {
+        val incoming = privateMessage(1L, 7L, 100L, "历史")
+        val initial = PrivateChatUiState(messages = persistentListOf(incoming))
+        val sending = PrivateChatPartialChange.Send.Start(-1L, "发送中", 7L).reduce(initial)
+        val reduced = PrivateChatPartialChange.Poll.Success(persistentListOf()).reduce(sending)
+        assertEquals(sending.messages, reduced.messages)
+        assertEquals(SendState.SENDING, reduced.messages.last().sendState)
+    }
+
+    @Test
+    fun privateSendConfirmationReplacesOnlyMatchingPendingId() {
+        val initial = PrivateChatPartialChange.Send.Start(-1L, "相同文案", 7L)
+            .reduce(PrivateChatUiState())
+        val sending = PrivateChatPartialChange.Send.Start(-2L, "相同文案", 7L).reduce(initial)
+        val server = privateMessage(10L, 7L, Long.MAX_VALUE, "相同文案").copy(isSelf = true)
+        val confirmed = PrivateChatPartialChange.Send.Success(-1L, server).reduce(sending)
+        assertEquals(setOf(-2L, 10L), confirmed.messages.map { it.msgId }.toSet())
+        assertEquals(SendState.SENDING, confirmed.messages.first { it.msgId == -2L }.sendState)
+        assertTrue(!confirmed.messages.first { it.msgId == 10L }.isLocal)
+        val duplicate = PrivateChatPartialChange.Poll.Success(persistentListOf(server)).reduce(confirmed)
+        assertEquals(confirmed.messages, duplicate.messages)
+    }
+
+    @Test
+    fun privateLateFailureDoesNotOverwriteAcknowledgedMessage() {
+        val server = privateMessage(10L, 7L, 100L, "发送成功").copy(isSelf = true)
+        val state = PrivateChatUiState(messages = persistentListOf(server))
+        val reduced = PrivateChatPartialChange.Send.Failure(-1L, IllegalStateException("timeout"))
+            .reduce(state)
+        assertEquals(state.messages, reduced.messages)
+    }
+
+    @Test
+    fun privatePollIsSortedAndDeduplicatedByMessageId() {
+        val earlier = privateMessage(1L, 7L, 100L, "较早")
+        val later = privateMessage(2L, 7L, 200L, "较新")
+        val reduced = PrivateChatPartialChange.Poll.Success(persistentListOf(later, earlier, later))
+            .reduce(PrivateChatUiState(messages = persistentListOf(earlier)))
+        assertEquals(listOf(earlier, later), reduced.messages)
+    }
+
+    @Test
     fun confirmationAndFailureDoNotClearSendingParameters() {
         val mention = ChatMention(99L, "target-bduk", "机器人", "robot-portrait")
         val local = message(-1, local = true, state = SendState.SENDING)

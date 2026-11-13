@@ -21,8 +21,10 @@ import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.flatMapMerge
+import kotlinx.coroutines.flow.flatMapConcat
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.merge
 import java.util.concurrent.atomic.AtomicLong
@@ -63,6 +65,7 @@ class PrivateChatViewModel @Inject constructor() :
         socket ?: ChatWebSocketClient().also { socket = it }
 
     /** 当前会话的对端 uid，收到推送时用来触发对应会话的增量拉取。 */
+    @Volatile
     private var activePeerUid: Long = 0L
 
     /**
@@ -81,6 +84,13 @@ class PrivateChatViewModel @Inject constructor() :
         }
     }
 
+    fun unbindPeer(peerUid: Long) {
+        if (activePeerUid == peerUid) {
+            activePeerUid = 0L
+            socket?.onPushNotify = null
+        }
+    }
+
     init {
         obtainSocket()
     }
@@ -90,21 +100,36 @@ class PrivateChatViewModel @Inject constructor() :
     ) : PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> {
 
         private val pendingSeq = AtomicLong(0)
-        private fun newPendingId(): Long = -pendingSeq.decrementAndGet()
+        private fun newPendingId(): Long = pendingSeq.decrementAndGet()
+        private var privateCursor: Long = 0L
+        private var historyLoaded = false
 
         @OptIn(ExperimentalCoroutinesApi::class)
         override fun toPartialChangeFlow(
             intentFlow: Flow<PrivateChatUiIntent>,
         ): Flow<PrivateChatPartialChange> =
             merge(
-                intentFlow.filterIsInstance<PrivateChatUiIntent.Load>()
-                    .flatMapMerge { it.producePartialChange() },
-                intentFlow.filterIsInstance<PrivateChatUiIntent.Poll>()
-                    .flatMapMerge { it.producePartialChange() },
+                intentFlow
+                    .filter {
+                        it is PrivateChatUiIntent.Load ||
+                            it is PrivateChatUiIntent.Poll
+                    }
+                    .conflate()
+                    .flatMapConcat { intent ->
+                        when (intent) {
+                            is PrivateChatUiIntent.Load -> intent.producePartialChange()
+                            is PrivateChatUiIntent.Poll -> if (historyLoaded) {
+                                intent.producePartialChange()
+                            } else {
+                                PrivateChatUiIntent.Load(intent.peerUid).producePartialChange()
+                            }
+                            else -> error("unexpected private chat refresh intent")
+                        }
+                    },
                 intentFlow.filterIsInstance<PrivateChatUiIntent.Send>()
-                    .flatMapMerge { it.producePartialChange() },
+                    .flatMapConcat { it.producePartialChange() },
                 intentFlow.filterIsInstance<PrivateChatUiIntent.Resend>()
-                    .flatMapMerge { it.producePartialChange() },
+                    .flatMapConcat { it.producePartialChange() },
             )
 
         private fun PrivateChatUiIntent.Load.producePartialChange(): Flow<PrivateChatPartialChange.Load> =
@@ -123,12 +148,14 @@ class PrivateChatViewModel @Inject constructor() :
                 // 握手游标已是最新一条，单次请求拿不到历史；
                 // 从头按批拉取才能补齐整个会话，避免进入会话看到空白。
                 val incoming = client.fetchPrivateHistory()
-                val peerMessages = incoming
-                    .filter { it.isSelf || it.peerUid == peerUid }
-                    .map { if (it.isSelf) it.copy(peerUid = peerUid) else it }
-                val merged = mergePrivateMessages(cached, peerMessages)
+                val peerMessages = incoming.forPrivatePeer(peerUid)
+                val merged = mergePrivateMessages(
+                    PrivateChatCache.load(client.selfUid, peerUid), peerMessages,
+                )
                 PrivateChatCache.save(client.selfUid, peerUid, merged)
-                emit(PrivateChatPartialChange.Load.Success(peerMessages.toImmutableList()))
+                privateCursor = maxOf(privateCursor, client.privateFetchedMsgId)
+                historyLoaded = true
+                emit(PrivateChatPartialChange.Load.Success(merged.toImmutableList()))
             }.catch<PrivateChatPartialChange.Load> {
                 emit(PrivateChatPartialChange.Load.Failure(it))
             }
@@ -137,11 +164,21 @@ class PrivateChatViewModel @Inject constructor() :
             flow<PrivateChatPartialChange.Poll> {
                 val client = socketProvider() ?: error("chat socket unavailable")
                 client.connect(AccountUtil.getCookie().orEmpty())
-                val incoming = client.fetchPrivateMessages()
-                val peerMessages = incoming
-                    .filter { it.isSelf || it.peerUid == peerUid }
-                    .map { if (it.isSelf) it.copy(peerUid = peerUid) else it }
-                emit(PrivateChatPartialChange.Poll.Success(peerMessages.toImmutableList()))
+                // 推送只唤醒拉取，不能把服务器最新位置当作已经消费的位置。
+                for (page in 0 until 20) {
+                    val previousCursor = privateCursor
+                    val incoming = client.fetchPrivateMessagesSince(previousCursor)
+                    val peerMessages = incoming.forPrivatePeer(peerUid)
+                    if (peerMessages.isNotEmpty()) {
+                        val merged = mergePrivateMessages(
+                            PrivateChatCache.load(client.selfUid, peerUid), peerMessages,
+                        )
+                        PrivateChatCache.save(client.selfUid, peerUid, merged)
+                        emit(PrivateChatPartialChange.Poll.Success(merged.toImmutableList()))
+                    }
+                    privateCursor = maxOf(previousCursor, client.privateFetchedMsgId)
+                    if (privateCursor <= previousCursor || privateCursor >= client.privateLastMsgId) break
+                }
             }.catch<PrivateChatPartialChange.Poll> {
                 emit(PrivateChatPartialChange.Poll.Failure)
             }
@@ -156,8 +193,8 @@ class PrivateChatViewModel @Inject constructor() :
                         peerUid = peerUid,
                     )
                 )
-                saveAndSend(content, peerUid)
-                emit(PrivateChatPartialChange.Send.Success(id))
+                val message = saveAndSend(content, peerUid)
+                emit(PrivateChatPartialChange.Send.Success(id, message))
             }.catch { emit(PrivateChatPartialChange.Send.Failure(id, it)) }
         }
 
@@ -172,17 +209,17 @@ class PrivateChatViewModel @Inject constructor() :
                         removeMsgId = failedMsgId,
                     )
                 )
-                saveAndSend(content, peerUid)
-                emit(PrivateChatPartialChange.Send.Success(id))
+                val message = saveAndSend(content, peerUid)
+                emit(PrivateChatPartialChange.Send.Success(id, message))
             }.catch { emit(PrivateChatPartialChange.Send.Failure(id, it)) }
         }
 
-        private suspend fun saveAndSend(content: String, peerUid: Long) {
+        private suspend fun saveAndSend(content: String, peerUid: Long): ChatWsMessage {
             val client = socketProvider() ?: error("chat socket unavailable")
             client.connect(AccountUtil.getCookie().orEmpty())
             val msgId = client.sendMessage(peerUid, content)
-            val cached = PrivateChatCache.load(client.selfUid, peerUid).toMutableList()
-            cached += ChatWsMessage(
+            val cached = PrivateChatCache.load(client.selfUid, peerUid)
+            val message = ChatWsMessage(
                 msgId = msgId,
                 peerUid = peerUid,
                 peerName = "",
@@ -191,7 +228,8 @@ class PrivateChatViewModel @Inject constructor() :
                 msgTime = System.currentTimeMillis(),
                 isSelf = true,
             )
-            PrivateChatCache.save(client.selfUid, peerUid, cached)
+            PrivateChatCache.save(client.selfUid, peerUid, mergePrivateMessages(cached, listOf(message)))
+            return message
         }
     }
 }
@@ -207,6 +245,10 @@ sealed interface PrivateChatUiIntent : UiIntent {
     ) : PrivateChatUiIntent
 }
 
+// 拉取响应只有发送者，没有收件人，不能把所有自己的消息归给当前会话。
+internal fun List<ChatWsMessage>.forPrivatePeer(peerUid: Long): List<ChatWsMessage> =
+    filter { !it.isSelf && it.peerUid == peerUid }
+
 /** 缓存与网络增量按 msgId 去重合并，按时间正序。 */
 private fun mergePrivateMessages(
     current: List<ChatWsMessage>,
@@ -217,19 +259,11 @@ private fun mergePrivateMessages(
         .values
         .sortedBy { it.msgTime }
 
-/** 状态与网络增量合并，保留本地占位直到服务端回显同内容。 */
+/** 本地发送确认通过 pendingId 替换，不按相同文案删除其他消息。 */
 private fun mergeIntoState(
     current: List<ChatWsMessage>,
     incoming: List<ChatWsMessage>,
-): ImmutableList<ChatWsMessage> {
-    val existingIds = current.mapTo(HashSet()) { it.msgId }
-    val serverSelfContents = incoming.filter { it.isSelf }.mapTo(HashSet()) { it.content }
-    val kept = current.filterNot { local ->
-        local.isLocal && local.sendState == SendState.SENT && local.content in serverSelfContents
-    }
-    val added = incoming.filterNot { it.msgId in existingIds }
-    return (kept + added).sortedBy { it.msgTime }.toImmutableList()
-}
+): ImmutableList<ChatWsMessage> = mergePrivateMessages(current, incoming).toImmutableList()
 
 sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
     sealed class Load : PrivateChatPartialChange {
@@ -282,9 +316,10 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
                 }
 
                 is Success -> oldState.copy(
-                    messages = oldState.messages.map {
-                        if (it.msgId == pendingId) it.copy(sendState = SendState.SENT) else it
-                    }.toImmutableList(),
+                    messages = mergeIntoState(
+                        oldState.messages.filterNot { it.msgId == pendingId },
+                        listOf(message),
+                    ),
                 )
 
                 is Failure -> oldState.copy(
@@ -301,7 +336,7 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
             val removeMsgId: Long? = null,
         ) : Send()
 
-        data class Success(val pendingId: Long) : Send()
+        data class Success(val pendingId: Long, val message: ChatWsMessage) : Send()
         data class Failure(val pendingId: Long, val error: Throwable) : Send()
     }
 }

@@ -20,6 +20,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
@@ -29,7 +32,6 @@ import com.huanchengfly.tieba.post.ui.page.ProvideNavigator
 import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.BackNavigationIcon
 import com.huanchengfly.tieba.post.ui.widgets.compose.ConfirmDialog
-import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoad
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyLazyColumn
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyScaffold
 import com.huanchengfly.tieba.post.ui.widgets.compose.TitleCentredToolbar
@@ -54,11 +56,6 @@ fun PrivateChatPage(
     peerPortrait: String = "",
     viewModel: PrivateChatViewModel = pageViewModel(),
 ) {
-    LazyLoad(loaded = viewModel.initialized) {
-        viewModel.send(PrivateChatUiIntent.Load(peerUid))
-        viewModel.initialized = true
-    }
-
     val isLoading by viewModel.uiState.collectPartialAsState(
         prop1 = PrivateChatUiState::isLoading,
         initial = true,
@@ -101,12 +98,25 @@ fun PrivateChatPage(
         listState.animateScrollToItem(0)
     }
 
-    // 绑定会话并注册推送：收到服务端推送立即刷新，5 秒轮询只作兜底
-    LaunchedEffect(peerUid) {
-        viewModel.bindPeer(peerUid)
-        while (true) {
-            delay(5_000)
-            viewModel.send(PrivateChatUiIntent.Poll(peerUid))
+    // 可见时接收推送，回到页面立即补拉，5 秒轮询只作兜底。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(peerUid, viewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            viewModel.bindPeer(peerUid)
+            try {
+                if (!viewModel.initialized) {
+                    viewModel.send(PrivateChatUiIntent.Load(peerUid))
+                    viewModel.initialized = true
+                } else {
+                    viewModel.send(PrivateChatUiIntent.Poll(peerUid))
+                }
+                while (true) {
+                    delay(5_000)
+                    viewModel.send(PrivateChatUiIntent.Poll(peerUid))
+                }
+            } finally {
+                viewModel.unbindPeer(peerUid)
+            }
         }
     }
 

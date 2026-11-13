@@ -5,7 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -17,7 +18,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.DropdownMenuItem
@@ -32,9 +32,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -61,6 +61,7 @@ import com.ramcosta.composedestinations.navigation.DestinationsNavigator
  * 结构参考 JetChat 与 compose_chat：整行按收发方靠左/靠右，自己消息的状态指示器
  * 放在气泡左侧同一个内层 Row 里，固定宽度不参与 weight，避免气泡宽度抖动。
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatMessageRow(
     text: String,
@@ -73,10 +74,12 @@ fun ChatMessageRow(
     modifier: Modifier = Modifier,
     images: List<String> = emptyList(),
     onAvatarClick: () -> Unit = {},
+    onAvatarLongClick: (() -> Unit)? = null,
 ) {
     val bubbleColor = if (isSelf) ExtendedTheme.colors.primary else ExtendedTheme.colors.chip
     val textColor = if (isSelf) ExtendedTheme.colors.onPrimary else ExtendedTheme.colors.onChip
     val hasImages = images.isNotEmpty()
+    val compact = LocalConfiguration.current.screenWidthDp < 360
     val context = LocalContext.current
     val copyMessage = {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -91,29 +94,35 @@ fun ChatMessageRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+            .padding(horizontal = if (compact) 6.dp else 16.dp, vertical = 6.dp),
         horizontalArrangement = if (isSelf) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.Top,
     ) {
         if (!isSelf) {
-            Avatar(
-                data = StringUtil.getAvatarUrl(avatarUrl),
-                size = Sizes.Small,
-                contentDescription = null,
+            Box(
                 modifier = Modifier
-                    .clip(CircleShape)
-                    .clickable(
+                    .size(48.dp)
+                    .combinedClickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = onAvatarClick,
+                        onLongClick = onAvatarLongClick,
+                        onLongClickLabel = if (onAvatarLongClick != null) "提及此成员" else null,
                     ),
-            )
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                Avatar(
+                    data = StringUtil.getAvatarUrl(avatarUrl),
+                    size = Sizes.Small,
+                    contentDescription = "$senderName 的头像",
+                )
+            }
         }
 
         Column(
             modifier = Modifier
                 .widthIn(max = 280.dp)
-                .padding(horizontal = 8.dp),
+                .padding(horizontal = if (compact) 4.dp else 8.dp),
             horizontalAlignment = if (isSelf) Alignment.End else Alignment.Start,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {

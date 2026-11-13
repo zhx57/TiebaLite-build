@@ -86,9 +86,9 @@ class RawWebSocket(
      * 关闭连接。
      */
     fun close() {
-        if (closed) return
+        val wasClosed = closed
         closed = true
-        runCatching { writeFrame(OP_CLOSE, ByteArray(0)) }
+        if (!wasClosed) runCatching { writeFrame(OP_CLOSE, ByteArray(0)) }
         runCatching { socket?.close() }
         socket = null
         input = null
@@ -149,6 +149,7 @@ class RawWebSocket(
     private fun startReader() {
         Thread({
             var fragmented = java.io.ByteArrayOutputStream()
+            var failure: Throwable? = null
             try {
                 while (!closed) {
                     val first = input?.read() ?: break
@@ -184,19 +185,18 @@ class RawWebSocket(
                         }
 
                         OP_PING -> runCatching { writeFrame(OP_PONG, payload) }
-                        OP_CLOSE -> {
-                            closed = true
-                            onClosed?.invoke(null)
-                            break
-                        }
+                        OP_CLOSE -> break
 
                         OP_PONG -> Unit
                     }
                 }
             } catch (e: Exception) {
-                if (!closed) onClosed?.invoke(e)
+                failure = e
             } finally {
+                val notifyClosed = !closed
                 closed = true
+                runCatching { socket?.close() }
+                if (notifyClosed) onClosed?.invoke(failure)
             }
         }, "raw-ws-reader").apply {
             isDaemon = true

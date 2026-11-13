@@ -1,5 +1,6 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -87,6 +89,7 @@ fun ChatRoomPage(
     fid: Long = 0L,
     viewModel: ChatRoomViewModel = pageViewModel(),
 ) {
+    val context = LocalContext.current
     LazyLoad(loaded = viewModel.initialized) {
         viewModel.send(ChatRoomUiIntent.Load(roomId))
         viewModel.initialized = true
@@ -212,7 +215,7 @@ fun ChatRoomPage(
     LaunchedEffect(roomId, viewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
-                delay(3_000)
+                delay(2_000)
                 viewModel.send(ChatRoomUiIntent.Poll(roomId))
             }
         }
@@ -313,20 +316,6 @@ fun ChatRoomPage(
             bottomBar = {
                 if (account != null) {
                     Column {
-                        if (robotSkill != null) {
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Text("机器人命令：$robotCommandName", style = MaterialTheme.typography.caption)
-                                TextButton(onClick = {
-                                    robotSkill = null
-                                    robotTargetUk = null
-                                    robotCommandName = ""
-                                }) { Text("取消命令") }
-                            }
-                        }
                         ChatComposer(
                             value = input,
                             onValueChange = { value ->
@@ -369,6 +358,12 @@ fun ChatRoomPage(
                             onDismissEmoticonPanel = { showEmoticonPanel = false },
                             onMentionClick = { picker = "mention" },
                             onRobotClick = { picker = "robot" },
+                            robotCommandName = robotCommandName.takeIf { robotSkill != null },
+                            onCancelRobotCommand = {
+                                robotSkill = null
+                                robotTargetUk = null
+                                robotCommandName = ""
+                            },
                             onEmoticonClick = { emoticon: Emoticon ->
                                 val insertion = "#(${emoticon.name})"
                                 val start = input.selection.min
@@ -412,6 +407,16 @@ fun ChatRoomPage(
                             onAvatarClick = {
                                 if (message.senderUid > 0L) {
                                     navigateToUserProfile(navigator, message.senderUid)
+                                }
+                            },
+                            onAvatarLongClick = {
+                                if (message.senderBaiduUk.isNotBlank() && message.senderName.isNotBlank()) {
+                                    insertMention(ChatMention(
+                                        message.senderUid, message.senderBaiduUk,
+                                        message.senderName, message.senderPortrait,
+                                    ))
+                                } else {
+                                    Toast.makeText(context, "缺少成员身份信息，暂时无法艾特", Toast.LENGTH_SHORT).show()
                                 }
                             },
                         )

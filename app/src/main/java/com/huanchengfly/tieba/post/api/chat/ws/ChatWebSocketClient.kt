@@ -14,6 +14,8 @@ import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.CuidUtils
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okio.ByteString.Companion.toByteString
@@ -43,6 +45,9 @@ class ChatWebSocketClient {
 
     private val reqIdGen = AtomicInteger((System.currentTimeMillis() / 1000).toInt())
 
+    private val connectMutex = Mutex()
+
+    @Volatile
     private var webSocket: RawWebSocket? = null
 
     /** 等待响应的请求，key 为 reqId。 */
@@ -74,33 +79,47 @@ class ChatWebSocketClient {
      * 建立连接并完成握手。
      */
     suspend fun connect(cookie: String) = withContext(Dispatchers.IO) {
-        if (connected) return@withContext
-        // 使用原始 Socket 实现的 WebSocket：
-        // 贴吧服务端要求 Sec-WebSocket-Extensions 为 im_version=2.3 且不支持
-        // permessage-deflate，OkHttp 无法满足这两点，会在握手后被服务端断开。
-        val socket = RawWebSocket(
-            host = ChatWsConstants.WS_HOST,
-            port = ChatWsConstants.WS_PORT,
-            path = ChatWsConstants.WS_PATH,
-            headers = linkedMapOf(
-                "Sec-WebSocket-Extensions" to ChatWsConstants.WS_EXTENSIONS,
-                "Accept-Encoding" to "gzip",
-                "User-Agent" to "tieba/${ChatWsConstants.CHAT_VERSION}",
-                "Cookie" to cookie,
-            ),
-        )
-        socket.onBinary = { bytes -> handleFrame(bytes) }
-        socket.onClosed = { err ->
-            connected = false
-            pending.values.forEach {
-                it.completeExceptionally(err ?: IllegalStateException("websocket closed"))
+        connectMutex.withLock {
+            if (connected) return@withLock
+            close()
+            // 使用原始 Socket 实现的 WebSocket：
+            // 贴吧服务端要求 Sec-WebSocket-Extensions 为 im_version=2.3 且不支持
+            // permessage-deflate，OkHttp 无法满足这两点，会在握手后被服务端断开。
+            val socket = RawWebSocket(
+                host = ChatWsConstants.WS_HOST,
+                port = ChatWsConstants.WS_PORT,
+                path = ChatWsConstants.WS_PATH,
+                headers = linkedMapOf(
+                    "Sec-WebSocket-Extensions" to ChatWsConstants.WS_EXTENSIONS,
+                    "Accept-Encoding" to "gzip",
+                    "User-Agent" to "tieba/${ChatWsConstants.CHAT_VERSION}",
+                    "Cookie" to cookie,
+                ),
+            )
+            socket.onBinary = { bytes -> handleFrame(bytes) }
+            socket.onClosed = { err ->
+                if (webSocket === socket) {
+                    connected = false
+                    pending.values.forEach {
+                        it.completeExceptionally(err ?: IllegalStateException("websocket closed"))
+                    }
+                    pending.clear()
+                }
             }
-            pending.clear()
+            webSocket = socket
+            try {
+                socket.connect()
+                handshake()
+                connected = true
+            } catch (e: Throwable) {
+                if (webSocket === socket) {
+                    close()
+                } else {
+                    runCatching { socket.close() }
+                }
+                throw e
+            }
         }
-        socket.connect()
-        webSocket = socket
-        handshake()
-        connected = true
     }
 
     /**
