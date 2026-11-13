@@ -9,20 +9,25 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.EOFException
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.security.SecureRandom
-import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
 /**
  * BLCP 客户端：TLS 长连接 + LCP 帧收发 + 请求响应关联。
  *
- * 只在群聊发送场景中使用，页面退出即断开。
+ * 只在群聊发送场景中使用，每个实例只建立一次连接。
  */
 class BlcpClient {
 
     private val random = SecureRandom()
+
+    private val stateLock = Any()
+
+    private val writeLock = Any()
 
     private var socket: SSLSocket? = null
 
@@ -31,28 +36,57 @@ class BlcpClient {
     @Volatile
     private var closed = false
 
-    private val pending = ConcurrentHashMap<Long, CompletableDeferred<BlcpFrame.Decoded>>()
+    private val pending = HashMap<Long, CompletableDeferred<BlcpFrame.Decoded>>()
 
     private var readBuffer = ByteArray(0)
 
+    private var started = false
+
+    private var connected = false
+
+    val isConnected: Boolean
+        get() = synchronized(stateLock) {
+            connected && !closed && socket?.let {
+                it.isConnected && !it.isClosed && !it.isInputShutdown && !it.isOutputShutdown
+            } == true
+        }
+
     /**
-     * 建立 TLS 连接。
+     * 建立 TLS 连接，每个实例只允许调用一次。
      */
     suspend fun connect() = withContext(Dispatchers.IO) {
-        if (socket != null) return@withContext
-        val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-        val sslSocket = factory.createSocket() as SSLSocket
-        sslSocket.connect(
-            InetSocketAddress(BlcpConstants.HOST, BlcpConstants.PORT),
-            10_000,
-        )
-        sslSocket.soTimeout = 0
-        sslSocket.startHandshake()
-        socket = sslSocket
-        closed = false
-        readerThread = Thread({ readLoop(sslSocket) }, "blcp-reader").apply {
-            isDaemon = true
-            start()
+        synchronized(stateLock) {
+            check(!started && !closed) { "BLCP client cannot be reconnected" }
+            started = true
+        }
+        var connectingSocket: SSLSocket? = null
+        try {
+            val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
+            val sslSocket = factory.createSocket() as SSLSocket
+            connectingSocket = sslSocket
+            synchronized(stateLock) {
+                check(!closed) { "BLCP connection is closed" }
+                socket = sslSocket
+            }
+            sslSocket.connect(
+                InetSocketAddress(BlcpConstants.HOST, BlcpConstants.PORT),
+                10_000,
+            )
+            sslSocket.soTimeout = 10_000
+            sslSocket.startHandshake()
+            sslSocket.soTimeout = 0
+            synchronized(stateLock) {
+                check(!closed) { "BLCP connection is closed" }
+                connected = true
+                readerThread = Thread({ readLoop(sslSocket) }, "blcp-reader").apply {
+                    isDaemon = true
+                    start()
+                }
+            }
+        } catch (e: Exception) {
+            closeConnection(e)
+            runCatching { connectingSocket?.close() }
+            throw e
         }
     }
 
@@ -60,13 +94,23 @@ class BlcpClient {
      * 关闭连接。
      */
     fun close() {
-        closed = true
-        pending.values.forEach { it.cancel() }
-        pending.clear()
-        runCatching { socket?.close() }
-        socket = null
-        readerThread?.interrupt()
-        readerThread = null
+        closeConnection(IOException("BLCP connection is closed"))
+    }
+
+    private fun closeConnection(cause: Exception) {
+        val resources = synchronized(stateLock) {
+            if (closed) return
+            closed = true
+            connected = false
+            val resources = Triple(socket, readerThread, pending.values.toList())
+            socket = null
+            readerThread = null
+            pending.clear()
+            resources
+        }
+        resources.third.forEach { it.completeExceptionally(cause) }
+        runCatching { resources.first?.close() }
+        resources.second?.takeIf { it != Thread.currentThread() }?.interrupt()
     }
 
     /**
@@ -97,14 +141,22 @@ class BlcpClient {
             body = request.encode(),
             correlationId = logId,
         )
+        response.meta.response?.let { rpcResponse ->
+            if (rpcResponse.error_code != 0) {
+                throw IllegalStateException(
+                    "LCM login failed: RPC ${rpcResponse.error_code} ${rpcResponse.error_text}"
+                )
+            }
+        }
         val rpcData = RpcData.ADAPTER.decode(response.body)
-        val errorCode = rpcData.lcm_response?.error_code ?: 0
-        if (errorCode != 0) {
+        val lcmResponse = rpcData.lcm_response
+            ?: throw IllegalStateException("LCM login failed: response missing")
+        if (lcmResponse.error_code != 0) {
             throw IllegalStateException(
-                "LCM login failed: $errorCode ${rpcData.lcm_response?.error_msg}"
+                "LCM login failed: ${lcmResponse.error_code} ${lcmResponse.error_msg}"
             )
         }
-        return rpcData.lcm_response?.next_interval_ms ?: 0L
+        return lcmResponse.next_interval_ms
     }
 
     /**
@@ -243,21 +295,30 @@ class BlcpClient {
         body: ByteArray,
         correlationId: Long,
     ): BlcpFrame.Decoded {
-        val sslSocket = socket ?: throw IllegalStateException("BLCP connection is not open")
         val deferred = CompletableDeferred<BlcpFrame.Decoded>()
-        pending[correlationId] = deferred
+        val sslSocket = synchronized(stateLock) {
+            check(connected && !closed) { "BLCP connection is not open" }
+            val currentSocket = socket ?: error("BLCP connection is not open")
+            pending[correlationId] = deferred
+            currentSocket
+        }
         val frame = BlcpFrame.buildRequest(
             serviceId = serviceId,
             methodId = methodId,
             correlationId = correlationId,
             body = body,
         )
-        sslSocket.outputStream.write(frame)
-        sslSocket.outputStream.flush()
-        return try {
-            withTimeout(15_000) { deferred.await() }
+        try {
+            synchronized(writeLock) {
+                sslSocket.outputStream.write(frame)
+                sslSocket.outputStream.flush()
+            }
+            return withTimeout(15_000) { deferred.await() }
+        } catch (e: Exception) {
+            closeConnection(e)
+            throw e
         } finally {
-            pending.remove(correlationId)
+            synchronized(stateLock) { pending.remove(correlationId) }
         }
     }
 
@@ -266,21 +327,21 @@ class BlcpClient {
         try {
             while (!closed) {
                 val read = sslSocket.inputStream.read(buffer)
-                if (read <= 0) break
+                if (read < 0) throw EOFException("BLCP connection reached EOF")
+                if (read == 0) continue
                 readBuffer += buffer.copyOfRange(0, read)
                 val (frames, rest) = BlcpFrame.splitFrames(readBuffer)
                 readBuffer = rest
                 frames.forEach { frame ->
                     val decoded = runCatching { BlcpFrame.decode(frame) }.getOrNull() ?: return@forEach
                     val correlationId = decoded.meta.correlation_id ?: 0L
-                    pending.remove(correlationId)?.complete(decoded)
+                    synchronized(stateLock) {
+                        pending.remove(correlationId)?.complete(decoded)
+                    }
                 }
             }
         } catch (e: Exception) {
-            if (!closed) {
-                pending.values.forEach { it.completeExceptionally(e) }
-                pending.clear()
-            }
+            if (!closed) closeConnection(e)
         }
     }
 

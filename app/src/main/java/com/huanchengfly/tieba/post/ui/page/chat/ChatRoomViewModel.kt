@@ -3,6 +3,8 @@ package com.huanchengfly.tieba.post.ui.page.chat
 import android.util.Log
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.delay
 import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
@@ -49,7 +51,23 @@ class ChatRoomViewModel @Inject constructor() :
 
     override fun createInitialState(): ChatRoomUiState = ChatRoomUiState()
 
-    override fun createPartialChangeProducer() = ChatRoomPartialChangeProducer
+    private var sender: ChatSendApi.Session? = null
+
+    @Synchronized
+    private fun sendSession() = sender ?: ChatSendApi.Session(viewModelScope).also { sender = it }
+
+    @Synchronized
+    fun closeSendSession() {
+        sender?.release()
+        sender = null
+    }
+
+    override fun onCleared() {
+        closeSendSession()
+        super.onCleared()
+    }
+
+    override fun createPartialChangeProducer() = ChatRoomPartialChangeProducer { sendSession() }
 
     override fun dispatchEvent(partialChange: ChatRoomPartialChange): UiEvent? =
         when (partialChange) {
@@ -57,10 +75,16 @@ class ChatRoomViewModel @Inject constructor() :
                 CommonUiEvent.Toast(partialChange.error.getErrorMessage())
             is ChatRoomPartialChange.LoadMore.Failure ->
                 CommonUiEvent.Toast(partialChange.error.getErrorMessage())
+            is ChatRoomPartialChange.Send.Failure ->
+                if (uiState.value.messages.any { it.echoForPendingId == partialChange.pendingId }) null
+                else CommonUiEvent.Toast(partialChange.error.getErrorMessage())
+            is ChatRoomPartialChange.Send.Unconfirmed ->
+                if (uiState.value.messages.any { it.msgId == partialChange.pendingId && it.isLocal })
+                    CommonUiEvent.Toast(UNCONFIRMED_SEND_MESSAGE) else null
             else -> null
         }
 
-    object ChatRoomPartialChangeProducer :
+    class ChatRoomPartialChangeProducer(private val sender: () -> ChatSendApi.Session) :
         PartialChangeProducer<ChatRoomUiIntent, ChatRoomPartialChange, ChatRoomUiState> {
 
         /** 本地占位用递减负数，避免与服务端正数 msgId 冲突。 */
@@ -134,6 +158,7 @@ class ChatRoomViewModel @Inject constructor() :
 
         private fun ChatRoomUiIntent.Send.producePartialChange(): Flow<ChatRoomPartialChange.Send> {
             val pendingId = newPendingId()
+            val session = sender()
             return flow {
                 emit(
                     ChatRoomPartialChange.Send.Start(
@@ -146,7 +171,7 @@ class ChatRoomViewModel @Inject constructor() :
                         robotSkill = robotSkill,
                     )
                 )
-                ChatSendApi.sendChatRoomMessage(
+                session.sendChatRoomMessage(
                     chatroomId = roomId,
                     text = text,
                     forumId = forumId,
@@ -160,11 +185,14 @@ class ChatRoomViewModel @Inject constructor() :
                     robotSkill = robotSkill,
                 )
                 emit(ChatRoomPartialChange.Send.Success(pendingId))
+                delay(20_000)
+                emit(ChatRoomPartialChange.Send.Unconfirmed(pendingId))
             }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
         }
 
         private fun ChatRoomUiIntent.Resend.producePartialChange(): Flow<ChatRoomPartialChange.Send> {
             val pendingId = newPendingId()
+            val session = sender()
             return flow {
                 emit(
                     ChatRoomPartialChange.Send.Start(
@@ -178,7 +206,7 @@ class ChatRoomViewModel @Inject constructor() :
                         removeMsgId = failedMsgId,
                     )
                 )
-                ChatSendApi.sendChatRoomMessage(
+                session.sendChatRoomMessage(
                     chatroomId = roomId,
                     text = text,
                     forumId = forumId,
@@ -192,6 +220,8 @@ class ChatRoomViewModel @Inject constructor() :
                     robotSkill = robotSkill,
                 )
                 emit(ChatRoomPartialChange.Send.Success(pendingId))
+                delay(20_000)
+                emit(ChatRoomPartialChange.Send.Unconfirmed(pendingId))
             }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
         }
     }
@@ -248,7 +278,7 @@ internal fun mergeServerMessages(
     if (added.isEmpty()) return current as? ImmutableList<ChatRoomMessage> ?: current.toImmutableList()
     val reserved = current.mapNotNullTo(HashSet()) { it.echoForPendingId }
     val locals = current.filter {
-        it.isLocal && it.sendState != SendState.FAILED && it.msgId !in reserved
+        it.isLocal && (it.sendState != SendState.FAILED || it.transportAccepted) && it.msgId !in reserved
     }.toMutableList()
     val merged = current.toMutableList()
     for (server in added.sortedBy { it.msgTime }) {
@@ -261,12 +291,9 @@ internal fun mergeServerMessages(
         var message = server
         if (candidate != null) {
             locals.remove(candidate)
-            if (candidate.sendState == SendState.SENT) {
-                merged.remove(candidate)
-            } else {
-                // BLCP 确认与轮询可交错，先占用这条回显，确认后再移除占位。
-                message = server.copy(echoForPendingId = candidate.msgId)
-            }
+            merged.remove(candidate)
+            // 历史回显才是成功依据；保留关联，防止迟到的超时覆盖成功。
+            message = server.copy(echoForPendingId = candidate.msgId)
         }
         var low = 0
         var high = merged.size
@@ -278,6 +305,9 @@ internal fun mergeServerMessages(
     }
     return merged.toImmutableList()
 }
+
+internal const val UNCONFIRMED_SEND_MESSAGE =
+    "接口已返回，但暂未在群历史中确认此消息。可能仍在审核或同步，请先检查再重发，避免重复。"
 
 sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
     sealed class Load : ChatRoomPartialChange {
@@ -369,18 +399,24 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                     oldState.copy(messages = oldState.messages.mapNotNull {
                         when {
                             it.msgId == pendingId && echo != null -> null
-                            it.msgId == pendingId -> it.copy(sendState = SendState.SENT)
+                            it.msgId == pendingId -> it.copy(transportAccepted = true)
                             else -> it
                         }
                     }.toImmutableList())
                 }
+
+                is Unconfirmed -> oldState.copy(messages = oldState.messages.map {
+                    if (it.msgId == pendingId && it.isLocal && it.transportAccepted)
+                        it.copy(sendState = SendState.FAILED, sendError = UNCONFIRMED_SEND_MESSAGE)
+                    else it
+                }.toImmutableList())
 
                 is Failure -> {
                     val echoed = oldState.messages.any { it.echoForPendingId == pendingId }
                     oldState.copy(messages = oldState.messages.mapNotNull {
                         when {
                             it.msgId == pendingId && echoed -> null
-                            it.msgId == pendingId -> it.copy(sendState = SendState.FAILED)
+                            it.msgId == pendingId -> it.copy(sendState = SendState.FAILED, sendError = error.getErrorMessage())
                             else -> it
                         }
                     }.toImmutableList())
@@ -399,6 +435,7 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
         ) : Send()
 
         data class Success(val pendingId: Long) : Send()
+        data class Unconfirmed(val pendingId: Long) : Send()
         data class Failure(val pendingId: Long, val error: Throwable) : Send()
     }
 }

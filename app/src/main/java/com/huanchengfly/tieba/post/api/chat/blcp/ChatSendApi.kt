@@ -1,7 +1,14 @@
 package com.huanchengfly.tieba.post.api.chat.blcp
 
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -64,49 +71,102 @@ object ChatSendApi {
         }
     }
 
-    /**
-     * 发送一条群文本消息。
-     */
-    suspend fun sendChatRoomMessage(
-        chatroomId: Long,
-        text: String,
-        forumId: Long,
-        forumLevel: Int,
-        accountBduss: String,
-        selfName: String,
-        selfPortrait: String,
-        selfUid: Long,
-        cuidGalaxy2: String,
-        mentions: List<ChatMention> = emptyList(),
-        robotSkill: Int? = null,
-    ) = withContext(Dispatchers.IO) {
-        val blcp = BlcpClient()
-        try {
-            blcp.connect()
-            val token = fetchLcmToken(cuidGalaxy2)
-            blcp.loginLcm(token, cuidGalaxy2)
-            val identity = blcp.loginIm(accountBduss, cuidGalaxy2)
-            blcp.joinChatroom(chatroomId, identity.uk)
+    /** 一个页面独占一份发送会话，账号或群变化时重新登录。 */
+    class Session(private val scope: CoroutineScope) {
+        private val mutex = Mutex()
+        private val lifecycleLock = Any()
+        private var blcp: BlcpClient? = null
+        private var identity: BlcpImIdentity? = null
+        private var account: String? = null
+        private var device: String? = null
+        private var room: Long? = null
+        private var expiryClose: Job? = null
+        private var released = false
 
-            // 与官方客户端一致：baidu_uk 由发送者自己的 uid 加密得到
-            val bduk = BlcpCrypto.userId2Bduk(selfUid)
-            val payload = buildMessagePayload(
-                chatroomId = chatroomId,
-                text = text,
-                forumId = forumId,
-                forumLevel = forumLevel,
-                uk = identity.uk,
-                bduk = bduk,
-                triggerId = identity.triggerId,
-                selfName = selfName,
-                selfPortrait = selfPortrait,
-                bduss = accountBduss,
-                mentions = mentions,
-                robotSkill = robotSkill,
-            )
-            blcp.sendMcastMsg(chatroomId, payload)
-        } finally {
-            blcp.close()
+        fun release() = synchronized(lifecycleLock) {
+            released = true
+            close()
+        }
+
+        fun close() = synchronized(lifecycleLock) {
+            expiryClose?.cancel()
+            expiryClose = null
+            blcp?.close()
+            blcp = null
+            identity = null
+            account = null
+            device = null
+            room = null
+        }
+
+        suspend fun sendChatRoomMessage(
+            chatroomId: Long,
+            text: String,
+            forumId: Long,
+            forumLevel: Int,
+            accountBduss: String,
+            selfName: String,
+            selfPortrait: String,
+            selfUid: Long,
+            cuidGalaxy2: String,
+            mentions: List<ChatMention> = emptyList(),
+            robotSkill: Int? = null,
+        ) = withContext(Dispatchers.IO) {
+            mutex.withLock {
+                var stage = "连接"
+                try {
+                    val connection = synchronized(lifecycleLock) {
+                        check(!released) { "群聊页面已离开，连接已释放" }
+                        if (blcp?.isConnected != true || account != accountBduss ||
+                            device != cuidGalaxy2 || room != chatroomId
+                        ) {
+                            close()
+                            blcp = BlcpClient()
+                        }
+                        blcp!!
+                    }
+                    var login = synchronized(lifecycleLock) { identity }
+                    if (login == null) {
+                        connection.connect()
+                        stage = "获取登录令牌"
+                        val token = fetchLcmToken(cuidGalaxy2)
+                        stage = "LCM 登录"
+                        val interval = connection.loginLcm(token, cuidGalaxy2)
+                        stage = "IM 登录"
+                        val newLogin = connection.loginIm(accountBduss, cuidGalaxy2)
+                        login = newLogin
+                        stage = "加入群聊"
+                        connection.joinChatroom(chatroomId, newLogin.uk)
+                        synchronized(lifecycleLock) {
+                            check(blcp === connection) { "群聊页面已离开，连接已关闭" }
+                            identity = login
+                            account = accountBduss
+                            device = cuidGalaxy2
+                            room = chatroomId
+                            // 尚无可靠的心跳协议，在首个心跳期限前主动回收登录态。
+                            val lifetimeMs = if (interval > 0) (interval / 2).coerceAtLeast(1L) else 30_000L
+                            expiryClose = scope.launch {
+                                delay(lifetimeMs.coerceAtMost(30_000L))
+                                mutex.withLock { close() }
+                            }
+                        }
+                    }
+                    stage = "发送消息"
+                    val authenticated = checkNotNull(login)
+                    val payload = buildMessagePayload(
+                        chatroomId, text, forumId, forumLevel, authenticated.uk,
+                        BlcpCrypto.userId2Bduk(selfUid), authenticated.triggerId,
+                        selfName, selfPortrait, accountBduss, mentions, robotSkill,
+                    )
+                    connection.sendMcastMsg(chatroomId, payload)
+                } catch (e: Exception) {
+                    close()
+                    if (e is CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
+                    val detail = e.message.orEmpty().replace(accountBduss, "[已隐藏]")
+                        .replace(cuidGalaxy2, "[已隐藏]").take(300)
+                    throw IllegalStateException("群聊$stage 失败：${detail.ifBlank { e.javaClass.simpleName }}")
+                }
+            }
         }
     }
 

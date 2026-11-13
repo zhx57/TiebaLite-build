@@ -1,7 +1,9 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
 import com.huanchengfly.tieba.post.api.chat.ChatApi
+import com.huanchengfly.tieba.post.api.chat.blcp.BlcpClient
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpCrypto
+import kotlinx.coroutines.runBlocking
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import org.json.JSONObject
@@ -38,6 +40,53 @@ class ChatRoomStateTest {
         assertEquals(listOf(mention), started.messages.single().mentions)
         assertEquals(1L, ChatRoomPartialChange.Send.Success(-1L).reduce(started).sendRequestId)
         assertEquals(1L, ChatRoomPartialChange.Poll.Success(persistentListOf()).reduce(started).sendRequestId)
+    }
+
+    @Test
+    fun closedClientCannotReconnectAndCloseIsIdempotent() = runBlocking {
+        val client = BlcpClient()
+        assertFalse(client.isConnected)
+        client.close()
+        client.close()
+        val error = runCatching { client.connect() }.exceptionOrNull()
+        assertTrue(error is IllegalStateException)
+        assertFalse(client.isConnected)
+    }
+
+    @Test
+    fun transportAckDoesNotPretendDeliverySucceeded() {
+        val local = message(-1, local = true, state = SendState.SENDING)
+        val accepted = ChatRoomPartialChange.Send.Success(-1L)
+            .reduce(ChatRoomUiState(messages = persistentListOf(local)))
+        assertEquals(SendState.SENDING, accepted.messages.single().sendState)
+        assertTrue(accepted.messages.single().transportAccepted)
+        val timedOut = ChatRoomPartialChange.Send.Unconfirmed(-1L).reduce(accepted)
+        assertEquals(SendState.FAILED, timedOut.messages.single().sendState)
+        assertEquals(UNCONFIRMED_SEND_MESSAGE, timedOut.messages.single().sendError)
+    }
+
+    @Test
+    fun lateHistoryEchoResolvesUnconfirmedSend() {
+        val local = message(-1, local = true, state = SendState.SENDING)
+        val accepted = ChatRoomPartialChange.Send.Success(-1L)
+            .reduce(ChatRoomUiState(messages = persistentListOf(local)))
+        val unconfirmed = ChatRoomPartialChange.Send.Unconfirmed(-1L).reduce(accepted)
+        val delivered = ChatRoomPartialChange.Poll.Success(persistentListOf(message(10))).reduce(unconfirmed)
+        assertEquals(1, delivered.messages.size)
+        assertFalse(delivered.messages.single().isLocal)
+        assertEquals(SendState.SENT, delivered.messages.single().sendState)
+        assertEquals(null, delivered.messages.single().sendError)
+        assertEquals(delivered, ChatRoomPartialChange.Send.Unconfirmed(-1L).reduce(delivered))
+    }
+
+    @Test
+    fun failureRetainsStageAndServerCodeForRetryDialog() {
+        val local = message(-1, local = true, state = SendState.SENDING)
+        val error = IllegalStateException("群聊IM 登录 失败：RPC 110001")
+        val failed = ChatRoomPartialChange.Send.Failure(-1L, error)
+            .reduce(ChatRoomUiState(messages = persistentListOf(local)))
+        assertEquals(error.message, failed.messages.single().sendError)
+        assertEquals(SendState.FAILED, failed.messages.single().sendState)
     }
 
     @Test

@@ -22,6 +22,7 @@ import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.material.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -90,6 +91,9 @@ fun ChatRoomPage(
     viewModel: ChatRoomViewModel = pageViewModel(),
 ) {
     val context = LocalContext.current
+    DisposableEffect(viewModel, roomId) {
+        onDispose { viewModel.closeSendSession() }
+    }
     LazyLoad(loaded = viewModel.initialized) {
         viewModel.send(ChatRoomUiIntent.Load(roomId))
         viewModel.initialized = true
@@ -276,7 +280,10 @@ fun ChatRoomPage(
         confirmText = stringResource(id = R.string.btn_resend),
         cancelText = stringResource(id = R.string.button_cancel),
     ) {
-        Text(text = stringResource(id = R.string.tip_resend_message))
+        Column {
+            resendTarget?.sendError?.let { Text(it, color = MaterialTheme.colors.error) }
+            Text(text = stringResource(id = R.string.tip_resend_message))
+        }
     }
 
     if (picker != null) {

@@ -52,6 +52,8 @@ data class ChatRoomMessage(
     val senderBaiduUk: String = "",
     /** 回显早于发送确认时，保留一对一对应关系。 */
     val echoForPendingId: Long? = null,
+    val transportAccepted: Boolean = false,
+    val sendError: String? = null,
 )
 
 /**
