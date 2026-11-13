@@ -14,7 +14,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -74,29 +73,10 @@ fun PrivateChatPage(
     val listState = rememberLazyListState()
     val reversedMessages = remember(messages) { messages.asReversed() }
 
-    // 用户是否停留在最新消息处。只在用户滑动结束时采样，
-    // 避免新消息插入导致索引变化被误判为"用户上滑"。
-    var followBottom by remember { mutableStateOf(true) }
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }
-            .collect { scrolling ->
-                if (!scrolling) {
-                    followBottom = listState.firstVisibleItemIndex == 0 &&
-                        listState.firstVisibleItemScrollOffset == 0
-                }
-            }
-    }
-
-    // 新消息到达：贴底时跟随到底部；用户正在翻历史时保持原地不跳。
-    // 自己发出的消息无论当前位置都滚过去，避免发完看不到。
-    val newestMsgId = messages.lastOrNull()?.msgId
-    LaunchedEffect(newestMsgId) {
-        val newest = messages.lastOrNull() ?: return@LaunchedEffect
-        if (!followBottom && !newest.isSelf) return@LaunchedEffect
-        // 用户正在拖动时不抢滚动，等下一次消息再跟随
-        if (listState.isScrollInProgress) return@LaunchedEffect
-        listState.animateScrollToItem(0)
-    }
+    val sendRequestId by viewModel.uiState.collectPartialAsState(
+        prop1 = PrivateChatUiState::sendRequestId, initial = 0L,
+    )
+    FollowLatestChatMessage(listState, peerUid, sendRequestId)
 
     // 可见时接收推送，回到页面立即补拉，5 秒轮询只作兜底。
     val lifecycleOwner = LocalLifecycleOwner.current

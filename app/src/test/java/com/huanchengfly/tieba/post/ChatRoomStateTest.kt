@@ -19,6 +19,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatRoomStateTest {
+    @Test
+    fun privateSendRequestsScrollOnlyWhenStartingAndNotOnAckOrPoll() {
+        val initial = PrivateChatUiState()
+        val started = PrivateChatPartialChange.Send.Start(-1L, "测试", 42L).reduce(initial)
+        assertEquals(1L, started.sendRequestId)
+        val confirmed = ChatWsMessage(
+            msgId = 101L, peerUid = 42L, peerName = "", peerPortrait = "",
+            content = "测试", msgTime = 1L, isSelf = true,
+        )
+        val acknowledged = PrivateChatPartialChange.Send.Success(-1L, confirmed).reduce(started)
+        assertEquals(1L, acknowledged.sendRequestId)
+        val polled = PrivateChatPartialChange.Poll.Success(persistentListOf(confirmed)).reduce(acknowledged)
+        assertEquals(1L, polled.sendRequestId)
+        val resent = PrivateChatPartialChange.Send.Start(-2L, "测试", 42L, -1L).reduce(polled)
+        assertEquals(2L, resent.sendRequestId)
+        assertEquals(2L, PrivateChatPartialChange.Send.Failure(-2L, Exception("失败")).reduce(resent).sendRequestId)
+    }
+
     private fun message(
         id: Long,
         time: Long = 100_000L,

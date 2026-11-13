@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.AlertDialog
@@ -141,7 +140,6 @@ fun ChatRoomPage(
     var picker by remember { mutableStateOf<String?>(null) }
     var showEmoticonPanel by remember { mutableStateOf(false) }
     var resendTarget by remember { mutableStateOf<ChatRoomMessage?>(null) }
-    var requestedLatest by remember { mutableStateOf(false) }
     val mentionCandidates = remember(messages, robots) {
         (robots.map { it.user } + messages.asReversed().mapNotNull { message ->
             message.senderBaiduUk.takeIf { it.isNotBlank() && message.senderName.isNotBlank() }
@@ -179,40 +177,7 @@ fun ChatRoomPage(
     // 倒序数据：index 0 是最新消息，贴在底部
     val reversedMessages = remember(messages) { messages.asReversed() }
 
-    // 用户是否停留在最新消息处。只在用户滑动结束时采样，
-    // 避免新消息插入导致索引变化被误判为"用户上滑"。
-    // 用 rememberSaveable：从资料页等页面返回时组合会重建，
-    // 普通 remember 会重置成 true，导致一返回就自动跳到底部。
-    var followBottom by rememberSaveable { mutableStateOf(true) }
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }
-            .collect { scrolling ->
-                if (!scrolling) {
-                    followBottom = listState.firstVisibleItemIndex == 0 &&
-                        listState.firstVisibleItemScrollOffset == 0
-                }
-            }
-    }
-
-    // 主动发送与轮询分开：只有本页发送请求允许从历史位置跳回。
-    var handledSendRequest by rememberSaveable(roomId) { mutableStateOf(sendRequestId) }
-    var lastHandledMsgId by rememberSaveable(roomId) { mutableStateOf(0L) }
-    val newestMsgId = messages.lastOrNull()?.msgId
-    LaunchedEffect(newestMsgId, sendRequestId) {
-        val newest = messages.lastOrNull() ?: return@LaunchedEffect
-        val ownSend = requestedLatest && sendRequestId != handledSendRequest
-        handledSendRequest = sendRequestId
-        val initial = lastHandledMsgId == 0L
-        val changed = newest.msgId != lastHandledMsgId
-        lastHandledMsgId = newest.msgId
-        if (ownSend) {
-            requestedLatest = false
-            followBottom = true
-            listState.scrollToLatest()
-        } else if (!initial && changed && followBottom && !listState.isScrollInProgress) {
-            listState.scrollToLatest()
-        }
-    }
+    FollowLatestChatMessage(listState, roomId, sendRequestId)
 
     // 首次 Load 已经负责当前页，仅在页面可见时按固定间隔触发后续轮询。
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -257,7 +222,6 @@ fun ChatRoomPage(
             val target = resendTarget
             val acc = account
             if (target != null && acc != null) {
-                requestedLatest = true
                 viewModel.send(
                     ChatRoomUiIntent.Resend(
                         roomId = roomId,
@@ -336,7 +300,6 @@ fun ChatRoomPage(
                             onSend = {
                                 val text = input.text.trim()
                                 if (text.isNotEmpty()) {
-                                    requestedLatest = true
                                     viewModel.send(
                                         ChatRoomUiIntent.Send(
                                             roomId = roomId,
@@ -456,12 +419,6 @@ fun ChatRoomPage(
             }
         }
     }
-}
-
-private suspend fun LazyListState.scrollToLatest() {
-    val visibleCount = layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
-    if (firstVisibleItemIndex > visibleCount) scrollToItem(0)
-    else animateScrollToItem(0)
 }
 
 private val ChatMentionsSaver = listSaver<List<ChatMention>, String>(

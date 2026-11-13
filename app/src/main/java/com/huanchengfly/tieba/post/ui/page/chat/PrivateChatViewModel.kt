@@ -312,6 +312,7 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
                             sendState = SendState.SENDING,
                             isLocal = true,
                         )).toImmutableList(),
+                        sendRequestId = oldState.sendRequestId + 1,
                     )
                 }
 
@@ -343,6 +344,7 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
 
 @Immutable
 data class PrivateChatUiState(
+    val sendRequestId: Long = 0L,
     val isLoading: Boolean = true,
     val messages: ImmutableList<ChatWsMessage> = persistentListOf(),
 ) : UiState
