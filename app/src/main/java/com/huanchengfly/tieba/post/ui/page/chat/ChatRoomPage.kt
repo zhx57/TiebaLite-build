@@ -35,6 +35,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
@@ -204,12 +207,14 @@ fun ChatRoomPage(
         }
     }
 
-    // 定时增量拉取：进入页面立刻刷一次，之后每 3 秒一次
-    LaunchedEffect(roomId) {
-        viewModel.send(ChatRoomUiIntent.Poll(roomId))
-        while (true) {
-            delay(3_000)
-            viewModel.send(ChatRoomUiIntent.Poll(roomId))
+    // 首次 Load 已经负责当前页，仅在页面可见时按固定间隔触发后续轮询。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(roomId, viewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                delay(3_000)
+                viewModel.send(ChatRoomUiIntent.Poll(roomId))
+            }
         }
     }
 

@@ -3,6 +3,7 @@ package com.huanchengfly.tieba.post.ui.page.chat
 import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpCrypto
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
+import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import org.json.JSONObject
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
@@ -238,6 +239,92 @@ class ChatRoomStateTest {
         val parsed = received(payload(listOf(robot.user), skill.type, "@签到机器人 签到"))
         assertEquals(10005, parsed.robotSkill)
         assertEquals(listOf(robot.user), parsed.mentions)
+    }
+
+    private fun privateMessage(
+        id: Long,
+        peerUid: Long,
+        time: Long,
+        content: String,
+    ) = ChatWsMessage(
+        msgId = id,
+        peerUid = peerUid,
+        peerName = "用户$peerUid",
+        peerPortrait = "portrait-$peerUid",
+        content = content,
+        msgTime = time,
+        isSelf = false,
+    )
+
+    @Test
+    fun privateListEmptyIncrementDoesNotClearExistingSession() {
+        val current = PrivateSession(
+            peerUid = 1L,
+            peerName = "用户1",
+            peerPortrait = "portrait-1",
+            lastMessage = "已有消息",
+            lastTime = 200L,
+        )
+        val state = PrivateChatListUiState(
+            sessions = persistentListOf(current),
+        )
+        val reduced = PrivateChatListPartialChange.Load.Success(
+            sessions = persistentListOf(),
+            replace = false,
+        ).reduce(state)
+        assertEquals(listOf(current), reduced.sessions)
+    }
+
+    @Test
+    fun privateListOlderIncrementDoesNotReplaceNewerPreview() {
+        val current = PrivateSession(
+            peerUid = 1L,
+            peerName = "用户1",
+            peerPortrait = "portrait-1",
+            lastMessage = "新消息",
+            lastTime = 200L,
+        )
+        val older = current.copy(lastMessage = "旧消息", lastTime = 100L)
+        val reduced = PrivateChatListPartialChange.Load.Success(
+            sessions = persistentListOf(older),
+            replace = false,
+        ).reduce(PrivateChatListUiState(sessions = persistentListOf(current)))
+        assertEquals("新消息", reduced.sessions.single().lastMessage)
+        assertEquals(200L, reduced.sessions.single().lastTime)
+    }
+
+    @Test
+    fun privateListNewContactIsSortedByLatestMessage() {
+        val current = PrivateSession(
+            peerUid = 1L,
+            peerName = "用户1",
+            peerPortrait = "portrait-1",
+            lastMessage = "较早消息",
+            lastTime = 100L,
+        )
+        val incoming = PrivateSession(
+            peerUid = 2L,
+            peerName = "用户2",
+            peerPortrait = "portrait-2",
+            lastMessage = "最新消息",
+            lastTime = 200L,
+        )
+        val reduced = PrivateChatListPartialChange.Load.Success(
+            sessions = persistentListOf(incoming),
+            replace = false,
+        ).reduce(PrivateChatListUiState(sessions = persistentListOf(current)))
+        assertEquals(listOf(2L, 1L), reduced.sessions.map { it.peerUid })
+    }
+
+    @Test
+    fun privateListHistoryDoesNotBecomeUnreadCount() {
+        val sessions = listOf(
+            privateMessage(1L, 7L, 100L, "第一条"),
+            privateMessage(2L, 7L, 200L, "第二条"),
+        ).toSessions()
+        assertEquals(1, sessions.size)
+        assertEquals(0, sessions.single().unreadCount)
+        assertEquals("第二条", sessions.single().lastMessage)
     }
 
     @Test

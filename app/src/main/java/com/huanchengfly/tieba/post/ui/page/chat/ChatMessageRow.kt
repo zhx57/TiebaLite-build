@@ -1,5 +1,9 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -16,6 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.CircularProgressIndicator
+import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.ExperimentalMaterialApi
@@ -41,7 +46,9 @@ import com.huanchengfly.tieba.post.ui.common.PbContentText
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.Avatar
+import com.huanchengfly.tieba.post.ui.widgets.compose.LongClickMenu
 import com.huanchengfly.tieba.post.ui.widgets.compose.NetworkImage
+import com.huanchengfly.tieba.post.ui.widgets.compose.rememberMenuState
 import com.huanchengfly.tieba.post.ui.widgets.compose.Sizes
 import com.huanchengfly.tieba.post.utils.DateTimeUtils
 import com.huanchengfly.tieba.post.utils.StringUtil
@@ -70,6 +77,12 @@ fun ChatMessageRow(
     val bubbleColor = if (isSelf) ExtendedTheme.colors.primary else ExtendedTheme.colors.chip
     val textColor = if (isSelf) ExtendedTheme.colors.onPrimary else ExtendedTheme.colors.onChip
     val hasImages = images.isNotEmpty()
+    val context = LocalContext.current
+    val copyMessage = {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("message", text))
+        Toast.makeText(context, R.string.chat_message_copied, Toast.LENGTH_SHORT).show()
+    }
     val displayText = when {
         hasImages -> text
         else -> text.ifBlank { stringResource(id = R.string.text_chat_unsupported_message) }
@@ -110,36 +123,53 @@ fun ChatMessageRow(
                 color = ExtendedTheme.colors.textSecondary,
                 fontSize = 12.sp,
             )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (isSelf) {
-                    ChatSendStateIndicator(
-                        state = sendState,
-                        onRetryClick = onRetryClick,
-                    )
-                }
-                if (hasImages) {
-                    ChatMessageImages(
-                        images = images,
-                        isSelf = isSelf,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                }
-                if (!hasImages || text.isNotBlank()) {
-                    PbContentText(
-                        text = displayText,
-                        modifier = Modifier
-                            .weight(1f, fill = false)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(bubbleColor)
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        color = textColor,
-                        style = MaterialTheme.typography.body2,
-                    )
-                }
-            }
+            val menuState = rememberMenuState()
+            LongClickMenu(
+                enabled = text.isNotBlank(),
+                menuState = menuState,
+                menuContent = {
+                    if (text.isNotBlank()) {
+                        DropdownMenuItem(onClick = {
+                            copyMessage()
+                            menuState.expanded = false
+                        }) {
+                            Text(stringResource(R.string.chat_message_copy))
+                        }
+                    }
+                },
+                content = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        if (isSelf) {
+                            ChatSendStateIndicator(
+                                state = sendState,
+                                onRetryClick = onRetryClick,
+                            )
+                        }
+                        if (hasImages) {
+                            ChatMessageImages(
+                                images = images,
+                                isSelf = isSelf,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                        }
+                        if (!hasImages || text.isNotBlank()) {
+                            PbContentText(
+                                text = displayText,
+                                modifier = Modifier
+                                    .weight(1f, fill = false)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(bubbleColor)
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                color = textColor,
+                                style = MaterialTheme.typography.body2,
+                            )
+                        }
+                    }
+                },
+            )
             if (msgTime > 0 && sendState == SendState.SENT) {
                 Text(
                     text = DateTimeUtils.getRelativeTimeString(LocalContext.current, msgTime),

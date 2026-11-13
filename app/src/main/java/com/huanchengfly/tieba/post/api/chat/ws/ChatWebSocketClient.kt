@@ -180,18 +180,19 @@ class ChatWebSocketClient {
         val target = groupMsgIds[privateGroupId] ?: 0L
         val merged = LinkedHashMap<Long, ChatWsMessage>()
         var cursor = 0L
-        repeat(maxPages.coerceAtLeast(1)) {
+        privateFetchedMsgId = 0L
+        for (page in 0 until maxPages.coerceAtLeast(1)) {
             val batch = fetchPrivateMessages(privateGroupId, cursor)
-            if (batch.isEmpty()) return@repeat
-            var maxMsgId = cursor
+            if (privateFetchedMsgId <= cursor) break
+            var maxMsgId = privateFetchedMsgId
             batch.forEach { message ->
                 merged[message.msgId] = message
                 if (message.msgId > maxMsgId) maxMsgId = message.msgId
             }
             // 没有推进说明服务端反复返回同一批，避免死循环
-            if (maxMsgId <= cursor) return@repeat
+            if (maxMsgId <= cursor) break
             cursor = maxMsgId
-            if (target > 0L && cursor >= target) return@repeat
+            if (target > 0L && cursor >= target) break
         }
         return merged.values.sortedBy { it.msgTime }
     }
@@ -204,8 +205,13 @@ class ChatWebSocketClient {
      */
     suspend fun fetchPrivateMessagesSince(cursor: Long): List<ChatWsMessage> {
         if (privateGroupId == 0L) return emptyList()
+        privateFetchedMsgId = cursor
         return fetchPrivateMessages(privateGroupId, cursor)
     }
+
+    /** 最近一次拉取实际消费到的游标，不使用握手或推送的最新位置跳过积压。 */
+    var privateFetchedMsgId: Long = 0L
+        private set
 
     /** 私信消息组当前已知的最新游标，未握手时为 0。 */
     val privateLastMsgId: Long
@@ -242,6 +248,9 @@ class ChatWebSocketClient {
         response.data_?.groupInfo.orEmpty().forEach { group ->
             group.msgList.orEmpty().forEach { msg ->
                 val msgId = msg.msgId ?: 0L
+                if (groupId == privateGroupId && msgId > privateFetchedMsgId) {
+                    privateFetchedMsgId = msgId
+                }
                 val fromUid = msg.userInfo?.userId ?: 0L
                 val msgType = msg.msgType ?: 0
                 // 已读回执等系统消息不是聊天内容，留在列表里会显示成 JSON

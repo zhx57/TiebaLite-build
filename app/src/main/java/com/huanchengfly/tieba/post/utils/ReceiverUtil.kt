@@ -2,7 +2,7 @@ package com.huanchengfly.tieba.post.utils
 
 import android.content.IntentFilter
 
-fun newIntentFilter(action: String) =
+fun newIntentFilter(vararg actions: String) =
     IntentFilter().apply {
-        addAction(action)
+        actions.forEach(::addAction)
     }

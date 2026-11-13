@@ -1,6 +1,7 @@
 package com.huanchengfly.tieba.post
 
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.app.job.JobInfo
 import android.app.job.JobScheduler
 import android.content.BroadcastReceiver
@@ -69,6 +70,7 @@ import androidx.compose.material.navigation.ModalBottomSheetLayout
 import androidx.compose.material.navigation.bottomSheet
 import androidx.compose.material.navigation.rememberBottomSheetNavigator
 import com.stoyanvuchev.systemuibarstweaker.SystemUIBarsTweaker
+import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
 import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
 import com.huanchengfly.tieba.post.arch.BaseComposeActivity
 import com.huanchengfly.tieba.post.arch.GlobalEvent
@@ -120,6 +122,11 @@ import com.ramcosta.composedestinations.utils.currentDestinationFlow
 import com.ramcosta.composedestinations.utils.toDestinationsNavigator
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -164,6 +171,10 @@ class MainActivityV2 : BaseComposeActivity() {
 
     private val notificationCountFlow: MutableSharedFlow<Int> =
         MutableSharedFlow(replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private var foregroundChatSocket: ChatWebSocketClient? = null
+    private var foregroundChatJob: Job? = null
+    private var foregroundPrivateCount = 0
+    private var regularNotificationCount = 0
 
     private val pickMediasLauncher =
         registerPickMediasLauncher {
@@ -307,9 +318,13 @@ class MainActivityV2 : BaseComposeActivity() {
             ContextCompat.registerReceiver(
                 this,
                 newMessageReceiver,
-                newIntentFilter(NotifyJobService.ACTION_NEW_MESSAGE),
+                newIntentFilter(
+                    NotifyJobService.ACTION_NEW_MESSAGE,
+                    NotifyJobService.ACTION_CLEAR_PRIVATE,
+                ),
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
+            startForegroundChatSocket()
             startService(Intent(this, NotifyJobService::class.java))
             val builder = JobInfo.Builder(
                 JobServiceUtil.getJobId(this),
@@ -320,6 +335,44 @@ class MainActivityV2 : BaseComposeActivity() {
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
             val jobScheduler = getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
             jobScheduler.schedule(builder.build())
+        }
+    }
+
+    override fun onStop() {
+        runCatching { unregisterReceiver(newMessageReceiver) }
+        foregroundChatJob?.cancel()
+        foregroundChatJob = null
+        foregroundChatSocket?.close()
+        foregroundChatSocket = null
+        super.onStop()
+    }
+
+    private fun startForegroundChatSocket() {
+        if (!AccountUtil.isLoggedIn() || foregroundChatJob != null) return
+        foregroundChatJob = lifecycleScope.launch(Dispatchers.IO) {
+            while (isActive && AccountUtil.isLoggedIn()) {
+                val socket = ChatWebSocketClient()
+                val pushes = Channel<Unit>(Channel.CONFLATED)
+                val cookie = AccountUtil.getCookie().orEmpty()
+                foregroundChatSocket = socket
+                socket.onPushNotify = { pushes.trySend(Unit) }
+                try {
+                    socket.connect(cookie)
+                    while (isActive && cookie == AccountUtil.getCookie().orEmpty()) {
+                        NotifyJobService.consumePrivateMessages(this@MainActivityV2, socket)
+                        withTimeoutOrNull(5_000L) { pushes.receive() }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    android.util.Log.w("ForegroundChat", "私信连接中断，稍后重连", error)
+                } finally {
+                    socket.onPushNotify = null
+                    socket.close()
+                    pushes.close()
+                }
+                delay(5_000L)
+            }
         }
     }
 
@@ -572,13 +625,22 @@ class MainActivityV2 : BaseComposeActivity() {
     private inner class NewMessageReceiver : BroadcastReceiver() {
         @SuppressLint("RestrictedApi")
         override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == NotifyJobService.ACTION_CLEAR_PRIVATE) {
+                foregroundPrivateCount = 0
+                notificationCountFlow.tryEmit(regularNotificationCount)
+                (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                    .cancel(NotifyJobService.ID_PRIVATE)
+                return
+            }
             if (intent.action == NotifyJobService.ACTION_NEW_MESSAGE) {
                 val channel = intent.getStringExtra("channel")
                 val count = intent.getIntExtra("count", 0)
-                if (channel != null && channel == NotifyJobService.CHANNEL_TOTAL) {
-                    lifecycleScope.launch {
-                        notificationCountFlow.emit(count)
-                    }
+                if (channel == NotifyJobService.CHANNEL_PRIVATE) {
+                    foregroundPrivateCount += count
+                    notificationCountFlow.tryEmit(regularNotificationCount + foregroundPrivateCount)
+                } else if (channel == NotifyJobService.CHANNEL_TOTAL) {
+                    regularNotificationCount = count
+                    notificationCountFlow.tryEmit(regularNotificationCount + foregroundPrivateCount)
                 }
             }
         }

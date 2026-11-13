@@ -17,12 +17,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import android.content.Intent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.huanchengfly.tieba.post.R
+import com.huanchengfly.tieba.post.services.NotifyJobService
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.pageViewModel
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
@@ -48,12 +50,20 @@ fun PrivateChatListPage(
     viewModel: PrivateChatListViewModel = pageViewModel(),
 ) {
     val cookie = remember { AccountUtil.getCookie().orEmpty() }
+    val context = LocalContext.current
     val navigator = LocalNavigator.current
     val sessions by viewModel.uiState.collectPartialAsState(
         prop1 = PrivateChatListUiState::sessions,
         initial = persistentListOf(),
     )
     val lazyListState = rememberLazyListState()
+
+    LaunchedEffect(Unit) {
+        context.sendBroadcast(
+            Intent(NotifyJobService.ACTION_CLEAR_PRIVATE)
+                .setPackage(context.packageName),
+        )
+    }
 
     LazyLoad(loaded = viewModel.initialized) {
         viewModel.bindPushNotify(cookie)

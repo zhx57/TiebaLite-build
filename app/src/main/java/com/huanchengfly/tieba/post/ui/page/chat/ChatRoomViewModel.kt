@@ -24,7 +24,10 @@ import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.flatMapConcat
 import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.merge
@@ -68,10 +71,17 @@ class ChatRoomViewModel @Inject constructor() :
         @OptIn(ExperimentalCoroutinesApi::class)
         override fun toPartialChangeFlow(intentFlow: Flow<ChatRoomUiIntent>): Flow<ChatRoomPartialChange> =
             merge(
-                intentFlow.filterIsInstance<ChatRoomUiIntent.Load>()
-                    .flatMapMerge { it.producePartialChange() },
-                intentFlow.filterIsInstance<ChatRoomUiIntent.Poll>()
-                    .flatMapMerge { it.producePartialChange() },
+                // 拉取串行执行且只保留最新待处理意图，不取消慢请求，也不堆积轮询。
+                intentFlow
+                    .filter { it is ChatRoomUiIntent.Load || it is ChatRoomUiIntent.Poll }
+                    .conflate()
+                    .flatMapConcat {
+                        when (it) {
+                            is ChatRoomUiIntent.Load -> it.producePartialChange()
+                            is ChatRoomUiIntent.Poll -> it.producePartialChange()
+                            else -> error("Unexpected message fetch intent")
+                        }
+                    },
                 intentFlow.filterIsInstance<ChatRoomUiIntent.LoadMore>()
                     .flatMapMerge { it.producePartialChange() },
                 intentFlow.filterIsInstance<ChatRoomUiIntent.Send>()

@@ -2,6 +2,13 @@ package com.huanchengfly.tieba.post.ui.page.chat
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
+import androidx.lifecycle.viewModelScope
+import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatCache
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import com.huanchengfly.tieba.post.arch.BaseViewModel
@@ -18,9 +25,9 @@ import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flatMapConcat
-import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 
@@ -35,6 +42,7 @@ class PrivateChatListViewModel @Inject constructor() :
     BaseViewModel<PrivateChatListUiIntent, PrivateChatListPartialChange, PrivateChatListUiState, PrivateChatListUiEvent>() {
 
     private var socket: ChatWebSocketClient? = null
+    private var privateCursor = 0L
 
     override fun createInitialState(): PrivateChatListUiState = PrivateChatListUiState()
 
@@ -72,7 +80,7 @@ class PrivateChatListViewModel @Inject constructor() :
         }
     }
 
-    private class PrivateChatListPartialChangeProducer(
+    private inner class PrivateChatListPartialChangeProducer(
         private val socketProvider: () -> ChatWebSocketClient?,
     ) : PartialChangeProducer<PrivateChatListUiIntent, PrivateChatListPartialChange, PrivateChatListUiState> {
         @OptIn(ExperimentalCoroutinesApi::class)
@@ -80,12 +88,26 @@ class PrivateChatListViewModel @Inject constructor() :
             intentFlow: Flow<PrivateChatListUiIntent>,
         ): Flow<PrivateChatListPartialChange> =
             merge(
-                intentFlow.filterIsInstance<PrivateChatListUiIntent.Load>()
-                    .flatMapConcat { it.producePartialChange() },
-                intentFlow.filterIsInstance<PrivateChatListUiIntent.Poll>()
-                    .flatMapConcat {
-                        it.producePartialChange()
+                intentFlow.filterIsInstance<PrivateChatListUiIntent.CacheChanged>()
+                    .map {
+                        PrivateChatListPartialChange.Load.Success(
+                            PrivateChatCache.loadAll(socketProvider()?.selfUid ?: 0L).toSessions(),
+                            replace = false,
+                        )
                     },
+                intentFlow
+                .filter {
+                    it is PrivateChatListUiIntent.Load ||
+                        it is PrivateChatListUiIntent.Poll
+                }
+                .conflate()
+                .flatMapConcat {
+                    when (it) {
+                        is PrivateChatListUiIntent.Load -> it.producePartialChange()
+                        is PrivateChatListUiIntent.Poll -> it.producePartialChange()
+                        else -> error("Unexpected private chat list intent")
+                    }
+                },
             )
 
         /**
@@ -95,9 +117,13 @@ class PrivateChatListViewModel @Inject constructor() :
             flow {
                 val client = socketProvider() ?: throw IllegalStateException("chat socket unavailable")
                 client.connect(cookie)
-                val messages = client.fetchPrivateMessages()
+                val messages = client.fetchPrivateMessagesSince(privateCursor)
+                privateCursor = maxOf(privateCursor, client.privateFetchedMsgId)
                 emit(
-                    PrivateChatListPartialChange.Load.Success(messages.toSessions())
+                    PrivateChatListPartialChange.Load.Success(
+                        (PrivateChatCache.loadAll(client.selfUid) + messages).toSessions(),
+                        replace = false,
+                    )
                 )
             }.catch { /* 静默失败，等下一次轮询 */ }
 
@@ -109,8 +135,12 @@ class PrivateChatListViewModel @Inject constructor() :
                 // 握手游标已是最新，直接增量只会拿到空列表；
                 // 从头按批拉历史，才能看到所有历史会话与最近联系人。
                 val messages = client.fetchPrivateHistory()
+                privateCursor = client.privateFetchedMsgId
                 emit(
-                    PrivateChatListPartialChange.Load.Success(messages.toSessions())
+                    PrivateChatListPartialChange.Load.Success(
+                        (PrivateChatCache.loadAll(client.selfUid) + messages).toSessions(),
+                        replace = true,
+                    )
                 )
             }.catch { emit(PrivateChatListPartialChange.Load.Failure(it)) }
     }
@@ -118,10 +148,17 @@ class PrivateChatListViewModel @Inject constructor() :
     init {
         // 提前建好连接对象，保证 Producer 拿到的实例与 onCleared 关闭的是同一个
         obtainSocket()
+        viewModelScope.launch {
+            PrivateChatCache.changes.collect {
+                send(PrivateChatListUiIntent.CacheChanged)
+            }
+        }
     }
 }
 
 sealed interface PrivateChatListUiIntent : UiIntent {
+    data object CacheChanged : PrivateChatListUiIntent
+
     data class Load(val cookie: String) : PrivateChatListUiIntent
 
     /** 静默刷新，用于定时轮询与推送到达。 */
@@ -133,13 +170,23 @@ sealed interface PrivateChatListPartialChange : PartialChange<PrivateChatListUiS
         override fun reduce(oldState: PrivateChatListUiState): PrivateChatListUiState =
             when (this) {
                 is Start -> oldState.copy(isLoading = true)
-                is Success -> oldState.copy(isLoading = false, sessions = sessions)
+                is Success -> oldState.copy(
+                    isLoading = false,
+                    sessions = if (replace) {
+                        sessions
+                    } else {
+                        mergePrivateSessions(oldState.sessions, sessions)
+                    },
+                )
                 is Failure -> oldState.copy(isLoading = false)
             }
 
         data object Start : Load()
 
-        data class Success(val sessions: ImmutableList<PrivateSession>) : Load()
+        data class Success(
+            val sessions: ImmutableList<PrivateSession>,
+            val replace: Boolean,
+        ) : Load()
 
         data class Failure(val error: Throwable) : Load()
     }
@@ -172,6 +219,17 @@ sealed interface PrivateChatListUiEvent : UiEvent
  * 私信消息组的 userInfo 是发送者，自己发的消息 peerUid 会是自己，
  * 无法据此推断对话方，这里只按对方发来的消息聚合。
  */
+private fun mergePrivateSessions(
+    current: ImmutableList<PrivateSession>,
+    incoming: ImmutableList<PrivateSession>,
+): ImmutableList<PrivateSession> =
+    (current + incoming)
+        .groupBy { it.peerUid }
+        .values
+        .map { sessions -> sessions.maxBy { it.lastTime } }
+        .sortedByDescending { it.lastTime }
+        .toImmutableList()
+
 fun List<ChatWsMessage>.toSessions(): ImmutableList<PrivateSession> {
     return filter { !it.isSelf && it.peerUid != 0L }
         .groupBy { it.peerUid }
@@ -183,7 +241,7 @@ fun List<ChatWsMessage>.toSessions(): ImmutableList<PrivateSession> {
                 peerPortrait = latest.peerPortrait,
                 lastMessage = latest.content,
                 lastTime = latest.msgTime,
-                unreadCount = messages.size,
+                unreadCount = 0,
             )
         }
         .sortedByDescending { it.lastTime }

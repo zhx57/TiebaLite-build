@@ -2,6 +2,9 @@ package com.huanchengfly.tieba.post.api.chat.ws
 
 import android.content.Context
 import com.huanchengfly.tieba.post.App
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -11,13 +14,24 @@ import org.json.JSONObject
  * 贴吧私信接口只提供增量拉取，退出页面后连接断开、游标重置，
  * 因此把会话消息落到本地，重新进入时先展示缓存再拉增量。
  *
- * 存储为 SharedPreferences 中的 JSON 字符串，key 为「当前账号 uid + 对方 uid」。
+ * 存储为 SharedPreferences 中的 JSON 字符串，键由账号和对方 uid 组成。
+ * 缓存键由当前账号 uid 和对方 uid 组成。
  * 每个会话最多保留 [MAX_MESSAGES] 条，避免无限膨胀。
  */
 object PrivateChatCache {
 
     private const val PREF_NAME = "private_chat_cache"
     private const val MAX_MESSAGES = 200
+    private val revision = MutableStateFlow(0L)
+    val changes = revision.asStateFlow()
+
+    fun loadAll(selfUid: Long): List<ChatWsMessage> {
+        if (selfUid == 0L) return emptyList()
+        val prefix = "${selfUid}_"
+        return prefs.all.keys.filter { it.startsWith(prefix) }.flatMap { entry ->
+            entry.removePrefix(prefix).toLongOrNull()?.let { load(selfUid, it) }.orEmpty()
+        }
+    }
 
     private val prefs by lazy {
         App.INSTANCE.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -70,5 +84,6 @@ object PrivateChatCache {
             })
         }
         prefs.edit().putString(key(selfUid, peerUid), array.toString()).apply()
+        revision.update { it + 1 }
     }
 }
