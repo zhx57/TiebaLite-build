@@ -160,9 +160,9 @@ class BlcpClient {
     }
 
     /**
-     * IM 登录，返回 uk / bduk / triggerId。
+     * IM 登录，返回 uk / 用户 ID / triggerId。
      */
-    suspend fun loginIm(bduss: String, cuidGalaxy2: String): BlcpImIdentity {
+    suspend fun loginIm(bduss: String, cuidGalaxy2: String, zid: String): BlcpImIdentity {
         val logId = nextCorrelationId()
         val body = JSONObject().apply {
             put("method", BlcpConstants.METHOD_LOGIN_BY_TOKEN)
@@ -175,7 +175,7 @@ class BlcpClient {
             put("app_version", BlcpConstants.CHAT_VERSION)
             put("app_open_type", 0)
             // 官方客户端会带这两个字段，缺失时 IM 登录可能返回异常
-            put("client_identifier", JSONObject().put("zid", "").put("version_code", "").toString())
+            put("client_identifier", JSONObject().put("zid", zid).put("version_code", "").toString())
             put("device_info", JSONObject().apply {
                 put("app_version", BlcpConstants.CHAT_VERSION)
                 put("os_version", "32")
@@ -203,28 +203,7 @@ class BlcpClient {
                 "IM login failed: RPC $rpcError ${response.meta.response?.error_text.orEmpty()}"
             )
         }
-        val payload = parseJsonBody(response.body, "IM login")
-        val errCode = payload.optInt("err_code", 0)
-        if (errCode != 0) {
-            throw IllegalStateException("IM login failed: $errCode ${payload.optString("msg")}")
-        }
-        // trigger_id 在协议里是数组，取第一个元素；
-        // bd_uid 才是 bduk，uk 为数字
-        val triggerRaw = payload.opt("trigger_id")
-        val triggerId = when (triggerRaw) {
-            is JSONArray -> if (triggerRaw.length() > 0) triggerRaw.optLong(0) else 0L
-            is Number -> triggerRaw.toLong()
-            else -> 0L
-        }
-        val uk = payload.optLong("uk")
-        if (uk == 0L) {
-            throw IllegalStateException("IM login failed: uk missing")
-        }
-        return BlcpImIdentity(
-            uk = uk,
-            bduk = payload.optString("bd_uid"),
-            triggerId = triggerId,
-        )
+        return BlcpImIdentity.fromJson(parseBusinessResponse(response.body, "IM login"))
     }
 
     /**
@@ -240,20 +219,14 @@ class BlcpClient {
             body = requestData.toString().toByteArray(Charsets.UTF_8),
             correlationId = logId,
         )
-        // 先看 RPC 层的错误码；业务层 body 可能为空，此时按 RPC 结果判定
+        // RPC 无错只代表传输已接收，仍需检查业务回包。
         val rpcError = response.meta.response?.error_code ?: 0
         if (rpcError != 0) {
             throw IllegalStateException(
                 "send group message failed: RPC $rpcError ${response.meta.response?.error_text.orEmpty()}"
             )
         }
-        if (response.body.isEmpty()) return JSONObject()
-        val payload = parseJsonBody(response.body, "send group message")
-        val errCode = payload.optInt("err_code", 0)
-        if (errCode != 0) {
-            throw IllegalStateException("send group message failed: $errCode ${payload.optString("msg")}")
-        }
-        return payload
+        return parseBusinessResponse(response.body, "send group message")
     }
 
     /**
@@ -354,11 +327,16 @@ class BlcpClient {
     /**
      * 解析 BLCP 响应体。服务端异常时可能返回空包，这里给出可读错误而不是 JSON 解析异常。
      */
-    private fun parseJsonBody(body: ByteArray, scene: String): JSONObject {
-        val text = String(body, Charsets.UTF_8)
-        return runCatching { JSONObject(text) }.getOrElse {
-            throw IllegalStateException("$scene failed: empty or invalid response")
+    internal fun parseBusinessResponse(body: ByteArray, scene: String): JSONObject {
+        val payload = runCatching { JSONObject(String(body, Charsets.UTF_8)) }.getOrElse {
+            throw IllegalStateException("$scene failed: empty or invalid business response")
         }
+        val errCode = payload.opt("err_code")?.toString()?.toIntOrNull()
+            ?: throw IllegalStateException("$scene failed: business err_code missing or invalid")
+        if (errCode != 0) {
+            throw IllegalStateException("$scene failed: $errCode ${payload.optString("msg")}")
+        }
+        return payload
     }
 }
 
@@ -367,6 +345,24 @@ class BlcpClient {
  */
 data class BlcpImIdentity(
     val uk: Long,
-    val bduk: String,
+    val userId: Long,
     val triggerId: Long,
-)
+) {
+    companion object {
+        internal fun fromJson(payload: JSONObject): BlcpImIdentity {
+            val triggerRaw = payload.opt("trigger_id")
+            val triggerId = when (triggerRaw) {
+                is JSONArray -> triggerRaw.optLong(0)
+                is Number -> triggerRaw.toLong()
+                else -> 0L
+            }
+            val uk = payload.optLong("uk")
+            // bd_uid 是原始贴吧用户 ID，必须加密后才能用于 baidu_uk 和 msg_key。
+            val userId = payload.optLong("bd_uid")
+            check(uk > 0L) { "IM login failed: uk missing or invalid" }
+            check(userId > 0L) { "IM login failed: bd_uid missing or invalid" }
+            check(triggerId > 0L) { "IM login failed: trigger_id missing or invalid" }
+            return BlcpImIdentity(uk, userId, triggerId)
+        }
+    }
+}

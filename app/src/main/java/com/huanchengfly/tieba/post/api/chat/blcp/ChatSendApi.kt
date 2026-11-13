@@ -1,6 +1,10 @@
 package com.huanchengfly.tieba.post.api.chat.blcp
 
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
+import com.huanchengfly.tieba.post.utils.AccountUtil
+import com.huanchengfly.tieba.post.utils.SofireUtils
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -80,6 +84,7 @@ object ChatSendApi {
         private var account: String? = null
         private var device: String? = null
         private var room: Long? = null
+        private var securityToken: String? = null
         private var expiryClose: Job? = null
         private var released = false
 
@@ -97,6 +102,7 @@ object ChatSendApi {
             account = null
             device = null
             room = null
+            securityToken = null
         }
 
         suspend fun sendChatRoomMessage(
@@ -107,7 +113,6 @@ object ChatSendApi {
             accountBduss: String,
             selfName: String,
             selfPortrait: String,
-            selfUid: Long,
             cuidGalaxy2: String,
             mentions: List<ChatMention> = emptyList(),
             robotSkill: Int? = null,
@@ -127,13 +132,20 @@ object ChatSendApi {
                     }
                     var login = synchronized(lifecycleLock) { identity }
                     if (login == null) {
+                        stage = "获取安全令牌"
+                        val zid = AccountUtil.getAccountInfoByBduss(accountBduss).zid
+                            ?.takeIf { it.isNotBlank() }
+                            ?: withTimeoutOrNull(15_000) { SofireUtils.fetchZid().firstOrNull() }
+                                ?.takeIf { it.isNotBlank() }
+                            ?: error("未取得设备安全令牌，请刷新账号登录信息后重试")
+                        stage = "连接"
                         connection.connect()
                         stage = "获取登录令牌"
                         val token = fetchLcmToken(cuidGalaxy2)
                         stage = "LCM 登录"
                         val interval = connection.loginLcm(token, cuidGalaxy2)
                         stage = "IM 登录"
-                        val newLogin = connection.loginIm(accountBduss, cuidGalaxy2)
+                        val newLogin = connection.loginIm(accountBduss, cuidGalaxy2, zid)
                         login = newLogin
                         stage = "加入群聊"
                         connection.joinChatroom(chatroomId, newLogin.uk)
@@ -143,6 +155,7 @@ object ChatSendApi {
                             account = accountBduss
                             device = cuidGalaxy2
                             room = chatroomId
+                            securityToken = zid
                             // 尚无可靠的心跳协议，在首个心跳期限前主动回收登录态。
                             val lifetimeMs = if (interval > 0) (interval / 2).coerceAtLeast(1L) else 30_000L
                             expiryClose = scope.launch {
@@ -155,8 +168,9 @@ object ChatSendApi {
                     val authenticated = checkNotNull(login)
                     val payload = buildMessagePayload(
                         chatroomId, text, forumId, forumLevel, authenticated.uk,
-                        BlcpCrypto.userId2Bduk(selfUid), authenticated.triggerId,
+                        BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
                         selfName, selfPortrait, accountBduss, mentions, robotSkill,
+                        checkNotNull(synchronized(lifecycleLock) { securityToken }),
                     )
                     connection.sendMcastMsg(chatroomId, payload)
                 } catch (e: Exception) {
@@ -188,7 +202,9 @@ object ChatSendApi {
         bduss: String,
         mentions: List<ChatMention>,
         robotSkill: Int?,
+        zid: String,
     ): JSONObject {
+        require(zid.isNotBlank()) { "群聊设备安全令牌不能为空" }
         val nowMs = System.currentTimeMillis()
         val nowSec = nowMs / 1000
         val portraitWithTime = "$selfPortrait?t=$nowSec"
@@ -302,7 +318,7 @@ object ChatSendApi {
             put("uk", uk)
             put("origin_id", triggerId)
             put("type", 81)
-            put("app_safe_ext", JSONObject().put("haotianjing", JSONObject().put("zid", "")).toString())
+            put("app_safe_ext", JSONObject().put("haotianjing", JSONObject().put("zid", zid)).toString())
             put("content", JSONObject().put("text", textData.toString()).toString())
             put("msg_key", BlcpCrypto.computeMsgKey(bduk))
             put("account_type", 1)

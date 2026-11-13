@@ -3,6 +3,7 @@ package com.huanchengfly.tieba.post.ui.page.chat
 import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpClient
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpCrypto
+import com.huanchengfly.tieba.post.api.chat.blcp.BlcpImIdentity
 import kotlinx.coroutines.runBlocking
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
@@ -166,6 +167,7 @@ class ChatRoomStateTest {
             chatroomId = 1L, text = text, forumId = 2L, forumLevel = 0, uk = 123L,
             bduk = BlcpCrypto.userId2Bduk(42L), triggerId = 1L, selfName = "测试用户",
             selfPortrait = "self-portrait", bduss = "test-only", mentions = mentions, robotSkill = skill,
+            zid = "test-device-security-token",
         )
 
     private fun received(payload: JSONObject) = ChatApi.parseMessage(JSONObject().apply {
@@ -175,6 +177,51 @@ class ChatRoomStateTest {
         put("create_time", 100L)
         put("content", payload.getString("content"))
     }, 42L)!!
+
+    @Test
+    fun sendPayloadCarriesDeviceSecurityToken() {
+        val safeExt = JSONObject(payload().getString("app_safe_ext"))
+        assertEquals("test-device-security-token", safeExt.getJSONObject("haotianjing").getString("zid"))
+    }
+
+    @Test
+    fun blankSecurityTokenIsRejectedBeforeSending() {
+        val error = runCatching {
+            ChatSendApi.buildMessagePayload(
+                1L, "测试", 2L, 0, 123L, BlcpCrypto.userId2Bduk(42L), 1L,
+                "测试用户", "portrait", "test-only", emptyList(), null, "",
+            )
+        }.exceptionOrNull()
+        assertTrue(error is IllegalArgumentException)
+    }
+
+    @Test
+    fun loginIdentityUsesRawBaiduUserIdNotImUk() {
+        val identity = BlcpImIdentity.fromJson(JSONObject()
+            .put("uk", 123L).put("bd_uid", "42").put("trigger_id", org.json.JSONArray().put(456L)))
+        assertEquals(123L, identity.uk)
+        assertEquals(42L, identity.userId)
+        assertEquals(456L, identity.triggerId)
+        assertEquals(42L, BlcpCrypto.bduk2UserId(BlcpCrypto.userId2Bduk(identity.userId)))
+        for (field in listOf("uk", "bd_uid", "trigger_id")) {
+            val invalid = JSONObject().put("uk", 123L).put("bd_uid", 42L)
+                .put("trigger_id", org.json.JSONArray().put(456L))
+            invalid.remove(field)
+            assertTrue(runCatching { BlcpImIdentity.fromJson(invalid) }.exceptionOrNull() is IllegalStateException)
+        }
+    }
+
+    @Test
+    fun businessResponseRequiresExplicitValidSuccessCode() {
+        val client = BlcpClient()
+        for (body in listOf("", "{}", "{\"err_code\":null}", "{\"err_code\":\"invalid\"}", "{\"err_code\":123,\"msg\":\"denied\"}")) {
+            assertTrue(runCatching {
+                client.parseBusinessResponse(body.toByteArray(), "send")
+            }.exceptionOrNull() is IllegalStateException)
+        }
+        assertEquals(0, client.parseBusinessResponse("{\"err_code\":0}".toByteArray(), "send").getInt("err_code"))
+        assertEquals("0", client.parseBusinessResponse("{\"err_code\":\"0\"}".toByteArray(), "send").getString("err_code"))
+    }
 
     @Test
     fun payloadRoundTripPreservesMentionsRobotAndNestedBody() {
