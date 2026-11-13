@@ -24,6 +24,14 @@ import retrofit2.http.*
 
 
 interface OfficialTiebaApi {
+    @Headers("${Header.FORCE_LOGIN}: ${Header.FORCE_LOGIN_TRUE}")
+    @POST("https://tiebac.baidu.com/c/e/meme/getAllMeme?cmd=1003351")
+    @FormUrlEncoded
+    suspend fun getCloudMemes(
+        @Field("BDUSS") bduss: String,
+        @Field("cmd") cmd: String = "1003351",
+    ): okhttp3.ResponseBody
+
     @POST("/c/f/pb/page")
     @FormUrlEncoded
     fun threadContent(
