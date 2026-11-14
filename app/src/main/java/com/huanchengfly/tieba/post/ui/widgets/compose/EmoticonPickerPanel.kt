@@ -69,14 +69,19 @@ fun EmoticonPickerPanel(
         }
         key(uid, bduss) {
             val scope = rememberCoroutineScope()
-            val session = remember { CloudMemeSession(scope) { CloudMemeRepository.load(bduss) } }
+            val cache = remember { CloudMemeRepository.cache(context.applicationContext.filesDir) }
+            val session = remember {
+                CloudMemeSession(scope, cached = { cache.cached(uid) }) {
+                    cache.load(uid, bduss, force = true)
+                }
+            }
             DisposableEffect(session) { onDispose { session.close() } }
             val state by session.state.collectAsState()
             LaunchedEffect(category) {
                 if (category != 0 && uid.isNotBlank() && bduss.isNotBlank() &&
                     state.lists == null && state.error == null && !state.loading
                 ) {
-                    session.refresh()
+                    session.open()
                 }
             }
             if (category == 0) {
@@ -128,7 +133,7 @@ fun EmoticonPickerPanel(
                     columns = GridCells.Adaptive(72.dp),
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 ) {
-                    items(memes.orEmpty()) { meme ->
+                    items(memes.orEmpty(), key = { it.id }) { meme ->
                         NetworkImage(
                             imageUri = meme.displayUrl,
                             contentDescription = "云表情 ${meme.id}",

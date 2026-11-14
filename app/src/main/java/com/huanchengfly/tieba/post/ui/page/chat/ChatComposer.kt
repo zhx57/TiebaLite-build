@@ -4,7 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import android.text.Editable
+import android.view.inputmethod.BaseInputConnection
 import android.text.InputType
 import android.view.Gravity
 import androidx.compose.foundation.layout.Arrangement
@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.widget.addTextChangedListener
 import androidx.compose.ui.unit.Velocity
 import android.widget.TextView.BufferType
+import java.util.concurrent.atomic.AtomicBoolean
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
@@ -190,9 +191,19 @@ fun ChatComposer(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(if (configuration.screenWidthDp < 360) 0.dp else 8.dp),
         ) {
+            val syncingText = remember { AtomicBoolean(false) }
             AndroidView(
                 factory = { context ->
-                    UndoableEditText(context).apply {
+                    object : UndoableEditText(context) {
+                        var selectionReady = false
+
+                        override fun onSelectionChanged(selStart: Int, selEnd: Int) {
+                            super.onSelectionChanged(selStart, selEnd)
+                            if (selectionReady && !syncingText.get() && selStart >= 0 && selEnd >= 0) {
+                                currentOnValueChange.value(chatInputValue())
+                            }
+                        }
+                    }.apply {
                         setTextColor(textColor)
                         setHintTextColor(placeholderColor)
                         setBackgroundColor(surfaceColor)
@@ -214,32 +225,52 @@ fun ChatComposer(
                         }
                         isEnabled = enabled
                         setText(StringUtil.getEmoticonContent(this, value.text), BufferType.SPANNABLE)
-                        setSelection(value.selection.start.coerceIn(0, length()))
-                        addTextChangedListener(
-                            afterTextChanged = { editable: Editable? ->
-                                currentOnValueChange.value(
-                                    TextFieldValue(
-                                        editable?.toString().orEmpty(),
-                                        TextRange(
-                                            selectionStart.coerceAtLeast(0),
-                                            selectionEnd.coerceAtLeast(0),
-                                        ),
-                                    )
-                                )
-                            }
+                        setSelection(
+                            value.selection.start.coerceIn(0, length()),
+                            value.selection.end.coerceIn(0, length()),
                         )
+                        addTextChangedListener(
+                            beforeTextChanged = { _, _, _, _ -> selectionReady = false },
+                            afterTextChanged = {
+                                selectionReady = true
+                                if (!syncingText.get()) {
+                                    currentOnValueChange.value(chatInputValue())
+                                }
+                            },
+                        )
+                        selectionReady = true
                     }
                 },
                 update = { editText ->
                     editText.isEnabled = enabled
                     editText.maxLines = maxInputLines
                     if (editText.text?.toString() != value.text) {
-                        val selection = value.selection.start.coerceIn(0, value.text.length)
-                        editText.setText(
-                            StringUtil.getEmoticonContent(editText, value.text),
-                            BufferType.SPANNABLE,
-                        )
-                        editText.setSelection(selection)
+                        val selectionStart = value.selection.start.coerceIn(0, value.text.length)
+                        val selectionEnd = value.selection.end.coerceIn(0, value.text.length)
+                        syncingText.set(true)
+                        try {
+                            editText.editableText.replace(
+                                0,
+                                editText.length(),
+                                StringUtil.getEmoticonContent(editText, value.text),
+                            )
+                            editText.setSelection(selectionStart, selectionEnd)
+                        } finally {
+                            syncingText.set(false)
+                        }
+                    } else if (
+                        editText.selectionStart != value.selection.start ||
+                        editText.selectionEnd != value.selection.end
+                    ) {
+                        syncingText.set(true)
+                        try {
+                            editText.setSelection(
+                                value.selection.start.coerceIn(0, editText.length()),
+                                value.selection.end.coerceIn(0, editText.length()),
+                            )
+                        } finally {
+                            syncingText.set(false)
+                        }
                     }
                     editText.setTextColor(if (enabled) textColor else disabledTextColor)
                     editText.setHintTextColor(if (enabled) placeholderColor else disabledTextColor)
@@ -366,21 +397,33 @@ fun ChatComposer(
                 }
                 EmoticonPickerPanel(
                     modifier = Modifier.fillMaxWidth().weight(1f),
-                    onEmoticonClick = {
-                        onEmoticonClick(it)
-                        panelExpanded = false
-                    },
+                    onEmoticonClick = onEmoticonClick,
                     onCloudMemeClick = onCloudMemeClick?.takeIf { enabled }?.let { send ->
                         { meme ->
                             send(meme)
-                            panelExpanded = false
-                            onDismissEmoticonPanel()
+                            if (!panelExpanded) onDismissEmoticonPanel()
                         }
                     },
                 )
             }
         }
     }
+}
+
+private fun UndoableEditText.chatInputValue(): TextFieldValue {
+    val editable = editableText
+    val composingStart = BaseInputConnection.getComposingSpanStart(editable)
+    val composingEnd = BaseInputConnection.getComposingSpanEnd(editable)
+    return TextFieldValue(
+        text = editable.toString(),
+        selection = TextRange(
+            selectionStart.coerceIn(0, editable.length),
+            selectionEnd.coerceIn(0, editable.length),
+        ),
+        composition = if (composingStart >= 0 && composingEnd > composingStart) {
+            TextRange(composingStart, composingEnd)
+        } else null,
+    )
 }
 
 /** 消息列表统一的内容边距。 */

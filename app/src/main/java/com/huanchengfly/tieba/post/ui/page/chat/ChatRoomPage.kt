@@ -383,6 +383,7 @@ fun ChatRoomPage(
                             avatarUrl = message.senderPortrait,
                             msgTime = message.msgTime,
                             sendState = message.sendState,
+                            transportAccepted = message.transportAccepted,
                             images = message.images,
                             onRetryClick = {
                                 resendTarget = message

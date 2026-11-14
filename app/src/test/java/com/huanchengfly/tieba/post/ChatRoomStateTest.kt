@@ -5,6 +5,8 @@ import com.huanchengfly.tieba.post.api.chat.blcp.BlcpClient
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpCrypto
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpImIdentity
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
@@ -23,6 +25,28 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatRoomStateTest {
+    @Test
+    fun confirmationTimersDoNotBlockFollowingAcknowledgements() = runBlocking {
+        val changes = (1L..32L).map { ChatRoomPartialChange.Send.Success(-it) }
+        val emitted = kotlinx.coroutines.withTimeout(5_000) {
+            kotlinx.coroutines.flow.flow<ChatRoomPartialChange> {
+                changes.forEach { emit(it) }
+            }.withSendConfirmationTimeout(timeoutMillis = 60_000)
+                .take(changes.size).toList()
+        }
+        assertEquals(changes, emitted)
+    }
+
+    @Test
+    fun independentConfirmationTimerRetainsPendingIdentity() = runBlocking {
+        val accepted = ChatRoomPartialChange.Send.Success(-42L)
+        val emitted = kotlinx.coroutines.withTimeout(5_000) {
+            kotlinx.coroutines.flow.flowOf<ChatRoomPartialChange>(accepted)
+                .withSendConfirmationTimeout(timeoutMillis = 1).toList()
+        }
+        assertEquals(listOf(accepted, ChatRoomPartialChange.Send.Unconfirmed(-42L)), emitted)
+    }
+
     @Test
     fun privateSendRequestsScrollOnlyWhenStartingAndNotOnAckOrPoll() {
         val initial = PrivateChatUiState()
