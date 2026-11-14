@@ -26,6 +26,9 @@ import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filter
@@ -116,7 +119,7 @@ class ChatRoomViewModel @Inject constructor() :
                     .flatMapMerge { it.producePartialChange() },
                 intentFlow.filterIsInstance<ChatRoomUiIntent.LoadRobots>()
                     .flatMapMerge { it.producePartialChange() },
-            )
+            ).withSendConfirmationTimeout()
 
         private fun ChatRoomUiIntent.Load.producePartialChange(): Flow<ChatRoomPartialChange.Load> =
             flow<ChatRoomPartialChange.Load> {
@@ -188,8 +191,6 @@ class ChatRoomViewModel @Inject constructor() :
                     cloudMeme = cloudMeme,
                 )
                 emit(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
-                delay(20_000)
-                emit(ChatRoomPartialChange.Send.Unconfirmed(pendingId))
             }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
         }
 
@@ -224,9 +225,21 @@ class ChatRoomViewModel @Inject constructor() :
                     cloudMeme = cloudMeme,
                 )
                 emit(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
-                delay(20_000)
-                emit(ChatRoomPartialChange.Send.Unconfirmed(pendingId))
             }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
+        }
+    }
+}
+
+internal fun Flow<ChatRoomPartialChange>.withSendConfirmationTimeout(
+    timeoutMillis: Long = 20_000,
+): Flow<ChatRoomPartialChange> = channelFlow {
+    collect { change ->
+        send(change)
+        if (change is ChatRoomPartialChange.Send.Success) {
+            launch {
+                delay(timeoutMillis)
+                send(ChatRoomPartialChange.Send.Unconfirmed(change.pendingId))
+            }
         }
     }
 }

@@ -74,6 +74,7 @@ fun ChatMessageRow(
     onRetryClick: () -> Unit,
     modifier: Modifier = Modifier,
     images: List<String> = emptyList(),
+    transportAccepted: Boolean = false,
     onAvatarClick: () -> Unit = {},
     onAvatarLongClick: (() -> Unit)? = null,
 ) {
@@ -155,6 +156,7 @@ fun ChatMessageRow(
                         if (isSelf) {
                             ChatSendStateIndicator(
                                 state = sendState,
+                                transportAccepted = transportAccepted,
                                 onRetryClick = onRetryClick,
                             )
                         }
@@ -254,22 +256,25 @@ fun navigateToUserProfile(navigator: DestinationsNavigator, uid: Long) {
 }
 
 /**
- * 自己消息的发送状态：发送中转圈，失败显示圆形感叹号并可点击重发。
+ * 传输阶段转圈，ACK 后静默核对回显；失败显示感叹号并可点击重发。
  *
  * 固定 20dp，三种状态位置一致，切换时不会引起布局跳动。
  */
 @Composable
 private fun ChatSendStateIndicator(
     state: SendState,
+    transportAccepted: Boolean,
     onRetryClick: () -> Unit,
 ) {
     Box(modifier = Modifier.size(20.dp)) {
         when (state) {
-            SendState.SENDING -> CircularProgressIndicator(
-                modifier = Modifier.fillMaxSize(),
-                strokeWidth = 2.dp,
-                color = ExtendedTheme.colors.textSecondary,
-            )
+            SendState.SENDING -> {
+                if (!transportAccepted) CircularProgressIndicator(
+                    modifier = Modifier.fillMaxSize(),
+                    strokeWidth = 2.dp,
+                    color = ExtendedTheme.colors.textSecondary,
+                )
+            }
 
             SendState.FAILED -> IconButton(
                 onClick = onRetryClick,

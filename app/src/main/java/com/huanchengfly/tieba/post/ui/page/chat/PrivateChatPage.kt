@@ -143,7 +143,6 @@ fun PrivateChatPage(
                         if (text.isNotEmpty()) {
                             viewModel.send(PrivateChatUiIntent.Send(peerUid, text))
                             input = TextFieldValue()
-                            showEmoticonPanel = false
                         }
                     },
                     showEmoticonPanel = showEmoticonPanel,
