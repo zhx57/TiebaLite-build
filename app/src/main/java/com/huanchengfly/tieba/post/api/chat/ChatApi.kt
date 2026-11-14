@@ -308,7 +308,8 @@ object ChatApi {
             senderUid = bdukUid ?: 0L,
             senderName = senderName,
             senderPortrait = portrait,
-            contentType = transportType,
+            // 兼容旧 UI 和回显匹配：已知业务消息继续暴露内层类型；完整协议类型保存在 semantics。
+            contentType = businessType ?: transportType,
             text = text.ifBlank {
                 when {
                     images.isNotEmpty() -> ""
