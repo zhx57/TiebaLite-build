@@ -120,13 +120,12 @@ fun LongClickMenu(
     enabled: Boolean = true,
     menuState: MenuState = rememberMenuState(),
     onClick: (() -> Unit)? = null,
+    onDoubleClick: (() -> Unit)? = null,
     shape: Shape = RoundedCornerShape(0.dp),
     interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
     indication: Indication? = LocalIndication.current,
     content: @Composable () -> Unit,
 ) {
-    var lastClickTime by remember { mutableLongStateOf(0L) }
-    val clickableInterval = 500L
     LaunchedEffect(Unit) {
         launch {
             interactionSource.interactions
@@ -143,16 +142,12 @@ fun LongClickMenu(
                 interactionSource = interactionSource,
                 indication = indication,
                 enabled = enabled,
+                onClick = onClick,
+                onDoubleClick = onDoubleClick,
                 onLongClick = {
                     menuState.expanded = true
                 }
-            ) {
-                val currentTime = System.currentTimeMillis()
-                if (currentTime - lastClickTime >= clickableInterval) {
-                    onClick?.invoke()
-                }
-                lastClickTime = currentTime
-            }
+            )
     ) {
         content()
         Box(

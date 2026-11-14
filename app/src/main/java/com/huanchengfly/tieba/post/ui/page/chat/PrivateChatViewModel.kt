@@ -4,7 +4,10 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
+import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
+import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatCache
+import com.huanchengfly.tieba.post.components.ImageUploader
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.arch.BaseViewModel
 import com.huanchengfly.tieba.post.arch.CommonUiEvent
@@ -191,9 +194,10 @@ class PrivateChatViewModel @Inject constructor() :
                         pendingId = id,
                         content = content,
                         peerUid = peerUid,
+                        cloudMeme = cloudMeme,
                     )
                 )
-                val message = saveAndSend(content, peerUid)
+                val message = saveAndSend(content, peerUid, cloudMeme)
                 emit(PrivateChatPartialChange.Send.Success(id, message))
             }.catch { emit(PrivateChatPartialChange.Send.Failure(id, it)) }
         }
@@ -207,17 +211,19 @@ class PrivateChatViewModel @Inject constructor() :
                         content = content,
                         peerUid = peerUid,
                         removeMsgId = failedMsgId,
+                        cloudMeme = cloudMeme,
                     )
                 )
-                val message = saveAndSend(content, peerUid)
+                val message = saveAndSend(content, peerUid, cloudMeme)
                 emit(PrivateChatPartialChange.Send.Success(id, message))
             }.catch { emit(PrivateChatPartialChange.Send.Failure(id, it)) }
         }
 
-        private suspend fun saveAndSend(content: String, peerUid: Long): ChatWsMessage {
+        private suspend fun saveAndSend(content: String, peerUid: Long, cloudMeme: ChatCloudMeme?): ChatWsMessage {
             val client = socketProvider() ?: error("chat socket unavailable")
             client.connect(AccountUtil.getCookie().orEmpty())
-            val msgId = client.sendMessage(peerUid, content)
+            val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+            val msgId = client.sendMessage(peerUid, content, preparedCloudMeme)
             val cached = PrivateChatCache.load(client.selfUid, peerUid)
             val message = ChatWsMessage(
                 msgId = msgId,
@@ -227,6 +233,9 @@ class PrivateChatViewModel @Inject constructor() :
                 content = content,
                 msgTime = System.currentTimeMillis(),
                 isSelf = true,
+                msgType = if (cloudMeme != null) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+                images = preparedCloudMeme?.let { listOf(it.sendImageUrl) }.orEmpty(),
+                cloudMeme = preparedCloudMeme ?: cloudMeme,
             )
             PrivateChatCache.save(client.selfUid, peerUid, mergePrivateMessages(cached, listOf(message)))
             return message
@@ -237,11 +246,12 @@ class PrivateChatViewModel @Inject constructor() :
 sealed interface PrivateChatUiIntent : UiIntent {
     data class Load(val peerUid: Long) : PrivateChatUiIntent
     data class Poll(val peerUid: Long) : PrivateChatUiIntent
-    data class Send(val peerUid: Long, val content: String) : PrivateChatUiIntent
+    data class Send(val peerUid: Long, val content: String, val cloudMeme: ChatCloudMeme? = null) : PrivateChatUiIntent
     data class Resend(
         val peerUid: Long,
         val failedMsgId: Long,
         val content: String,
+        val cloudMeme: ChatCloudMeme? = null,
     ) : PrivateChatUiIntent
 }
 
@@ -253,11 +263,15 @@ internal fun List<ChatWsMessage>.forPrivatePeer(peerUid: Long): List<ChatWsMessa
 private fun mergePrivateMessages(
     current: List<ChatWsMessage>,
     incoming: List<ChatWsMessage>,
-): List<ChatWsMessage> =
-    (current + incoming)
-        .associateBy { it.msgId }
-        .values
-        .sortedBy { it.msgTime }
+): List<ChatWsMessage> {
+    val messages = current.associateByTo(linkedMapOf()) { it.msgId }
+    incoming.forEach { message ->
+        messages[message.msgId] = message.copy(
+            cloudMeme = messages[message.msgId]?.cloudMeme ?: message.cloudMeme,
+        )
+    }
+    return messages.values.sortedBy { it.msgTime }
+}
 
 /** 本地发送确认通过 pendingId 替换，不按相同文案删除其他消息。 */
 private fun mergeIntoState(
@@ -311,6 +325,9 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
                             isSelf = true,
                             sendState = SendState.SENDING,
                             isLocal = true,
+                            msgType = if (cloudMeme != null) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+                            images = cloudMeme?.let { listOf(it.imageUrl) }.orEmpty(),
+                            cloudMeme = cloudMeme,
                         )).toImmutableList(),
                         sendRequestId = oldState.sendRequestId + 1,
                     )
@@ -335,6 +352,7 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
             val content: String,
             val peerUid: Long,
             val removeMsgId: Long? = null,
+            val cloudMeme: ChatCloudMeme? = null,
         ) : Send()
 
         data class Success(val pendingId: Long, val message: ChatWsMessage) : Send()

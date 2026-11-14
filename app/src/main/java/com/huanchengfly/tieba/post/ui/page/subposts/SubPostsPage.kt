@@ -654,7 +654,7 @@ private fun SubPostItem(
                     }
                 }
             },
-            onClick = { onReplyClick(subPost.get()) }.takeUnless { context.appPreferences.hideReply || account == null }
+            onDoubleClick = { onReplyClick(subPost.get()) }.takeUnless { context.appPreferences.hideReply || account == null }
         ) {
             Card(
                 header = {

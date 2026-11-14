@@ -1,5 +1,7 @@
 package com.huanchengfly.tieba.post.api.models.chat
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 /**
  * 吧群（群聊）相关数据模型。
  *
@@ -32,6 +34,31 @@ data class ChatRobotSkill(
 
 data class ChatRobot(val user: ChatMention, val skills: List<ChatRobotSkill>)
 
+data class ChatCloudMeme(
+    val id: String,
+    val imageUrl: String,
+    val uploadedImageUrl: String? = null,
+    val uploadedThumbnailUrl: String? = null,
+) {
+    init {
+        require(id.isNotBlank()) { "云表情 id 不能为空" }
+        require(imageUrl.toHttpUrlOrNull()?.let { it.host.isNotBlank() && it.scheme in setOf("http", "https") } == true) {
+            "云表情图片地址必须是完整的 http(s) URL"
+        }
+        listOf(uploadedImageUrl, uploadedThumbnailUrl).filterNotNull().forEach { url ->
+            require(url.toHttpUrlOrNull()?.let { it.host.isNotBlank() && it.scheme in setOf("http", "https") } == true) {
+                "上传后的聊天图片地址必须是完整的 http(s) URL"
+            }
+        }
+    }
+
+    val sendImageUrl: String
+        get() = uploadedImageUrl ?: imageUrl
+
+    val sendThumbnailUrl: String
+        get() = uploadedThumbnailUrl ?: sendImageUrl
+}
+
 data class ChatRoomMessage(
     val msgId: Long,
     val senderUid: Long,
@@ -54,6 +81,7 @@ data class ChatRoomMessage(
     val echoForPendingId: Long? = null,
     val transportAccepted: Boolean = false,
     val sendError: String? = null,
+    val cloudMeme: ChatCloudMeme? = null,
 )
 
 /**

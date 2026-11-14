@@ -235,6 +235,7 @@ fun ChatRoomPage(
                         cuidGalaxy2 = CuidUtils.getNewCuid(),
                         mentions = target.mentions,
                         robotSkill = target.robotSkill,
+                        cloudMeme = target.cloudMeme,
                     )
                 )
             }
@@ -328,6 +329,19 @@ fun ChatRoomPage(
                             onDismissEmoticonPanel = { showEmoticonPanel = false },
                             onMentionClick = { picker = "mention" },
                             onRobotClick = { picker = "robot" },
+                            onCloudMemeClick = { meme ->
+                                viewModel.send(ChatRoomUiIntent.Send(
+                                    roomId = roomId,
+                                    text = "",
+                                    forumId = fid,
+                                    bduss = account.bduss,
+                                    selfName = account.nameShow ?: account.name,
+                                    selfPortrait = account.portrait,
+                                    selfUid = account.uid.toLongOrNull() ?: 0L,
+                                    cuidGalaxy2 = CuidUtils.getNewCuid(),
+                                    cloudMeme = meme,
+                                ))
+                            },
                             robotCommandName = robotCommandName.takeIf { robotSkill != null },
                             onCancelRobotCommand = {
                                 robotSkill = null

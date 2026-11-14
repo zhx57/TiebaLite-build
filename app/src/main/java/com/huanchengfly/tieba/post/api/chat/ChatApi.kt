@@ -332,7 +332,9 @@ object ChatApi {
         null -> emptyList()
 
         is JSONObject -> {
-            val direct = listOf("src", "img", "image", "images", "img_url", "image_url", "pic_list", "pic_infos")
+            val sdkImage = extractImageSources(node.opt("url"))
+                .ifEmpty { extractImageSources(node.opt("thumbnail")) }
+            val direct = sdkImage + listOf("src", "img", "image", "images", "img_url", "image_url", "pic_list", "pic_infos")
                 .flatMap { extractImageSources(node.opt(it)) }
             if (direct.isNotEmpty()) {
                 direct

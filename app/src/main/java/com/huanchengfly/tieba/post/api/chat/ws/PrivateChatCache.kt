@@ -2,6 +2,7 @@ package com.huanchengfly.tieba.post.api.chat.ws
 
 import android.content.Context
 import com.huanchengfly.tieba.post.App
+import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -56,6 +57,22 @@ object PrivateChatCache {
                     content = item.optString("content"),
                     msgTime = item.optLong("msgTime"),
                     isSelf = item.optBoolean("isSelf"),
+                    msgType = item.optInt("msgType"),
+                    images = item.optJSONArray("images")?.let { images ->
+                        (0 until images.length()).mapNotNull {
+                            (images.opt(it) as? String)?.takeIf(String::isNotBlank)
+                        }
+                    }.orEmpty(),
+                    cloudMeme = item.optJSONObject("cloudMeme")?.let { meme ->
+                        runCatching {
+                            ChatCloudMeme(
+                                id = meme.optString("id"),
+                                imageUrl = meme.optString("imageUrl"),
+                                uploadedImageUrl = meme.optString("uploadedImageUrl").takeIf { it.isNotBlank() },
+                                uploadedThumbnailUrl = meme.optString("uploadedThumbnailUrl").takeIf { it.isNotBlank() },
+                            )
+                        }.getOrNull()
+                    },
                 )
             }
         }.getOrDefault(emptyList())
@@ -82,6 +99,16 @@ object PrivateChatCache {
                 put("content", message.content)
                 put("msgTime", message.msgTime)
                 put("isSelf", message.isSelf)
+                put("msgType", message.msgType)
+                put("images", JSONArray(message.images))
+                message.cloudMeme?.let { meme ->
+                    put("cloudMeme", JSONObject().apply {
+                        put("id", meme.id)
+                        put("imageUrl", meme.imageUrl)
+                        meme.uploadedImageUrl?.let { put("uploadedImageUrl", it) }
+                        meme.uploadedThumbnailUrl?.let { put("uploadedThumbnailUrl", it) }
+                    })
+                }
             })
         }
         prefs.edit().putString(key(selfUid, peerUid), array.toString()).apply()

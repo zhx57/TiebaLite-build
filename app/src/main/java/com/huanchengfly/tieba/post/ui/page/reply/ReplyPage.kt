@@ -368,12 +368,18 @@ internal fun ReplyPageContent(
         keyboardController?.hide()
     }
 
-    fun switchToPanel(type: ReplyPanelType) {
+    fun switchToPanel(type: ReplyPanelType, showKeyboardAfterClose: Boolean = false) {
         if (curKeyboardType == type || type == NONE) {
             if (curKeyboardType != NONE) {
-                showKeyboard()
-                closingPanel = true
-                startClosingAnimation = false
+                if (showKeyboardAfterClose) {
+                    showKeyboard()
+                    closingPanel = true
+                    startClosingAnimation = false
+                } else {
+                    closingPanel = false
+                    startClosingAnimation = false
+                    hideKeyboard()
+                }
             }
             viewModel.send(ReplyUiIntent.SwitchPanel(NONE))
         } else {
@@ -424,7 +430,12 @@ internal fun ReplyPageContent(
     }
 
     val panelHeight by remember {
-        derivedStateOf { max(imeVisibleHeightPx.pxToDpFloat(), 150f).dp }
+        derivedStateOf {
+            max(
+                if (curKeyboardType != NONE) imeVisibleHeightPx.pxToDpFloat() else 0f,
+                150f
+            ).dp
+        }
     }
 
     val textMeasurer = rememberTextMeasurer()
@@ -474,15 +485,31 @@ internal fun ReplyPageContent(
 //                }
 //            }
             .onVisibilityChanged { visibility ->
-                if (imeAnimationEnd && (visibility && imeAnimationTargetHeight == 0)) {
+                if (
+                    curKeyboardType == NONE &&
+                    !closingPanel &&
+                    editTextView?.hasFocus() == true &&
+                    imeAnimationEnd &&
+                    visibility &&
+                    imeAnimationTargetHeight == 0
+                ) {
                     showKeyboard()
                 }
-                if (imeAnimationEnd && (!visibility && imeAnimationTargetHeight > 10)) {
+                if (
+                    curKeyboardType == NONE &&
+                    !closingPanel &&
+                    !visibility &&
+                    imeAnimationTargetHeight > 10
+                ) {
                     hideKeyboard()
                 }
             }
             .padding(bottom = with(density) {
-                imeAnimationTargetHeight.toDp()
+                if (curKeyboardType == NONE && !closingPanel) {
+                    imeAnimationTargetHeight.toDp()
+                } else {
+                    0.dp
+                }
             }),
         verticalArrangement = Arrangement.Bottom
     ) {
@@ -556,7 +583,7 @@ internal fun ReplyPageContent(
                             }
                             setOnFocusChangeListener { _, hasFocus ->
                                 if (hasFocus) {
-                                    switchToPanel(NONE)
+                                    switchToPanel(NONE, showKeyboardAfterClose = true)
                                 }
                             }
                             addTextChangedListener(

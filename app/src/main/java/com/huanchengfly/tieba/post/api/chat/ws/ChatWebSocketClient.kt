@@ -1,6 +1,7 @@
 package com.huanchengfly.tieba.post.api.chat.ws
 
 import com.huanchengfly.tieba.post.App
+import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.api.models.protos.chat.CommitPersonalMsgReqIdl
 import com.huanchengfly.tieba.post.api.models.protos.chat.CommitPersonalMsgResIdl
@@ -272,17 +273,17 @@ class ChatWebSocketClient {
                 }
                 val fromUid = msg.userInfo?.userId ?: 0L
                 val msgType = msg.msgType ?: 0
-                // 已读回执等系统消息不是聊天内容，留在列表里会显示成 JSON
-                if (msgType == ChatWsConstants.MSG_TYPE_READED || msgType == ChatWsConstants.MSG_TYPE_MISC) {
-                    return@forEach
-                }
+                // 已读回执不是聊天内容。
+                if (msgType == ChatWsConstants.MSG_TYPE_READED) return@forEach
+                val rawContent = msg.content.orEmpty()
                 result += ChatWsMessage(
                     msgId = msgId,
                     msgType = msgType,
                     peerUid = fromUid,
                     peerName = msg.userInfo?.userName.orEmpty(),
                     peerPortrait = msg.userInfo?.portrait.orEmpty(),
-                    content = normalizePrivateContent(msg.content.orEmpty(), msgType),
+                    content = normalizePrivateContent(rawContent, msgType),
+                    images = PrivateChatImageContent.parse(rawContent, msgType),
                     msgTime = (msg.createTime ?: 0) * 1000L,
                     isSelf = fromUid == selfUid,
                 )
@@ -301,6 +302,7 @@ class ChatWebSocketClient {
      * 内容是 JSON。这里只保留可读文本，避免会话列表出现大段 JSON。
      */
     private fun normalizePrivateContent(raw: String, msgType: Int): String {
+        if (msgType == ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE) return ""
         val trimmed = raw.trim()
         if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return trimmed
         return runCatching {
@@ -326,16 +328,9 @@ class ChatWebSocketClient {
     /**
      * 发送私信。
      */
-    suspend fun sendMessage(toUid: Long, content: String): Long {
+    suspend fun sendMessage(toUid: Long, content: String, cloudMeme: ChatCloudMeme? = null): Long {
         val recordId = System.currentTimeMillis()
-        val request = CommitPersonalMsgReqIdl(
-            data_ = CommitPersonalMsgReqIdl.DataReq(
-                toUid = toUid,
-                msgType = ChatWsConstants.MSG_TYPE_PRIVATE,
-                content = content,
-                recordId = recordId,
-            )
-        )
+        val request = buildPrivateMessageRequest(toUid, content, recordId, cloudMeme)
         val payload = sendRaw(
             data = request.encode(),
             cmd = ChatWsConstants.CMD_SEND_MSG,
@@ -351,7 +346,9 @@ class ChatWebSocketClient {
                 "send message blocked: $blockErrno ${response.data_?.blockInfo?.blockErrmsg}"
             )
         }
-        return response.data_?.msgId ?: 0L
+        return (response.data_?.msgId ?: 0L).also {
+            if (it <= 0L) throw IllegalStateException("send message returned invalid msgId: $it")
+        }
     }
 
     /**
@@ -446,6 +443,44 @@ class ChatWebSocketClient {
     }
 }
 
+internal fun buildPrivateMessageRequest(
+    toUid: Long,
+    content: String,
+    recordId: Long,
+    cloudMeme: ChatCloudMeme? = null,
+): CommitPersonalMsgReqIdl {
+    require(cloudMeme == null || content.isBlank()) { "image message cannot include text content" }
+    return CommitPersonalMsgReqIdl(
+        data_ = CommitPersonalMsgReqIdl.DataReq(
+            toUid = toUid,
+            msgType = if (cloudMeme == null) ChatWsConstants.MSG_TYPE_PRIVATE else ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE,
+            content = if (cloudMeme == null) content else PrivateChatImageContent.encode(cloudMeme),
+            recordId = recordId,
+        )
+    )
+}
+
+internal object PrivateChatImageContent {
+    fun encode(meme: ChatCloudMeme): String = JSONArray().put(JSONObject().apply {
+        put("src", meme.sendThumbnailUrl)
+        put("big_src", meme.sendImageUrl)
+        put("type", "3")
+        put("bsize", "100,100")
+    }).toString()
+
+    fun parse(raw: String, msgType: Int): List<String> {
+        if (msgType != ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE) return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            (0 until array.length()).mapNotNull { index ->
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                (item.opt("big_src") as? String)?.takeIf { it.isNotBlank() }
+                    ?: (item.opt("src") as? String)?.takeIf { it.isNotBlank() }
+            }.distinct()
+        }.getOrDefault(emptyList())
+    }
+}
+
 /**
  * 一条私信消息。
  */
@@ -463,4 +498,6 @@ data class ChatWsMessage(
     val isLocal: Boolean = false,
     /** 消息类型，见 [ChatWsConstants]；0 表示旧数据/未知。 */
     val msgType: Int = 0,
+    val images: List<String> = emptyList(),
+    val cloudMeme: ChatCloudMeme? = null,
 )
