@@ -107,8 +107,9 @@ fun ChatComposer(
         availableHeight < 600.dp || showEmoticonPanel -> 4
         else -> 6
     }
-    val emoticonPanelHeight = (availableHeight * 0.5f).coerceIn(156.dp, 280.dp)
-        .coerceAtMost((availableHeight - 112.dp).coerceAtLeast(96.dp))
+    val emoticonPanelHeight = 156.dp.coerceAtMost(
+        (availableHeight - 112.dp).coerceAtLeast(96.dp)
+    )
     var panelExpanded by remember { mutableStateOf(false) }
     val dragThreshold = with(density) { 24.dp.toPx() }
     val panelScrollConnection = remember(dragThreshold) {
@@ -205,10 +206,10 @@ fun ChatComposer(
                         minLines = 1
                         textSize = 16f
                         setPadding(16, 8, 16, 8)
-                        setOnFocusChangeListener { _, hasFocus ->
-                            if (hasFocus && currentShowEmoticonPanel.value) {
+                        setOnClickListener {
+                            if (currentShowEmoticonPanel.value) {
                                 currentDismissEmoticonPanel.value()
-                                keyboardController?.show()
+                                post { keyboardController?.show() }
                             }
                         }
                         isEnabled = enabled
