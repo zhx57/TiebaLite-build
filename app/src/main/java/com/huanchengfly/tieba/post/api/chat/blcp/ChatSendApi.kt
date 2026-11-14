@@ -145,8 +145,6 @@ object ChatSendApi {
             cloudMeme: ChatCloudMeme? = null,
         ): ChatCloudMeme? = withContext(Dispatchers.IO) {
             var stage = "上传云表情"
-            var connectionForFailure: BlcpClient? = null
-            var closeConnectionOnFailure = false
             try {
                 val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
                 mutex.withLock {
@@ -163,72 +161,71 @@ object ChatSendApi {
                         }
                         blcp!!
                     }
-                    connectionForFailure = connection
-                    closeConnectionOnFailure = true
-                    var login = synchronized(lifecycleLock) { identity }
-                    if (login == null) {
-                        stage = "获取安全令牌"
-                        val zid = AccountUtil.getAccountInfoByBduss(accountBduss).zid
-                            ?.takeIf { it.isNotBlank() }
-                            ?: withTimeoutOrNull(15_000) { SofireUtils.fetchZid().firstOrNull() }
+                    try {
+                        var login = synchronized(lifecycleLock) { identity }
+                        if (login == null) {
+                            stage = "获取安全令牌"
+                            val zid = AccountUtil.getAccountInfoByBduss(accountBduss).zid
                                 ?.takeIf { it.isNotBlank() }
-                            ?: error("未取得设备安全令牌，请刷新账号登录信息后重试")
-                        stage = "连接"
-                        connection.connect()
-                        stage = "获取登录令牌"
-                        val token = fetchLcmToken(cuidGalaxy2)
-                        stage = "LCM 登录"
-                        val interval = connection.loginLcm(token, cuidGalaxy2)
-                        val loginSuccessAt = System.nanoTime()
-                        val connectionDeadline = ChatConnectionDeadline.fromLoginSuccess(
-                            loginSuccessAt,
-                            interval,
-                        )
-                        stage = "IM 登录"
-                        val newLogin = connection.loginIm(accountBduss, cuidGalaxy2, zid)
-                        login = newLogin
-                        stage = "加入群聊"
-                        connection.joinChatroom(chatroomId, newLogin.uk)
-                        synchronized(lifecycleLock) {
-                            check(blcp === connection) { "群聊页面已离开，连接已关闭" }
-                            identity = login
-                            account = accountBduss
-                            device = cuidGalaxy2
-                            room = chatroomId
-                            securityToken = zid
-                            deadline = connectionDeadline
-                            expiryClose = scope.launch {
-                                delay(connectionDeadline.delayMs)
-                                mutex.withLock {
-                                    synchronized(lifecycleLock) {
-                                        if (blcp === connection && deadline === connectionDeadline) close()
+                                ?: withTimeoutOrNull(15_000) { SofireUtils.fetchZid().firstOrNull() }
+                                    ?.takeIf { it.isNotBlank() }
+                                ?: error("未取得设备安全令牌，请刷新账号登录信息后重试")
+                            stage = "连接"
+                            connection.connect()
+                            stage = "获取登录令牌"
+                            val token = fetchLcmToken(cuidGalaxy2)
+                            stage = "LCM 登录"
+                            val interval = connection.loginLcm(token, cuidGalaxy2)
+                            val loginSuccessAt = System.nanoTime()
+                            val connectionDeadline = ChatConnectionDeadline.fromLoginSuccess(
+                                loginSuccessAt,
+                                interval,
+                            )
+                            stage = "IM 登录"
+                            val newLogin = connection.loginIm(accountBduss, cuidGalaxy2, zid)
+                            login = newLogin
+                            stage = "加入群聊"
+                            connection.joinChatroom(chatroomId, newLogin.uk)
+                            synchronized(lifecycleLock) {
+                                check(blcp === connection) { "群聊页面已离开，连接已关闭" }
+                                identity = login
+                                account = accountBduss
+                                device = cuidGalaxy2
+                                room = chatroomId
+                                securityToken = zid
+                                deadline = connectionDeadline
+                                expiryClose = scope.launch {
+                                    delay(connectionDeadline.delayMs)
+                                    mutex.withLock {
+                                        synchronized(lifecycleLock) {
+                                            if (blcp === connection && deadline === connectionDeadline) close()
+                                        }
                                     }
                                 }
                             }
                         }
+                        stage = "发送消息"
+                        val authenticated = checkNotNull(login)
+                        val currentDeadline = synchronized(lifecycleLock) { deadline }
+                        if (currentDeadline?.isExpired(System.nanoTime()) == true) {
+                            error("登录期限已过，未发送消息")
+                        }
+                        val payload = buildMessagePayload(
+                            chatroomId, text, forumId, forumLevel, authenticated.uk,
+                            BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
+                            selfName, selfPortrait, accountBduss, mentions, robotSkill,
+                            checkNotNull(synchronized(lifecycleLock) { securityToken }), preparedCloudMeme,
+                        )
+                        connection.sendMcastMsg(chatroomId, payload)
+                        preparedCloudMeme
+                    } catch (e: Exception) {
+                        synchronized(lifecycleLock) {
+                            if (blcp === connection) close()
+                        }
+                        throw e
                     }
-                    stage = "发送消息"
-                    val authenticated = checkNotNull(login)
-                    val currentDeadline = synchronized(lifecycleLock) { deadline }
-                    if (currentDeadline?.isExpired(System.nanoTime()) == true) {
-                        closeConnectionOnFailure = true
-                        error("登录期限已过，未发送消息")
-                    }
-                    val payload = buildMessagePayload(
-                        chatroomId, text, forumId, forumLevel, authenticated.uk,
-                        BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
-                        selfName, selfPortrait, accountBduss, mentions, robotSkill,
-                        checkNotNull(synchronized(lifecycleLock) { securityToken }), preparedCloudMeme,
-                    )
-                    connection.sendMcastMsg(chatroomId, payload)
-                    preparedCloudMeme
                 }
             } catch (e: Exception) {
-                if (closeConnectionOnFailure) {
-                    synchronized(lifecycleLock) {
-                        if (blcp === connectionForFailure) close()
-                    }
-                }
                 if (e is CancellationException && e !is TimeoutCancellationException) throw e
                 val detail = e.message.orEmpty().replace(accountBduss, "[已隐藏]")
                     .replace(cuidGalaxy2, "[已隐藏]").take(300)
@@ -353,8 +350,12 @@ object ChatSendApi {
             put(
                 "content_body",
                 if (cloudMeme == null) JSONObject().put("text", text).toString()
-                else JSONObject().put("url", cloudMeme.sendImageUrl)
-                    .put("thumbnail", cloudMeme.sendThumbnailUrl).toString(),
+                else JSONObject().apply {
+                    put("src", cloudMeme.sendThumbnailUrl)
+                    put("big_src", cloudMeme.sendImageUrl)
+                    put("type", "3")
+                    put("bsize", "100,100")
+                }.toString(),
             )
             put("src", "")
             put("baidu_uk", bduk)

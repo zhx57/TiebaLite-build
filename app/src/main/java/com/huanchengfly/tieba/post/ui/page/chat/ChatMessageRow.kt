@@ -37,6 +37,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.huanchengfly.tieba.post.R
@@ -55,6 +59,7 @@ import com.huanchengfly.tieba.post.utils.DateTimeUtils
 import com.huanchengfly.tieba.post.utils.StringUtil
 import com.huanchengfly.tieba.post.utils.appPreferences
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * 聊天消息行，群聊与私信共用。
@@ -92,6 +97,8 @@ fun ChatMessageRow(
         hasImages -> text
         else -> text.ifBlank { stringResource(id = R.string.text_chat_unsupported_message) }
     }
+
+    val annotatedText = remember(displayText) { annotateChatLinks(displayText) }
 
     Row(
         modifier = modifier
@@ -169,7 +176,7 @@ fun ChatMessageRow(
                         }
                         if (!hasImages || text.isNotBlank()) {
                             PbContentText(
-                                text = displayText,
+                                text = annotatedText,
                                 modifier = Modifier
                                     .weight(1f, fill = false)
                                     .clip(RoundedCornerShape(10.dp))
@@ -192,6 +199,19 @@ fun ChatMessageRow(
             }
         }
     }
+}
+
+internal fun annotateChatLinks(text: String): AnnotatedString = buildAnnotatedString {
+    append(text)
+    Regex("https?://[^\\s<>\\\"，。！？；、（）【】]+", RegexOption.IGNORE_CASE)
+        .findAll(text).forEach { match ->
+            val url = match.value.trimEnd('.', ',', ';', ')', ']', '}')
+            if (url.toHttpUrlOrNull() != null) {
+                val end = match.range.first + url.length
+                addStringAnnotation("url", url, match.range.first, end)
+                addStyle(SpanStyle(textDecoration = TextDecoration.Underline), match.range.first, end)
+            }
+        }
 }
 
 /**

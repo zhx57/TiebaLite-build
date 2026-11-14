@@ -230,8 +230,10 @@ class ChatRoomStateTest {
         )
         val data = JSONObject(JSONObject(request.getString("content")).getString("text"))
         val body = JSONObject(data.getString("content_body"))
-        assertEquals(meme.sendImageUrl, body.getString("url"))
-        assertEquals(meme.sendThumbnailUrl, body.getString("thumbnail"))
+        assertEquals(meme.sendThumbnailUrl, body.getString("src"))
+        assertEquals(meme.sendImageUrl, body.getString("big_src"))
+        assertEquals("3", body.getString("type"))
+        assertEquals("100,100", body.getString("bsize"))
         assertEquals("https://cloud.example/original.gif", meme.imageUrl)
     }
 
@@ -245,9 +247,10 @@ class ChatRoomStateTest {
         val data = JSONObject(JSONObject(request.getString("content")).getString("text"))
         assertEquals("1", data.getString("content_type"))
         val body = JSONObject(data.getString("content_body"))
-        assertEquals(meme.imageUrl, body.getString("url"))
-        assertEquals(meme.imageUrl, body.getString("thumbnail"))
-        assertFalse(body.has("src"))
+        assertEquals(meme.imageUrl, body.getString("src"))
+        assertEquals(meme.imageUrl, body.getString("big_src"))
+        assertEquals("3", body.getString("type"))
+        assertEquals("100,100", body.getString("bsize"))
         assertFalse(body.has("text"))
         val parsed = received(request)
         assertEquals(1, parsed.contentType)
@@ -568,6 +571,64 @@ class ChatRoomStateTest {
         assertTrue(parsed.images.isEmpty())
         assertTrue(parsed.mentions.isEmpty())
         assertEquals(null, parsed.robotSkill)
+    }
+
+    @Test
+    fun sharedPostFallsBackToTitleAndUrlWhenBodyIsEmpty() {
+        val url = "https://tieba.baidu.com/p/123456789?pid=987654321"
+        listOf<Any>("", JSONObject.NULL, JSONObject(), org.json.JSONArray()).forEach { empty ->
+            val body = JSONObject().put("content_body", empty).put("text", empty)
+                .put("title", "分享的帖子").put("url", url)
+            val message = ChatApi.parseMessage(JSONObject().put("from_user", 123L)
+                .put("type", 81).put("content", JSONObject().put("text", body)), null)!!
+            assertEquals("分享的帖子\n$url", message.text)
+            assertTrue(message.images.isEmpty())
+            assertEquals(81, message.contentType)
+        }
+    }
+
+    @Test
+    fun nestedShareContentCanBeJsonEncodedWithoutShowingMetadata() {
+        val url = "https://tieba.baidu.com/p/123456789"
+        val share = JSONObject().put("title", "分享标题").put("link", url)
+        val body = JSONObject().put("content_body", "")
+            .put("share_info", share.toString())
+            .put("ext", JSONObject().put("url", "https://example.com/profile"))
+        val message = ChatApi.parseMessage(JSONObject().put("from_user", 123L)
+            .put("type", 81).put("content", JSONObject().put("text", body.toString()).toString()), null)!!
+        assertEquals("分享标题\n$url", message.text)
+        assertFalse(message.text.contains("profile"))
+    }
+
+    @Test
+    fun sharedPostUrlIsNotLostWhenTextIsPresent() {
+        val url = "https://tieba.baidu.com/p/123456789"
+        val message = ChatApi.parseMessage(JSONObject().put("from_user", 123L).put("type", 81)
+            .put("content", JSONObject().put("text", JSONObject().put("text", "帖子标题")
+                .put("url", url))), null)!!
+        assertEquals("帖子标题\n$url", message.text)
+    }
+
+    @Test
+    fun emptyBodyFallsThroughToNonEmptyText() {
+        val message = ChatApi.parseMessage(JSONObject().put("from_user", 123L).put("type", 81)
+            .put("content", JSONObject().put("text", JSONObject()
+                .put("content_body", "").put("text", "普通文字").put("content_type", 0))), null)!!
+        assertEquals("普通文字", message.text)
+        assertEquals(0, message.contentType)
+    }
+
+    @Test
+    fun chatPostLinksHaveClickableAnnotationsAndRetainQuery() {
+        val url = "https://tieba.baidu.com/p/123456789?pid=987654321&see_lz=1"
+        val text = "分享的帖子\n$url。"
+        val annotated = annotateChatLinks(text)
+        assertEquals(text, annotated.text)
+        val link = annotated.getStringAnnotations("url", 0, text.length).single()
+        assertEquals(url, link.item)
+        assertEquals(url, annotated.text.substring(link.start, link.end))
+        val plain = annotateChatLinks("普通文字 (#滑稽)")
+        assertTrue(plain.getStringAnnotations("url", 0, plain.length).isEmpty())
     }
 
     @Test

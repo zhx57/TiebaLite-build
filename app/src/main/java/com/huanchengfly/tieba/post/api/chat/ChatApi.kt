@@ -408,16 +408,24 @@ object ChatApi {
     private fun extractText(node: Any?): String = when (node) {
         null -> ""
         is JSONObject -> {
-            val body = node.opt("content_body")
-            when {
-                body != null && body != JSONObject.NULL -> extractText(body)
-                node.has("text") -> extractText(node.opt("text"))
-                node.has("str") -> node.optString("str")
-                node.has("msg") -> node.optString("msg")
-                else -> listOf("title", "description", "desc", "url")
-                    .mapNotNull { key -> node.optString(key).takeIf { it.isNotBlank() } }
-                    .distinct().joinToString("\n")
+            // 空正文不能挡住同层分享内容；只沿内容字段解析，避免读出 ext 中的用户资料。
+            val body = sequenceOf(
+                "content_body", "text", "str", "msg", "content",
+                "share", "share_info", "thread", "thread_info",
+            )
+                .map { extractText(node.opt(it)) }
+                .firstOrNull { it.isNotBlank() }
+                .orEmpty()
+            val links = listOf("url", "link", "jump_url")
+                .mapNotNull { (node.opt(it) as? String)?.trim()?.takeIf(String::isNotBlank) }
+            val description = if (body.isBlank()) {
+                listOf("title", "description", "desc")
+                    .mapNotNull { (node.opt(it) as? String)?.trim()?.takeIf(String::isNotBlank) }
+            } else {
+                listOf(body)
             }
+            (description + links.filterNot { it in body })
+                .distinct().joinToString("\n")
         }
 
         is JSONArray -> buildString {
