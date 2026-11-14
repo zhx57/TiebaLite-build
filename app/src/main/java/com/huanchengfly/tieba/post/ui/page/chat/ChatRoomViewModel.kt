@@ -316,8 +316,10 @@ internal fun mergeServerMessages(
                 local.images.map(::comparableImage) == server.images.map(::comparableImage) &&
                 local.robotSkill == server.robotSkill &&
                 local.mentions.map { it.baiduUk } == server.mentions.map { it.baiduUk } &&
-                server.msgTime >= local.msgTime - 5_000L &&
-                server.msgTime <= local.msgTime + 120_000L
+                (existing != null || (
+                    server.msgTime >= local.msgTime - 5_000L &&
+                        server.msgTime <= local.msgTime + 120_000L
+                ))
         } else null
         if (candidate != null) {
             locals.remove(candidate)
