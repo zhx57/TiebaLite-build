@@ -182,7 +182,7 @@ fun ChatMessageRow(
                     }
                 },
             )
-            if (msgTime > 0 && sendState == SendState.SENT) {
+            if (msgTime > 0) {
                 Text(
                     text = DateTimeUtils.getRelativeTimeString(LocalContext.current, msgTime),
                     style = MaterialTheme.typography.caption,

@@ -11,6 +11,8 @@ import android.provider.MediaStore
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.runtime.Composable
 import com.huanchengfly.tieba.post.App
 import com.huanchengfly.tieba.post.R
 import com.zhihu.matisse.Matisse
@@ -25,6 +27,10 @@ fun AppCompatActivity.registerPickMediasLauncher(callback: (PickMediasResult) ->
         callback(it)
     }
 }
+
+@Composable
+fun registerPickMediasLauncher(callback: (PickMediasResult) -> Unit): ActivityResultLauncher<PickMediasRequest> =
+    rememberLauncherForActivityResult(PickMediasContract, callback)
 
 fun isPhotoPickerAvailable(): Boolean {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

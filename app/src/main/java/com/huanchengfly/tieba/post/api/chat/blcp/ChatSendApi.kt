@@ -11,6 +11,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -28,6 +29,27 @@ import java.util.concurrent.TimeUnit
  * 群聊发送需要先完成 IM 登录拿到聊天身份（uk / bduk / trigger_id），
  * 再做 BLCP 的 sendMcastMsg。
  */
+internal class ChatConnectionDeadline private constructor(
+    private val expiresAtNanos: Long,
+    val delayMs: Long,
+) {
+    fun isExpired(nowNanos: Long): Boolean = nowNanos - expiresAtNanos >= 0L
+
+    companion object {
+        fun fromLoginSuccess(loginSuccessAtNanos: Long, nextIntervalMs: Long): ChatConnectionDeadline {
+            val lifetimeMs = if (nextIntervalMs > 0L) {
+                (nextIntervalMs / 2).coerceAtLeast(1L)
+            } else {
+                30_000L
+            }.coerceAtMost(30_000L)
+            return ChatConnectionDeadline(
+                expiresAtNanos = loginSuccessAtNanos + TimeUnit.MILLISECONDS.toNanos(lifetimeMs),
+                delayMs = lifetimeMs,
+            )
+        }
+    }
+}
+
 object ChatSendApi {
 
     private val client = okhttp3.OkHttpClient.Builder()
@@ -88,6 +110,7 @@ object ChatSendApi {
         private var room: Long? = null
         private var securityToken: String? = null
         private var expiryClose: Job? = null
+        private var deadline: ChatConnectionDeadline? = null
         private var released = false
 
         fun release() = synchronized(lifecycleLock) {
@@ -105,6 +128,7 @@ object ChatSendApi {
             device = null
             room = null
             securityToken = null
+            deadline = null
         }
 
         suspend fun sendChatRoomMessage(
@@ -120,19 +144,27 @@ object ChatSendApi {
             robotSkill: Int? = null,
             cloudMeme: ChatCloudMeme? = null,
         ): ChatCloudMeme? = withContext(Dispatchers.IO) {
-            mutex.withLock {
-                var stage = "连接"
-                try {
+            var stage = "上传云表情"
+            var connectionForFailure: BlcpClient? = null
+            var closeConnectionOnFailure = false
+            try {
+                val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+                mutex.withLock {
+                    stage = "连接"
                     val connection = synchronized(lifecycleLock) {
                         check(!released) { "群聊页面已离开，连接已释放" }
+                        val currentDeadline = deadline
                         if (blcp?.isConnected != true || account != accountBduss ||
-                            device != cuidGalaxy2 || room != chatroomId
+                            device != cuidGalaxy2 || room != chatroomId ||
+                            currentDeadline == null || currentDeadline.isExpired(System.nanoTime())
                         ) {
                             close()
                             blcp = BlcpClient()
                         }
                         blcp!!
                     }
+                    connectionForFailure = connection
+                    closeConnectionOnFailure = true
                     var login = synchronized(lifecycleLock) { identity }
                     if (login == null) {
                         stage = "获取安全令牌"
@@ -147,6 +179,11 @@ object ChatSendApi {
                         val token = fetchLcmToken(cuidGalaxy2)
                         stage = "LCM 登录"
                         val interval = connection.loginLcm(token, cuidGalaxy2)
+                        val loginSuccessAt = System.nanoTime()
+                        val connectionDeadline = ChatConnectionDeadline.fromLoginSuccess(
+                            loginSuccessAt,
+                            interval,
+                        )
                         stage = "IM 登录"
                         val newLogin = connection.loginIm(accountBduss, cuidGalaxy2, zid)
                         login = newLogin
@@ -159,18 +196,24 @@ object ChatSendApi {
                             device = cuidGalaxy2
                             room = chatroomId
                             securityToken = zid
-                            // 尚无可靠的心跳协议，在首个心跳期限前主动回收登录态。
-                            val lifetimeMs = if (interval > 0) (interval / 2).coerceAtLeast(1L) else 30_000L
+                            deadline = connectionDeadline
                             expiryClose = scope.launch {
-                                delay(lifetimeMs.coerceAtMost(30_000L))
-                                mutex.withLock { close() }
+                                delay(connectionDeadline.delayMs)
+                                mutex.withLock {
+                                    synchronized(lifecycleLock) {
+                                        if (blcp === connection && deadline === connectionDeadline) close()
+                                    }
+                                }
                             }
                         }
                     }
-                    stage = "上传云表情"
-                    val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
                     stage = "发送消息"
                     val authenticated = checkNotNull(login)
+                    val currentDeadline = synchronized(lifecycleLock) { deadline }
+                    if (currentDeadline?.isExpired(System.nanoTime()) == true) {
+                        closeConnectionOnFailure = true
+                        error("登录期限已过，未发送消息")
+                    }
                     val payload = buildMessagePayload(
                         chatroomId, text, forumId, forumLevel, authenticated.uk,
                         BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
@@ -179,13 +222,17 @@ object ChatSendApi {
                     )
                     connection.sendMcastMsg(chatroomId, payload)
                     preparedCloudMeme
-                } catch (e: Exception) {
-                    close()
-                    if (e is CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
-                    val detail = e.message.orEmpty().replace(accountBduss, "[已隐藏]")
-                        .replace(cuidGalaxy2, "[已隐藏]").take(300)
-                    throw IllegalStateException("群聊$stage 失败：${detail.ifBlank { e.javaClass.simpleName }}")
                 }
+            } catch (e: Exception) {
+                if (closeConnectionOnFailure) {
+                    synchronized(lifecycleLock) {
+                        if (blcp === connectionForFailure) close()
+                    }
+                }
+                if (e is CancellationException && e !is TimeoutCancellationException) throw e
+                val detail = e.message.orEmpty().replace(accountBduss, "[已隐藏]")
+                    .replace(cuidGalaxy2, "[已隐藏]").take(300)
+                throw IllegalStateException("群聊$stage 失败：${detail.ifBlank { e.javaClass.simpleName }}")
             }
         }
     }

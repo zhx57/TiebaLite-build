@@ -2,6 +2,7 @@ package com.huanchengfly.tieba.post.components
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import com.huanchengfly.tieba.post.App
 import com.huanchengfly.tieba.post.api.BOUNDARY
 import com.huanchengfly.tieba.post.api.booleanToString
@@ -238,6 +239,29 @@ class ImageUploader(
                 }
             }
             .last()
+    }
+}
+
+suspend fun uploadChatPhoto(uri: Uri): ChatCloudMeme = withContext(Dispatchers.IO) {
+    val file = File.createTempFile("chat_photo_", ".image", App.INSTANCE.cacheDir)
+    try {
+        App.INSTANCE.contentResolver.openInputStream(uri)?.use { input ->
+            file.outputStream().use { output -> input.copyTo(output) }
+        } ?: error("无法读取相册图片")
+        val result = ImageUploader("").uploadSinglePicture(file.absolutePath, isOriginImage = true)
+        val info = result.picInfo ?: error("上传图片失败：响应缺少图片地址")
+        val bigUrl = info.bigPic.picUrl.takeIf { it.isNotBlank() }
+            ?: info.originPic.picUrl.takeIf { it.isNotBlank() }
+            ?: error("上传图片失败：响应缺少大图地址")
+        val smallUrl = info.smallPic.picUrl.takeIf { it.isNotBlank() } ?: bigUrl
+        ChatCloudMeme(
+            id = "local_photo_${uri}",
+            imageUrl = bigUrl,
+            uploadedImageUrl = bigUrl,
+            uploadedThumbnailUrl = smallUrl,
+        )
+    } finally {
+        file.delete()
     }
 }
 

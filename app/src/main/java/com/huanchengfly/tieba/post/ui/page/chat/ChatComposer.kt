@@ -35,6 +35,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AlternateEmail
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.EmojiEmotions
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -51,6 +52,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -96,6 +98,7 @@ fun ChatComposer(
     robotCommandName: String? = null,
     onCancelRobotCommand: (() -> Unit)? = null,
     onCloudMemeClick: ((ChatCloudMeme) -> Unit)? = null,
+    onPhotoClick: (() -> Unit)? = null,
 ) {
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
@@ -108,9 +111,17 @@ fun ChatComposer(
         availableHeight < 600.dp || showEmoticonPanel -> 4
         else -> 6
     }
-    val emoticonPanelHeight = 156.dp.coerceAtMost(
-        (availableHeight - 112.dp).coerceAtLeast(96.dp)
-    )
+    var inputBarHeight by remember { mutableStateOf(56.dp) }
+    val navigationHeight = with(density) { WindowInsets.navigationBars.getBottom(this).toDp() }
+    val maxPanelHeight = (availableHeight - inputBarHeight - navigationHeight)
+        .coerceAtLeast(0.dp)
+    val emoticonPanelHeight = if (maxPanelHeight > 0.dp) {
+        (availableHeight * 0.58f)
+            .coerceIn(200.dp, 360.dp)
+            .coerceAtMost(maxPanelHeight)
+    } else {
+        0.dp
+    }
     var panelExpanded by remember { mutableStateOf(false) }
     val dragThreshold = with(density) { 24.dp.toPx() }
     val panelScrollConnection = remember(dragThreshold) {
@@ -180,6 +191,7 @@ fun ChatComposer(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .onSizeChanged { inputBarHeight = with(density) { it.height.toDp() } }
                 .padding(
                     horizontal = when {
                         configuration.isScreenRound -> 16.dp
@@ -308,6 +320,15 @@ fun ChatComposer(
                             color = ExtendedTheme.colors.text,
                         )
                     }
+                    if (onPhotoClick != null) {
+                        DropdownMenuItem(onClick = {
+                            menuExpanded = false
+                            onPhotoClick()
+                        }) {
+                            Icon(Icons.Outlined.Image, contentDescription = null, tint = ExtendedTheme.colors.text)
+                            Text("图片", modifier = Modifier.padding(start = 12.dp), color = ExtendedTheme.colors.text)
+                        }
+                    }
                     if (onMentionClick != null) {
                         DropdownMenuItem(onClick = {
                             menuExpanded = false
@@ -358,7 +379,7 @@ fun ChatComposer(
         }
         if (showEmoticonPanel) {
             val panelHeight = if (panelExpanded) {
-                (availableHeight - 64.dp).coerceAtLeast(160.dp)
+                maxPanelHeight
             } else {
                 emoticonPanelHeight
             }

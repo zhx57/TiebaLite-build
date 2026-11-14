@@ -320,6 +320,44 @@ class ChatRoomStateTest {
     }
 
     @Test
+    fun preparedImageReconcilesAnAlreadySeenEchoAtLocalPosition() {
+        val original = "https://example.com/original.gif"
+        val uploaded = "https://chat.example/uploaded.gif?token=1"
+        val local = message(-1, time = 200_000L, text = "", local = true).copy(
+            contentType = 1, images = listOf(original),
+            cloudMeme = ChatCloudMeme("meme", original),
+        )
+        val seenEcho = local.copy(msgId = 10, isLocal = false, images = listOf(uploaded), msgTime = 100L)
+        val beforePrepared = mergeServerMessages(listOf(local), listOf(seenEcho))
+        assertEquals(2, beforePrepared.size)
+        val prepared = ChatCloudMeme("meme", original, uploadedImageUrl = uploaded)
+        val preparedState = ChatRoomPartialChange.Send.Prepared(-1L, prepared).reduce(
+            ChatRoomUiState(messages = beforePrepared)
+        )
+        val afterPrepared = mergeServerMessages(preparedState.messages, listOf(seenEcho))
+        assertEquals(listOf(10L), afterPrepared.map { it.msgId })
+        assertEquals(-1L, afterPrepared.single().echoForPendingId)
+        assertEquals(200_000L, afterPrepared.single().displayTime)
+        assertEquals(100L, afterPrepared.single().msgTime)
+    }
+
+    @Test
+    fun preparedImageKeepsASeenEchoFromBeingOverwrittenByLateFailure() {
+        val original = "https://example.com/original.gif"
+        val uploaded = "https://chat.example/uploaded.gif?token=1"
+        val local = message(-1, text = "", local = true).copy(
+            contentType = 1, images = listOf(original), cloudMeme = ChatCloudMeme("meme", original)
+        )
+        val echo = local.copy(msgId = 10, isLocal = false, images = listOf(uploaded))
+        val state = ChatRoomPartialChange.Send.Prepared(-1L,
+            ChatCloudMeme("meme", original, uploadedImageUrl = uploaded)
+        ).reduce(ChatRoomUiState(messages = persistentListOf(local)))
+        val delivered = ChatRoomPartialChange.Poll.Success(persistentListOf(echo)).reduce(state)
+        val failed = ChatRoomPartialChange.Send.Failure(-1L, Exception("late")).reduce(delivered)
+        assertEquals(delivered, failed)
+    }
+
+    @Test
     fun imageEchoCannotConsumeDifferentImageOrEmptyTextMessage() {
         val first = message(-1, text = "", local = true).copy(
             contentType = 1, images = listOf("https://example.com/a.gif"),
@@ -350,6 +388,23 @@ class ChatRoomStateTest {
         val state = ChatRoomUiState(messages = finalPoll)
         assertEquals(state, ChatRoomPartialChange.Send.Unconfirmed(-1L).reduce(state))
         assertEquals(state, ChatRoomPartialChange.Send.Failure(-2L, Exception("timeout")).reduce(state))
+    }
+
+    @Test
+    fun alreadyBoundEchoCannotBeConsumedByAnotherPendingMessageOnPoll() {
+        val first = message(-1, text = "", local = true).copy(
+            contentType = 1, images = listOf("https://example.com/a.gif"),
+        )
+        val second = first.copy(msgId = -2)
+        val boundEcho = first.copy(
+            msgId = 10,
+            isLocal = false,
+            echoForPendingId = -1L,
+        )
+        val merged = mergeServerMessages(listOf(boundEcho, second), listOf(boundEcho))
+        assertEquals(2, merged.size)
+        assertEquals(-1L, merged.single { it.msgId == 10L }.echoForPendingId)
+        assertEquals(-2L, merged.single { it.isLocal }.msgId)
     }
 
     @Test

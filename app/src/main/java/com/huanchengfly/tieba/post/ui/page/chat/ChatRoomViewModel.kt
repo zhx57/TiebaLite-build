@@ -13,6 +13,7 @@ import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
+import com.huanchengfly.tieba.post.components.ImageUploader
 import com.huanchengfly.tieba.post.arch.BaseViewModel
 import com.huanchengfly.tieba.post.arch.CommonUiEvent
 import com.huanchengfly.tieba.post.arch.PartialChange
@@ -177,7 +178,9 @@ class ChatRoomViewModel @Inject constructor() :
                         cloudMeme = cloudMeme,
                     )
                 )
-                val preparedCloudMeme = session.sendChatRoomMessage(
+                val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+                emit(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
+                session.sendChatRoomMessage(
                     chatroomId = roomId,
                     text = text,
                     forumId = forumId,
@@ -188,7 +191,7 @@ class ChatRoomViewModel @Inject constructor() :
                     cuidGalaxy2 = cuidGalaxy2,
                     mentions = mentions,
                     robotSkill = robotSkill,
-                    cloudMeme = cloudMeme,
+                    cloudMeme = preparedCloudMeme,
                 )
                 emit(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
             }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
@@ -211,7 +214,9 @@ class ChatRoomViewModel @Inject constructor() :
                         removeMsgId = failedMsgId,
                     )
                 )
-                val preparedCloudMeme = session.sendChatRoomMessage(
+                val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+                emit(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
+                session.sendChatRoomMessage(
                     chatroomId = roomId,
                     text = text,
                     forumId = forumId,
@@ -222,7 +227,7 @@ class ChatRoomViewModel @Inject constructor() :
                     cuidGalaxy2 = cuidGalaxy2,
                     mentions = mentions,
                     robotSkill = robotSkill,
-                    cloudMeme = cloudMeme,
+                    cloudMeme = preparedCloudMeme,
                 )
                 emit(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
             }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
@@ -287,25 +292,26 @@ sealed interface ChatRoomUiIntent : UiIntent {
     ) : ChatRoomUiIntent
 }
 
-/** 只插入新 ID；轮询无变化时保留列表引用，不重排整份历史。 */
+/** 增量合并服务端消息，并在上传完成后关联已见的回显。 */
 internal fun mergeServerMessages(
     current: List<ChatRoomMessage>,
     incoming: List<ChatRoomMessage>,
 ): ImmutableList<ChatRoomMessage> {
-    val existingIds = current.mapTo(HashSet()) { it.msgId }
-    val added = incoming.filter { !it.isLocal && existingIds.add(it.msgId) }
-    if (added.isEmpty()) return current as? ImmutableList<ChatRoomMessage> ?: current.toImmutableList()
+    val merged = current.toMutableList()
     val reserved = current.mapNotNullTo(HashSet()) { it.echoForPendingId }
     val locals = current.filter {
         it.isLocal && (it.sendState != SendState.FAILED || it.transportAccepted) && it.msgId !in reserved
     }.toMutableList()
-    val merged = current.toMutableList()
     fun comparableImage(url: String): String = url.toHttpUrlOrNull()?.let {
         val port = if (it.port == (if (it.scheme == "https") 443 else 80)) "" else ":${it.port}"
         it.host + port + it.encodedPath + (it.encodedQuery?.let { query -> "?$query" } ?: "")
     } ?: url
-    for (server in added.sortedBy { it.msgTime }) {
-        val candidate = if (server.isSelf) locals.firstOrNull { local ->
+    val servers = incoming.filterNot { it.isLocal }.distinctBy { it.msgId }.sortedBy { it.msgTime }
+    var changed = false
+    for (server in servers) {
+        val existingIndex = merged.indexOfFirst { it.msgId == server.msgId && !it.isLocal }
+        val existing = existingIndex.takeIf { it >= 0 }?.let { merged[it] }
+        val candidate = if (server.isSelf && existing?.echoForPendingId == null) locals.firstOrNull { local ->
             local.text == server.text && local.contentType == server.contentType &&
                 local.images.map(::comparableImage) == server.images.map(::comparableImage) &&
                 local.robotSkill == server.robotSkill &&
@@ -313,21 +319,33 @@ internal fun mergeServerMessages(
                 server.msgTime >= local.msgTime - 5_000L &&
                 server.msgTime <= local.msgTime + 120_000L
         } else null
-        var message = server
         if (candidate != null) {
             locals.remove(candidate)
-            merged.remove(candidate)
-            // 历史回显才是成功依据；保留关联，防止迟到的超时覆盖成功。
-            message = server.copy(echoForPendingId = candidate.msgId, cloudMeme = candidate.cloudMeme)
+            val message = server.copy(
+                displayTime = candidate.displayTime,
+                echoForPendingId = candidate.msgId,
+                cloudMeme = candidate.cloudMeme,
+            )
+            val candidateIndex = merged.indexOf(candidate)
+            if (existingIndex >= 0) {
+                merged.removeAt(existingIndex)
+                merged[candidateIndex - if (existingIndex < candidateIndex) 1 else 0] = message
+            } else {
+                merged[candidateIndex] = message
+            }
+            changed = true
+        } else if (existingIndex < 0) {
+            var low = 0
+            var high = merged.size
+            while (low < high) {
+                val mid = (low + high) ushr 1
+                if (merged[mid].displayTime <= server.msgTime) low = mid + 1 else high = mid
+            }
+            merged.add(low, server)
+            changed = true
         }
-        var low = 0
-        var high = merged.size
-        while (low < high) {
-            val mid = (low + high) ushr 1
-            if (merged[mid].msgTime <= message.msgTime) low = mid + 1 else high = mid
-        }
-        merged.add(low, message)
     }
+    if (!changed) return current as? ImmutableList<ChatRoomMessage> ?: current.toImmutableList()
     return merged.toImmutableList()
 }
 
@@ -398,6 +416,13 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
     sealed class Send : ChatRoomPartialChange {
         override fun reduce(oldState: ChatRoomUiState): ChatRoomUiState =
             when (this) {
+                is Prepared -> oldState.copy(messages = oldState.messages.map {
+                    if (it.msgId == pendingId) it.copy(
+                        images = preparedCloudMeme?.let { meme -> listOf(meme.sendImageUrl) } ?: it.images,
+                        cloudMeme = preparedCloudMeme ?: it.cloudMeme,
+                    ) else it
+                }.toImmutableList())
+
                 is Start -> {
                     val base = oldState.messages.filterNot { it.msgId == removeMsgId }
                     oldState.copy(
@@ -408,7 +433,7 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                             senderPortrait = selfPortrait,
                             contentType = if (cloudMeme == null) 0 else 1,
                             text = text,
-                            images = cloudMeme?.let { listOf(it.imageUrl) }.orEmpty(),
+                            images = cloudMeme?.let { listOf(it.sendImageUrl) }.orEmpty(),
                             msgTime = System.currentTimeMillis(),
                             isSelf = true,
                             sendState = SendState.SENDING,
@@ -453,6 +478,11 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                     }.toImmutableList())
                 }
             }
+
+        data class Prepared(
+            val pendingId: Long,
+            val preparedCloudMeme: ChatCloudMeme?,
+        ) : Send()
 
         data class Start(
             val pendingId: Long,

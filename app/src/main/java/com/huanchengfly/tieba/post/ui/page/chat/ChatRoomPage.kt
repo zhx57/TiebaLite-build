@@ -26,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -44,6 +45,9 @@ import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
+import com.huanchengfly.tieba.post.components.uploadChatPhoto
+import com.huanchengfly.tieba.post.utils.PickMediasRequest
+import com.huanchengfly.tieba.post.utils.registerPickMediasLauncher
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.pageViewModel
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
@@ -62,6 +66,8 @@ import com.huanchengfly.tieba.post.utils.Emoticon
 import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 
@@ -128,6 +134,33 @@ fun ChatRoomPage(
         prop1 = ChatRoomUiState::sendRequestId, initial = 0L,
     )
     val account = LocalAccount.current
+    val coroutineScope = rememberCoroutineScope()
+    val photoLauncher = registerPickMediasLauncher { result ->
+        val uri = result.uris.firstOrNull()
+        val acc = account
+        if (uri != null && acc != null) {
+            coroutineScope.launch {
+                try {
+                    val cloudMeme = uploadChatPhoto(uri)
+                    viewModel.send(ChatRoomUiIntent.Send(
+                        roomId = roomId,
+                        text = "",
+                        forumId = fid,
+                        bduss = acc.bduss,
+                        selfName = acc.nameShow ?: acc.name,
+                        selfPortrait = acc.portrait,
+                        selfUid = acc.uid.toLongOrNull() ?: 0L,
+                        cuidGalaxy2 = CuidUtils.getNewCuid(),
+                        cloudMeme = cloudMeme,
+                    ))
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    Toast.makeText(context, error.message ?: "图片上传失败", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
     var input by rememberSaveable(roomId, stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue())
     }
@@ -327,6 +360,9 @@ fun ChatRoomPage(
                             showEmoticonPanel = showEmoticonPanel,
                             onToggleEmoticonPanel = { showEmoticonPanel = !showEmoticonPanel },
                             onDismissEmoticonPanel = { showEmoticonPanel = false },
+                            onPhotoClick = {
+                                photoLauncher.launch(PickMediasRequest(maxItems = 1, mediaType = PickMediasRequest.ImageOnly))
+                            },
                             onMentionClick = { picker = "mention" },
                             onRobotClick = { picker = "robot" },
                             onCloudMemeClick = { meme ->
@@ -374,14 +410,14 @@ fun ChatRoomPage(
                 ) {
                     items(
                         items = reversedMessages,
-                        key = { "${it.msgId}_${it.senderUid}" },
+                        key = { "${it.echoForPendingId ?: it.msgId}_${it.senderUid}" },
                     ) { message ->
                         ChatMessageRow(
                             text = message.text,
                             isSelf = message.isSelf,
                             senderName = message.senderName,
                             avatarUrl = message.senderPortrait,
-                            msgTime = message.msgTime,
+                            msgTime = message.displayTime,
                             sendState = message.sendState,
                             transportAccepted = message.transportAccepted,
                             images = message.images,

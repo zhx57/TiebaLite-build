@@ -1,5 +1,6 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -12,10 +13,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -24,6 +27,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
+import com.huanchengfly.tieba.post.components.uploadChatPhoto
+import com.huanchengfly.tieba.post.utils.PickMediasRequest
+import com.huanchengfly.tieba.post.utils.registerPickMediasLauncher
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.pageViewModel
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
@@ -39,6 +45,8 @@ import com.huanchengfly.tieba.post.utils.Emoticon
 import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
 /**
@@ -55,6 +63,22 @@ fun PrivateChatPage(
     peerPortrait: String = "",
     viewModel: PrivateChatViewModel = pageViewModel(),
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val photoLauncher = registerPickMediasLauncher { result ->
+        result.uris.firstOrNull()?.let { uri ->
+            coroutineScope.launch {
+                try {
+                    val cloudMeme = uploadChatPhoto(uri)
+                    viewModel.send(PrivateChatUiIntent.Send(peerUid, "", cloudMeme = cloudMeme))
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    Toast.makeText(context, error.message ?: "图片上传失败", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
     val isLoading by viewModel.uiState.collectPartialAsState(
         prop1 = PrivateChatUiState::isLoading,
         initial = true,
@@ -157,6 +181,9 @@ fun PrivateChatPage(
                         )
                     },
                     onDismissEmoticonPanel = { showEmoticonPanel = false },
+                    onPhotoClick = {
+                        photoLauncher.launch(PickMediasRequest(maxItems = 1, mediaType = PickMediasRequest.ImageOnly))
+                    },
                     onCloudMemeClick = { meme ->
                         viewModel.send(PrivateChatUiIntent.Send(peerUid, "", cloudMeme = meme))
                     },
