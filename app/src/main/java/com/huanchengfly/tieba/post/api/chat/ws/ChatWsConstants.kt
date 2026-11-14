@@ -29,8 +29,8 @@ object ChatWsConstants {
     /** 消息类型：已读回执。 */
     const val MSG_TYPE_READED = 22
 
-    /** 消息类型：系统/杂项提示，content 多为 JSON，不应作为聊天内容展示。 */
-    const val MSG_TYPE_MISC = 2
+    /** 消息类型：私信图片。 */
+    const val MSG_TYPE_PRIVATE_IMAGE = 2
 
     /** 私信渠道接入地址。 */
     const val WS_HOST = "im.tieba.baidu.com"

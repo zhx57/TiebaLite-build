@@ -2063,7 +2063,7 @@ fun PostCard(
         LongClickMenu(
             menuState = menuState,
             indication = null,
-            onClick = {
+            onDoubleClick = {
                 onReplyClick(post)
             }.takeIf { !context.appPreferences.hideReply && account != null },
             menuContent = {

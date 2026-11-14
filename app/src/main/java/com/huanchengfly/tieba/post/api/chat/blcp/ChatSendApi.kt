@@ -1,6 +1,8 @@
 package com.huanchengfly.tieba.post.api.chat.blcp
 
+import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
+import com.huanchengfly.tieba.post.components.ImageUploader
 import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.SofireUtils
 import kotlinx.coroutines.flow.firstOrNull
@@ -116,7 +118,8 @@ object ChatSendApi {
             cuidGalaxy2: String,
             mentions: List<ChatMention> = emptyList(),
             robotSkill: Int? = null,
-        ) = withContext(Dispatchers.IO) {
+            cloudMeme: ChatCloudMeme? = null,
+        ): ChatCloudMeme? = withContext(Dispatchers.IO) {
             mutex.withLock {
                 var stage = "连接"
                 try {
@@ -164,15 +167,18 @@ object ChatSendApi {
                             }
                         }
                     }
+                    stage = "上传云表情"
+                    val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
                     stage = "发送消息"
                     val authenticated = checkNotNull(login)
                     val payload = buildMessagePayload(
                         chatroomId, text, forumId, forumLevel, authenticated.uk,
                         BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
                         selfName, selfPortrait, accountBduss, mentions, robotSkill,
-                        checkNotNull(synchronized(lifecycleLock) { securityToken }),
+                        checkNotNull(synchronized(lifecycleLock) { securityToken }), preparedCloudMeme,
                     )
                     connection.sendMcastMsg(chatroomId, payload)
+                    preparedCloudMeme
                 } catch (e: Exception) {
                     close()
                     if (e is CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
@@ -203,8 +209,14 @@ object ChatSendApi {
         mentions: List<ChatMention>,
         robotSkill: Int?,
         zid: String,
+        cloudMeme: ChatCloudMeme? = null,
     ): JSONObject {
         require(zid.isNotBlank()) { "群聊设备安全令牌不能为空" }
+        if (cloudMeme != null) {
+            require(text.isBlank() && mentions.isEmpty() && robotSkill == null) {
+                "云表情消息不能包含文本、@或机器人技能"
+            }
+        }
         val nowMs = System.currentTimeMillis()
         val nowSec = nowMs / 1000
         val portraitWithTime = "$selfPortrait?t=$nowSec"
@@ -290,8 +302,13 @@ object ChatSendApi {
             put("vip", "0")
             put("name", selfName)
             put("portrait", portraitWithTime)
-            put("content_type", "0")
-            put("content_body", JSONObject().put("text", text).toString())
+            put("content_type", if (cloudMeme == null) "0" else "1")
+            put(
+                "content_body",
+                if (cloudMeme == null) JSONObject().put("text", text).toString()
+                else JSONObject().put("url", cloudMeme.sendImageUrl)
+                    .put("thumbnail", cloudMeme.sendThumbnailUrl).toString(),
+            )
             put("src", "")
             put("baidu_uk", bduk)
             put("at_data", JSONArray().apply {

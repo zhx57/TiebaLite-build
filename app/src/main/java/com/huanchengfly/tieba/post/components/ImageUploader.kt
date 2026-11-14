@@ -6,6 +6,7 @@ import com.huanchengfly.tieba.post.App
 import com.huanchengfly.tieba.post.api.BOUNDARY
 import com.huanchengfly.tieba.post.api.booleanToString
 import com.huanchengfly.tieba.post.api.models.UploadPictureResultBean
+import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.retrofit.RetrofitTiebaApi
 import com.huanchengfly.tieba.post.api.retrofit.body.MyMultipartBody
 import com.huanchengfly.tieba.post.api.retrofit.body.buildMultipartBody
@@ -27,8 +28,11 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.runningFold
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.io.RandomAccessFile
 
 class ImageUploader(
@@ -36,6 +40,10 @@ class ImageUploader(
     private val chunkSize: Int = DEFAULT_CHUNK_SIZE
 ) {
     companion object {
+        private val httpClient = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .build()
         const val DEFAULT_CHUNK_SIZE = 512000
 
         const val IMAGE_MAX_SIZE = 5242880
@@ -97,6 +105,28 @@ class ImageUploader(
             }
         }
         return tempFile
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    suspend fun uploadCloudMeme(meme: ChatCloudMeme): ChatCloudMeme = withContext(Dispatchers.IO) {
+        val file = File.createTempFile("cloud_meme_", ".image", App.INSTANCE.cacheDir)
+        try {
+            val request = Request.Builder().url(meme.imageUrl).get().build()
+            httpClient.newCall(request).execute().use { response ->
+                check(response.isSuccessful) { "下载云表情失败：HTTP ${response.code}" }
+                val body = response.body ?: error("下载云表情失败：响应为空")
+                body.byteStream().use { input -> file.outputStream().use { output -> input.copyTo(output) } }
+            }
+            val result = uploadSinglePicture(file.absolutePath, isOriginImage = true)
+            val info = result.picInfo ?: error("上传云表情失败：响应缺少图片地址")
+            val bigUrl = info.bigPic.picUrl.takeIf { it.isNotBlank() }
+                ?: info.originPic.picUrl.takeIf { it.isNotBlank() }
+                ?: error("上传云表情失败：响应缺少原图地址")
+            val smallUrl = info.smallPic.picUrl.takeIf { it.isNotBlank() } ?: bigUrl
+            meme.copy(uploadedImageUrl = bigUrl, uploadedThumbnailUrl = smallUrl)
+        } finally {
+            file.delete()
+        }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)

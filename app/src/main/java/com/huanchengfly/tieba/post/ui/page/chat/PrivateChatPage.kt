@@ -110,6 +110,7 @@ fun PrivateChatPage(
                         peerUid = peerUid,
                         failedMsgId = target.msgId,
                         content = target.content,
+                        cloudMeme = target.cloudMeme,
                     )
                 )
             }
@@ -157,6 +158,9 @@ fun PrivateChatPage(
                         )
                     },
                     onDismissEmoticonPanel = { showEmoticonPanel = false },
+                    onCloudMemeClick = { meme ->
+                        viewModel.send(PrivateChatUiIntent.Send(peerUid, "", cloudMeme = meme))
+                    },
                 )
             },
         ) { paddingValues ->
@@ -177,6 +181,7 @@ fun PrivateChatPage(
                     ) { message ->
                         ChatMessageRow(
                             text = message.content,
+                            images = message.images,
                             isSelf = message.isSelf,
                             senderName = message.peerName.ifBlank { peerName },
                             avatarUrl = message.peerPortrait.ifBlank { peerPortrait },

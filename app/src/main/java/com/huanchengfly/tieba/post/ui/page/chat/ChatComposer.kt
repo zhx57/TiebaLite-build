@@ -4,8 +4,9 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.PressInteraction
+import android.text.Editable
+import android.text.InputType
+import android.view.Gravity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,16 +23,12 @@ import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.DropdownMenu
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
-import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
-import androidx.compose.material.TextField
-import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.Add
@@ -48,7 +45,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -59,17 +56,21 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
+import androidx.core.widget.addTextChangedListener
 import androidx.compose.ui.unit.Velocity
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
+import android.widget.TextView.BufferType
 import com.huanchengfly.tieba.post.R
+import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.common.theme.compose.menuBackground
 import com.huanchengfly.tieba.post.ui.widgets.compose.EmoticonPickerPanel
+import com.huanchengfly.tieba.post.ui.widgets.edittext.widget.UndoableEditText
 import com.huanchengfly.tieba.post.utils.Emoticon
+import com.huanchengfly.tieba.post.utils.StringUtil
 
 /**
  * 聊天输入栏，群聊与私信共用。
@@ -93,6 +94,7 @@ fun ChatComposer(
     onDismissEmoticonPanel: () -> Unit = {},
     robotCommandName: String? = null,
     onCancelRobotCommand: (() -> Unit)? = null,
+    onCloudMemeClick: ((ChatCloudMeme) -> Unit)? = null,
 ) {
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
@@ -141,19 +143,10 @@ fun ChatComposer(
     var menuExpanded by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    val inputInteractionSource = remember { MutableInteractionSource() }
-    val emoticonPanelVisible by rememberUpdatedState(showEmoticonPanel)
-    val dismissEmoticonPanel by rememberUpdatedState(onDismissEmoticonPanel)
+    val currentOnValueChange = rememberUpdatedState(onValueChange)
+    val currentShowEmoticonPanel = rememberUpdatedState(showEmoticonPanel)
+    val currentDismissEmoticonPanel = rememberUpdatedState(onDismissEmoticonPanel)
 
-    LaunchedEffect(inputInteractionSource) {
-        inputInteractionSource.interactions.collect { interaction ->
-            if (emoticonPanelVisible &&
-                interaction is PressInteraction.Press
-            ) {
-                dismissEmoticonPanel()
-            }
-        }
-    }
     LaunchedEffect(enabled) {
         if (!enabled) menuExpanded = false
     }
@@ -192,28 +185,71 @@ fun ChatComposer(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(if (configuration.screenWidthDp < 360) 0.dp else 8.dp),
         ) {
-            TextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier.weight(1f),
-                enabled = enabled,
-                placeholder = { Text(text = stringResource(id = R.string.tip_input_message)) },
-                singleLine = false,
-                maxLines = maxInputLines,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.None),
-                interactionSource = inputInteractionSource,
-                shape = MaterialTheme.shapes.medium,
-                colors = TextFieldDefaults.textFieldColors(
-                    textColor = ExtendedTheme.colors.text,
-                    disabledTextColor = ExtendedTheme.colors.textDisabled,
-                    backgroundColor = ExtendedTheme.colors.bottomBarSurface,
-                    cursorColor = ExtendedTheme.colors.primary,
-                    placeholderColor = ExtendedTheme.colors.textSecondary,
-                    disabledPlaceholderColor = ExtendedTheme.colors.textDisabled,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                    disabledIndicatorColor = Color.Transparent,
-                ),
+            AndroidView(
+                factory = { context ->
+                    UndoableEditText(context).apply {
+                        val textColor = ExtendedTheme.colors.text.toArgb()
+                        val surfaceColor = ExtendedTheme.colors.bottomBarSurface.toArgb()
+                        val placeholderColor = ExtendedTheme.colors.textSecondary.toArgb()
+                        setTextColor(textColor)
+                        setHintTextColor(placeholderColor)
+                        setBackgroundColor(surfaceColor)
+                        setHint(context.getString(R.string.tip_input_message))
+                        gravity = Gravity.TOP or Gravity.START
+                        inputType = InputType.TYPE_CLASS_TEXT or
+                            InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                        setSingleLine(false)
+                        maxLines = maxInputLines
+                        minLines = 1
+                        textSize = 16f
+                        setPadding(16, 8, 16, 8)
+                        setOnFocusChangeListener { _, hasFocus ->
+                            if (hasFocus && currentShowEmoticonPanel.value) {
+                                currentDismissEmoticonPanel.value()
+                                keyboardController?.show()
+                            }
+                        }
+                        isEnabled = enabled
+                        setText(StringUtil.getEmoticonContent(this, value.text), BufferType.SPANNABLE)
+                        setSelection(value.selection.start.coerceIn(0, length()))
+                        addTextChangedListener(
+                            afterTextChanged = { editable: Editable? ->
+                                currentOnValueChange.value(
+                                    TextFieldValue(
+                                        editable?.toString().orEmpty(),
+                                        TextRange(
+                                            selectionStart.coerceAtLeast(0),
+                                            selectionEnd.coerceAtLeast(0),
+                                        ),
+                                    )
+                                )
+                            }
+                        )
+                    }
+                },
+                update = { editText ->
+                    editText.isEnabled = enabled
+                    editText.maxLines = maxInputLines
+                    if (editText.text?.toString() != value.text) {
+                        val selection = value.selection.start.coerceIn(0, value.text.length)
+                        editText.setText(
+                            StringUtil.getEmoticonContent(editText, value.text),
+                            BufferType.SPANNABLE,
+                        )
+                        editText.setSelection(selection)
+                    }
+                    editText.setTextColor(
+                        if (enabled) ExtendedTheme.colors.text.toArgb()
+                        else ExtendedTheme.colors.textDisabled.toArgb()
+                    )
+                    editText.setHintTextColor(
+                        if (enabled) ExtendedTheme.colors.textSecondary.toArgb()
+                        else ExtendedTheme.colors.textDisabled.toArgb()
+                    )
+                    editText.setBackgroundColor(ExtendedTheme.colors.bottomBarSurface.toArgb())
+                },
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
             )
             Box {
                 IconButton(
@@ -294,56 +330,58 @@ fun ChatComposer(
             }
         }
         if (showEmoticonPanel) {
-            // 占位保持聊天区高度；展开使用独立层，不把 Scaffold 内容挤成零高度。
-            Box(Modifier.fillMaxWidth().height(emoticonPanelHeight)) {
-                Popup(
-                    alignment = Alignment.BottomCenter,
-                    onDismissRequest = {
-                        if (panelExpanded) panelExpanded = false else onDismissEmoticonPanel()
-                    },
-                    properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
-                ) {
-                    Column(
-                        Modifier.fillMaxWidth()
-                            .height(if (panelExpanded) configuration.screenHeightDp.dp else emoticonPanelHeight)
-                            .background(ExtendedTheme.colors.bottomBar)
-                            .nestedScroll(panelScrollConnection),
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().height(36.dp)
-                                .pointerInput(dragThreshold) {
-                                    var distance = 0f
-                                    detectVerticalDragGestures(
-                                        onDragStart = { distance = 0f },
-                                        onVerticalDrag = { change, delta ->
-                                            change.consume()
-                                            distance += delta
-                                            if (distance <= -dragThreshold) panelExpanded = true
-                                            if (distance >= dragThreshold) panelExpanded = false
-                                        },
-                                    )
+            val panelHeight = if (panelExpanded) {
+                (availableHeight - 64.dp).coerceAtLeast(160.dp)
+            } else {
+                emoticonPanelHeight
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(panelHeight)
+                    .background(ExtendedTheme.colors.bottomBar)
+                    .nestedScroll(panelScrollConnection),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(36.dp)
+                        .pointerInput(dragThreshold) {
+                            var distance = 0f
+                            detectVerticalDragGestures(
+                                onDragStart = { distance = 0f },
+                                onVerticalDrag = { change, delta ->
+                                    change.consume()
+                                    distance += delta
+                                    if (distance <= -dragThreshold) panelExpanded = true
+                                    if (distance >= dragThreshold) panelExpanded = false
                                 },
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                if (panelExpanded) "下滑收起" else "上滑展开",
-                                color = ExtendedTheme.colors.primary,
-                                modifier = Modifier.weight(1f).clickable { panelExpanded = !panelExpanded }
-                                    .padding(horizontal = 12.dp),
                             )
-                            TextButton(onClick = onDismissEmoticonPanel) {
-                                Text("关闭", color = ExtendedTheme.colors.text)
-                            }
-                        }
-                        EmoticonPickerPanel(
-                            modifier = Modifier.fillMaxWidth().weight(1f),
-                            onEmoticonClick = {
-                                onEmoticonClick(it)
-                                panelExpanded = false
-                            },
-                        )
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (panelExpanded) "下滑收起" else "上滑展开",
+                        color = ExtendedTheme.colors.primary,
+                        modifier = Modifier.weight(1f).clickable { panelExpanded = !panelExpanded }
+                            .padding(horizontal = 12.dp),
+                    )
+                    TextButton(onClick = onDismissEmoticonPanel) {
+                        Text("关闭", color = ExtendedTheme.colors.text)
                     }
                 }
+                EmoticonPickerPanel(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    onEmoticonClick = {
+                        onEmoticonClick(it)
+                        panelExpanded = false
+                    },
+                    onCloudMemeClick = onCloudMemeClick?.takeIf { enabled }?.let { send ->
+                        { meme ->
+                            send(meme)
+                            panelExpanded = false
+                            onDismissEmoticonPanel()
+                        }
+                    },
+                )
             }
         }
     }

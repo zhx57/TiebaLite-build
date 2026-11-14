@@ -7,7 +7,11 @@ import com.huanchengfly.tieba.post.api.chat.blcp.BlcpImIdentity
 import kotlinx.coroutines.runBlocking
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
+import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
+import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatImageContent
+import com.huanchengfly.tieba.post.api.chat.ws.buildPrivateMessageRequest
 import org.json.JSONObject
+import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.api.models.chat.SendState
@@ -178,6 +182,220 @@ class ChatRoomStateTest {
         val failed = ChatRoomPartialChange.Send.Failure(-1L, IllegalStateException("timeout")).reduce(polled)
         assertEquals(1, failed.messages.size)
         assertFalse(failed.messages.single().isLocal)
+    }
+
+    @Test
+    fun cloudMemeRequiresOriginalHttpUrl() {
+        listOf("", "pic-id", "/relative.gif", "file:///local.gif").forEach { url ->
+            assertTrue(runCatching { ChatCloudMeme("id", url) }.exceptionOrNull() is IllegalArgumentException)
+        }
+        assertTrue(runCatching { ChatCloudMeme("", "https://example.com/a.gif") }.isFailure)
+    }
+
+    @Test
+    fun uploadedCloudMemePayloadUsesChatUrlsAndKeepsOriginalForRetry() {
+        val meme = ChatCloudMeme(
+            id = "cloud-id",
+            imageUrl = "https://cloud.example/original.gif",
+            uploadedImageUrl = "https://chat.example/big.gif?token=1",
+            uploadedThumbnailUrl = "https://chat.example/small.gif?token=1",
+        )
+        val request = ChatSendApi.buildMessagePayload(
+            1L, "", 2L, 0, 123L, BlcpCrypto.userId2Bduk(42L), 1L,
+            "测试用户", "portrait", "test-only", emptyList(), null, "test-zid", cloudMeme = meme,
+        )
+        val data = JSONObject(JSONObject(request.getString("content")).getString("text"))
+        val body = JSONObject(data.getString("content_body"))
+        assertEquals(meme.sendImageUrl, body.getString("url"))
+        assertEquals(meme.sendThumbnailUrl, body.getString("thumbnail"))
+        assertEquals("https://cloud.example/original.gif", meme.imageUrl)
+    }
+
+    @Test
+    fun cloudMemePayloadIsImageNotTextLink() {
+        val meme = ChatCloudMeme("cloud-id", "https://example.com/original.gif")
+        val request = ChatSendApi.buildMessagePayload(
+            1L, "", 2L, 0, 123L, BlcpCrypto.userId2Bduk(42L), 1L,
+            "测试用户", "portrait", "test-only", emptyList(), null, "test-zid", cloudMeme = meme,
+        )
+        val data = JSONObject(JSONObject(request.getString("content")).getString("text"))
+        assertEquals("1", data.getString("content_type"))
+        val body = JSONObject(data.getString("content_body"))
+        assertEquals(meme.imageUrl, body.getString("url"))
+        assertEquals(meme.imageUrl, body.getString("thumbnail"))
+        assertFalse(body.has("src"))
+        assertFalse(body.has("text"))
+        val parsed = received(request)
+        assertEquals(1, parsed.contentType)
+        assertEquals(listOf(meme.imageUrl), parsed.images)
+        assertEquals("", parsed.text)
+    }
+
+    @Test
+    fun groupImagePrefersOriginalUrlOverThumbnailWithoutDuplicating() {
+        val original = "https://example.com/original.gif"
+        val request = payload()
+        val envelope = JSONObject(request.getString("content"))
+        val body = JSONObject(envelope.getString("text"))
+            .put("content_type", "1")
+            .put("content_body", JSONObject().put("url", original)
+                .put("thumbnail", "https://example.com/preview.jpg").toString())
+        envelope.put("text", body.toString())
+        request.put("content", envelope.toString())
+        assertEquals(listOf(original), received(request).images)
+        body.put("content_body", JSONObject().put("thumbnail", original).toString())
+        envelope.put("text", body.toString())
+        request.put("content", envelope.toString())
+        assertEquals(listOf(original), received(request).images)
+    }
+
+    @Test
+    fun cloudMemeCannotSilentlyDiscardTextOrMentions() {
+        val meme = ChatCloudMeme("cloud-id", "https://example.com/original.gif")
+        listOf(
+            Triple("正文", emptyList(), null),
+            Triple("", listOf(ChatMention(1L, "uk", "用户", "portrait")), null),
+            Triple("", emptyList(), 7),
+        ).forEach { (text, mentions, skill) ->
+            assertTrue(runCatching {
+                ChatSendApi.buildMessagePayload(
+                    1L, text, 2L, 0, 123L, BlcpCrypto.userId2Bduk(42L), 1L,
+                    "测试用户", "portrait", "test-only", mentions, skill, "test-zid", cloudMeme = meme,
+                )
+            }.exceptionOrNull() is IllegalArgumentException)
+        }
+    }
+
+    @Test
+    fun cloudMemeFailureAndRetryPreserveOriginalPayload() {
+        val meme = ChatCloudMeme("cloud-id", "https://example.com/original.gif")
+        val started = ChatRoomPartialChange.Send.Start(
+            -1L, "", 42L, "测试用户", "portrait", cloudMeme = meme,
+        ).reduce(ChatRoomUiState())
+        assertEquals(1, started.messages.single().contentType)
+        assertEquals(listOf(meme.imageUrl), started.messages.single().images)
+        val failed = ChatRoomPartialChange.Send.Failure(-1L, IllegalStateException("图片发送失败")).reduce(started)
+        assertEquals(SendState.FAILED, failed.messages.single().sendState)
+        assertEquals(meme, failed.messages.single().cloudMeme)
+        val retried = ChatRoomPartialChange.Send.Start(
+            -2L, "", 42L, "测试用户", "portrait", removeMsgId = -1L,
+            cloudMeme = failed.messages.single().cloudMeme,
+        ).reduce(failed)
+        assertEquals(-2L, retried.messages.single().msgId)
+        assertEquals(meme, retried.messages.single().cloudMeme)
+        assertEquals(listOf(meme.imageUrl), retried.messages.single().images)
+        assertEquals(2L, retried.sendRequestId)
+        val accepted = ChatRoomPartialChange.Send.Success(-2L).reduce(retried)
+        assertEquals(SendState.SENDING, accepted.messages.single().sendState)
+        assertTrue(accepted.messages.single().transportAccepted)
+        val confirmed = accepted.messages.single().copy(msgId = 101L, isLocal = false, sendState = SendState.SENT)
+        val delivered = ChatRoomPartialChange.Poll.Success(persistentListOf(confirmed)).reduce(accepted)
+        assertEquals(meme, delivered.messages.single().cloudMeme)
+        assertEquals(-2L, delivered.messages.single().echoForPendingId)
+        assertEquals(SendState.SENT, delivered.messages.single().sendState)
+    }
+
+    @Test
+    fun imageEchoCannotConsumeDifferentImageOrEmptyTextMessage() {
+        val first = message(-1, text = "", local = true).copy(
+            contentType = 1, images = listOf("https://example.com/a.gif"),
+        )
+        val second = first.copy(msgId = -2, images = listOf("https://example.com/b.gif"))
+        val text = message(-3, text = "", local = true)
+        val echo = second.copy(msgId = 10, isLocal = false)
+        val merged = mergeServerMessages(listOf(first, second, text), listOf(echo))
+        assertEquals(3, merged.size)
+        assertTrue(merged.any { it.msgId == -1L })
+        assertTrue(merged.any { it.msgId == -3L })
+        assertEquals(-2L, merged.single { it.msgId == 10L }.echoForPendingId)
+    }
+
+    @Test
+    fun sameImageEchoesAreMatchedOneToOneAndLateTimeoutCannotUndoDelivery() {
+        val local = message(-1, text = "", local = true, state = SendState.SENDING).copy(
+            contentType = 1, images = listOf("https://example.com/a.gif"),
+        )
+        val second = local.copy(msgId = -2)
+        val echo = local.copy(msgId = 10, isLocal = false, sendState = SendState.SENT)
+        val firstPoll = mergeServerMessages(listOf(local, second), listOf(echo))
+        assertEquals(1, firstPoll.count { it.isLocal })
+        val finalPoll = mergeServerMessages(firstPoll, listOf(echo, echo.copy(msgId = 11)))
+        assertEquals(2, finalPoll.size)
+        assertTrue(finalPoll.none { it.isLocal })
+        assertEquals(setOf(-1L, -2L), finalPoll.map { it.echoForPendingId }.toSet())
+        val state = ChatRoomUiState(messages = finalPoll)
+        assertEquals(state, ChatRoomPartialChange.Send.Unconfirmed(-1L).reduce(state))
+        assertEquals(state, ChatRoomPartialChange.Send.Failure(-2L, Exception("timeout")).reduce(state))
+    }
+
+    @Test
+    fun imageMatchingPreservesHostAndSignedQuery() {
+        val local = message(-1, text = "", local = true).copy(
+            contentType = 1, images = listOf("https://example.com/a.gif?token=one"),
+        )
+        val differentHost = local.copy(msgId = 10, isLocal = false,
+            images = listOf("https://other.example.com/a.gif?token=one"))
+        val differentQuery = local.copy(msgId = 11, isLocal = false,
+            images = listOf("https://example.com/a.gif?token=two"))
+        val differentPort = local.copy(msgId = 13, isLocal = false,
+            images = listOf("https://example.com:8443/a.gif?token=one"))
+        assertTrue(mergeServerMessages(listOf(local), listOf(differentHost, differentQuery, differentPort)).any { it.isLocal })
+        val httpEcho = local.copy(msgId = 12, isLocal = false,
+            images = listOf("http://example.com/a.gif?token=one"))
+        assertFalse(mergeServerMessages(listOf(local), listOf(httpEcho)).single().isLocal)
+    }
+
+    @Test
+    fun privateImageRequestUsesOfficialArrayAndMessageType() {
+        val meme = ChatCloudMeme("cloud-id", "https://example.com/original.gif")
+        val request = buildPrivateMessageRequest(42L, "", 100L, meme)
+        val data = requireNotNull(request.data_)
+        assertEquals(ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE, data.msgType)
+        assertEquals(42L, data.toUid)
+        assertEquals(100L, data.recordId)
+        val image = org.json.JSONArray(data.content).getJSONObject(0)
+        assertEquals("3", image.getString("type"))
+        assertEquals(meme.imageUrl, image.getString("src"))
+        assertEquals(meme.imageUrl, image.getString("big_src"))
+        assertEquals("100,100", image.getString("bsize"))
+        assertEquals(listOf(meme.imageUrl), PrivateChatImageContent.parse(data.content.orEmpty(), 2))
+        val text = buildPrivateMessageRequest(42L, "普通文字", 101L).data_!!
+        assertEquals(ChatWsConstants.MSG_TYPE_PRIVATE, text.msgType)
+        assertEquals("普通文字", text.content)
+        assertTrue(PrivateChatImageContent.parse("https://example.com/a.gif", 1).isEmpty())
+        assertTrue(runCatching { buildPrivateMessageRequest(42L, "不能丢掉的草稿", 102L, meme) }.isFailure)
+    }
+
+    @Test
+    fun privateImageParserDoesNotDuplicateOriginalAndPreview() {
+        val raw = """[{"type":"3","src":"https://example.com/small.gif","big_src":"https://example.com/original.gif"}]"""
+        assertEquals(listOf("https://example.com/original.gif"), PrivateChatImageContent.parse(raw, 2))
+        assertTrue(PrivateChatImageContent.parse(raw, 1).isEmpty())
+        assertTrue(PrivateChatImageContent.parse("not-json", 2).isEmpty())
+    }
+
+    @Test
+    fun privateCloudMemeFailureRetryAndAckKeepImageIdentity() {
+        val meme = ChatCloudMeme("cloud-id", "https://example.com/original.gif")
+        val started = PrivateChatPartialChange.Send.Start(-1L, "", 42L, cloudMeme = meme).reduce(PrivateChatUiState())
+        assertEquals(listOf(meme.imageUrl), started.messages.single().images)
+        assertEquals(2, started.messages.single().msgType)
+        val failed = PrivateChatPartialChange.Send.Failure(-1L, Exception("failed")).reduce(started)
+        assertEquals(meme, failed.messages.single().cloudMeme)
+        assertEquals(SendState.FAILED, failed.messages.single().sendState)
+        val retried = PrivateChatPartialChange.Send.Start(-2L, "", 42L, removeMsgId = -1L,
+            cloudMeme = failed.messages.single().cloudMeme).reduce(failed)
+        assertEquals(1, retried.messages.size)
+        val another = PrivateChatPartialChange.Send.Start(-3L, "", 42L, cloudMeme = meme).reduce(retried)
+        val ack = another.messages.first { it.msgId == -2L }.copy(msgId = 101L, isLocal = false, sendState = SendState.SENT)
+        val confirmed = PrivateChatPartialChange.Send.Success(-2L, ack).reduce(another)
+        assertEquals(2, confirmed.messages.size)
+        assertEquals(1, confirmed.messages.count { it.isLocal })
+        assertEquals(meme, confirmed.messages.first { it.msgId == 101L }.cloudMeme)
+        assertEquals(confirmed, PrivateChatPartialChange.Send.Failure(-2L, Exception("late")).reduce(confirmed))
+        val polled = PrivateChatPartialChange.Poll.Success(persistentListOf(ack.copy(cloudMeme = null))).reduce(confirmed)
+        assertEquals(meme, polled.messages.first { it.msgId == 101L }.cloudMeme)
+        assertEquals(2, polled.messages.size)
     }
 
     private fun payload(mentions: List<ChatMention> = emptyList(), skill: Int? = null, text: String = "测试消息") =
