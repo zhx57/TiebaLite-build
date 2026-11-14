@@ -16,9 +16,16 @@ import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
 import com.huanchengfly.tieba.post.utils.ImageUtil
 import com.huanchengfly.tieba.post.utils.MD5Util
 import com.huanchengfly.tieba.post.utils.appPreferences
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.filter
@@ -32,6 +39,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.io.RandomAccessFile
 
@@ -44,6 +52,10 @@ class ImageUploader(
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .build()
+        private val cloudMemeCache = ConcurrentHashMap<String, ChatCloudMeme>()
+        private val cloudMemeUploads = ConcurrentHashMap<String, Deferred<ChatCloudMeme>>()
+        private val cloudMemeUploadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val cloudMemeUploadLock = Mutex()
         const val DEFAULT_CHUNK_SIZE = 512000
 
         const val IMAGE_MAX_SIZE = 5242880
@@ -108,7 +120,36 @@ class ImageUploader(
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    suspend fun uploadCloudMeme(meme: ChatCloudMeme): ChatCloudMeme = withContext(Dispatchers.IO) {
+    suspend fun uploadCloudMeme(meme: ChatCloudMeme): ChatCloudMeme {
+        if (meme.uploadedImageUrl != null) return meme
+
+        val cacheKey = "${meme.id}|${meme.imageUrl}"
+        cloudMemeCache[cacheKey]?.let { return it.copy(
+            uploadedImageUrl = it.uploadedImageUrl,
+            uploadedThumbnailUrl = it.uploadedThumbnailUrl,
+        ) }
+
+        val pending = cloudMemeUploadLock.withLock {
+            cloudMemeCache[cacheKey]?.let { return@withLock null }
+                ?: cloudMemeUploads[cacheKey]
+                ?: cloudMemeUploadScope.async(start = CoroutineStart.LAZY) {
+                    uploadCloudMemeUncached(meme)
+                }.also { cloudMemeUploads[cacheKey] = it }
+        }
+        if (pending == null) return cloudMemeCache.getValue(cacheKey)
+
+        pending.start()
+        return try {
+            pending.await().also { cloudMemeCache[cacheKey] = it }
+        } catch (error: Throwable) {
+            cloudMemeUploads.remove(cacheKey, pending)
+            throw error
+        } finally {
+            cloudMemeUploads.remove(cacheKey, pending)
+        }
+    }
+
+    private suspend fun uploadCloudMemeUncached(meme: ChatCloudMeme): ChatCloudMeme = withContext(Dispatchers.IO) {
         val file = File.createTempFile("cloud_meme_", ".image", App.INSTANCE.cacheDir)
         try {
             val request = Request.Builder().url(meme.imageUrl).get().build()
