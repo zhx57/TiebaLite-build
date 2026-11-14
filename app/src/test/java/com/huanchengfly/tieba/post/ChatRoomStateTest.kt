@@ -13,7 +13,6 @@ import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatImageContent
 import com.huanchengfly.tieba.post.api.chat.ws.buildPrivateMessageRequest
 import org.json.JSONObject
-import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
 import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
