@@ -64,7 +64,8 @@ class ChatRoomStateTest {
             },
             null,
         )!!
-        assertEquals(77, message.contentType)
+        assertEquals(2, message.contentType)
+        assertEquals(77, message.semantics.transportType)
         assertEquals(2, message.semantics.businessType)
         assertEquals(ChatMessageKind.IMAGE, message.semantics.kind)
         assertEquals(listOf("https://imgsrc.baidu.com/a.jpg"), message.images)
