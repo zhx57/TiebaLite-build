@@ -2,6 +2,8 @@ package com.huanchengfly.tieba.post.api.chat.ws
 
 import com.huanchengfly.tieba.post.App
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.api.models.protos.chat.CommitPersonalMsgReqIdl
 import com.huanchengfly.tieba.post.api.models.protos.chat.CommitPersonalMsgResIdl
@@ -276,16 +278,18 @@ class ChatWebSocketClient {
                 // 已读回执不是聊天内容。
                 if (msgType == ChatWsConstants.MSG_TYPE_READED) return@forEach
                 val rawContent = msg.content.orEmpty()
+                val parsed = parsePrivateContent(rawContent, msgType)
                 result += ChatWsMessage(
                     msgId = msgId,
                     msgType = msgType,
                     peerUid = fromUid,
                     peerName = msg.userInfo?.userName.orEmpty(),
                     peerPortrait = msg.userInfo?.portrait.orEmpty(),
-                    content = normalizePrivateContent(rawContent, msgType),
-                    images = PrivateChatImageContent.parse(rawContent, msgType),
+                    content = parsed.text,
+                    images = parsed.images,
                     msgTime = (msg.createTime ?: 0) * 1000L,
                     isSelf = fromUid == selfUid,
+                    semantics = parsed.semantics,
                 )
                 if (msgId > (groupMsgIds[groupId] ?: 0L)) {
                     groupMsgIds[groupId] = msgId
@@ -301,28 +305,77 @@ class ChatWebSocketClient {
      * 服务端把部分非文本消息（撤回提示、系统提示等）也塞进 content，
      * 内容是 JSON。这里只保留可读文本，避免会话列表出现大段 JSON。
      */
-    private fun normalizePrivateContent(raw: String, msgType: Int): String {
-        if (msgType == ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE) return ""
+    private data class ParsedPrivateContent(
+        val text: String,
+        val images: List<String>,
+        val semantics: ChatMessageSemantics,
+    )
+
+    private fun parsePrivateContent(raw: String, msgType: Int): ParsedPrivateContent {
         val trimmed = raw.trim()
-        if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return trimmed
-        return runCatching {
-            val node = JSONTokener(trimmed).nextValue()
-            extractPrivateText(node).ifBlank { "" }
-        }.getOrDefault("")
+        val node = if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+            runCatching { JSONTokener(trimmed).nextValue() }.getOrNull()
+        } else {
+            null
+        }
+        val images = PrivateChatImageContent.parse(raw, msgType)
+        val businessType = (node as? JSONObject)?.let {
+            sequenceOf("content_type", "type", "business_type")
+                .mapNotNull { key -> it.optString(key).toIntOrNull() }
+                .firstOrNull()
+        }
+        val kind = when {
+            msgType == ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE -> ChatMessageKind.IMAGE
+            msgType == ChatWsConstants.MSG_TYPE_PRIVATE -> ChatMessageSemantics.classify(msgType, businessType)
+            else -> ChatMessageSemantics.classify(msgType, businessType)
+        }
+        val targetId = (node as? JSONObject)?.let { objectNode ->
+            sequenceOf("msgid", "msg_id", "target_id", "target_msgid", "pid", "tid")
+                .mapNotNull { key -> objectNode.optString(key).toLongOrNull() }
+                .firstOrNull()
+        }
+        val text = if (images.isNotEmpty()) "" else when {
+            node != null -> extractPrivateText(node)
+            else -> trimmed
+        }.take(4096)
+        return ParsedPrivateContent(
+            text = text.ifBlank { if (kind == ChatMessageKind.UNKNOWN) "[暂未支持的私信类型 $msgType]" else kind.name },
+            images = images,
+            semantics = ChatMessageSemantics(
+                kind = kind,
+                protocolSource = "private_chat",
+                transportType = msgType,
+                businessType = businessType,
+                targetId = targetId,
+                summary = text.ifBlank { kind.name },
+                rawPayload = ChatMessageSemantics.limitedRawPayload(raw),
+            ),
+        )
     }
 
-    private fun extractPrivateText(node: Any?): String = when (node) {
+    private fun extractPrivateText(node: Any?, depth: Int = 0): String {
+        if (depth > 8) return ""
+        return when (node) {
         null -> ""
-        is String -> node.trim()
-        is JSONObject -> listOf("text", "content", "msg", "toast")
+        is String -> {
+            val value = node.trim()
+            if (value.startsWith("{") || value.startsWith("[")) {
+                runCatching { extractPrivateText(JSONTokener(value).nextValue(), depth + 1) }.getOrDefault("")
+            } else value.take(4096)
+        }
+        is JSONObject -> listOf("text", "content", "msg", "toast", "title", "description", "desc")
             .asSequence()
-            .map { extractPrivateText(node.opt(it)) }
+            .map { extractPrivateText(node.opt(it), depth + 1) }
             .firstOrNull { it.isNotBlank() }
             .orEmpty()
         is JSONArray -> buildString {
-            for (i in 0 until node.length()) append(extractPrivateText(node.opt(i)))
+            for (i in 0 until minOf(node.length(), 64)) {
+                if (i > 0) append(" ")
+                append(extractPrivateText(node.opt(i), depth + 1))
+            }
         }
         else -> ""
+        }
     }
 
     /**
@@ -500,4 +553,5 @@ data class ChatWsMessage(
     val msgType: Int = 0,
     val images: List<String> = emptyList(),
     val cloudMeme: ChatCloudMeme? = null,
+    val semantics: ChatMessageSemantics = ChatMessageSemantics(),
 )

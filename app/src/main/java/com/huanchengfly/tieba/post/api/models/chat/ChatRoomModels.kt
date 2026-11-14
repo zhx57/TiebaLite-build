@@ -34,6 +34,64 @@ data class ChatRobotSkill(
 
 data class ChatRobot(val user: ChatMention, val skills: List<ChatRobotSkill>)
 
+enum class ChatMessageKind {
+    TEXT,
+    IMAGE,
+    VOICE,
+    LARGE_EMOTICON,
+    IMAGE_TO_TEXT,
+    SINGLE_TEXT_IMAGE,
+    TEXT_TO_SPEECH,
+    AI_INTRODUCTION,
+    WEB_CHAT,
+    POST_SHARE,
+    DELETE_EVENT,
+    EMOTION_REACTION,
+    SYSTEM_EVENT,
+    CONTROL,
+    UNKNOWN,
+}
+
+data class ChatMessageSemantics(
+    val kind: ChatMessageKind = ChatMessageKind.UNKNOWN,
+    val protocolSource: String = "legacy",
+    val transportType: Int = 0,
+    val businessType: Int? = null,
+    val targetId: Long? = null,
+    val summary: String = "未知消息",
+    val rawPayload: String? = null,
+) {
+    companion object {
+        const val MAX_RAW_PAYLOAD_LENGTH = 4096
+
+        fun classify(
+            transportType: Int,
+            businessType: Int?,
+            system: Boolean = false,
+        ): ChatMessageKind = when {
+            system && businessType == 7025 -> ChatMessageKind.DELETE_EVENT
+            system && businessType == 20000 -> ChatMessageKind.EMOTION_REACTION
+            system && businessType == 7010 -> ChatMessageKind.POST_SHARE
+            system -> ChatMessageKind.SYSTEM_EVENT
+            businessType == 1 -> ChatMessageKind.TEXT
+            businessType == 2 -> ChatMessageKind.IMAGE
+            businessType == 3 -> ChatMessageKind.VOICE
+            businessType == 4 -> ChatMessageKind.LARGE_EMOTICON
+            businessType == 101 -> ChatMessageKind.IMAGE_TO_TEXT
+            businessType == 102 -> ChatMessageKind.SINGLE_TEXT_IMAGE
+            businessType == 103 -> ChatMessageKind.TEXT_TO_SPEECH
+            businessType == 104 -> ChatMessageKind.AI_INTRODUCTION
+            businessType == 1001 || businessType == 1002 -> ChatMessageKind.WEB_CHAT
+            transportType == 1 && businessType == null -> ChatMessageKind.TEXT
+            else -> ChatMessageKind.UNKNOWN
+        }
+
+        fun limitedRawPayload(raw: String?): String? = raw
+            ?.takeIf { it.isNotBlank() }
+            ?.take(MAX_RAW_PAYLOAD_LENGTH)
+    }
+}
+
 data class ChatCloudMeme(
     val id: String,
     val imageUrl: String,
@@ -84,6 +142,8 @@ data class ChatRoomMessage(
     val transportAccepted: Boolean = false,
     val sendError: String? = null,
     val cloudMeme: ChatCloudMeme? = null,
+    /** 保留群聊外层类型、内层业务类型和未知消息摘要，不覆盖旧展示字段。 */
+    val semantics: ChatMessageSemantics = ChatMessageSemantics(),
 )
 
 /**

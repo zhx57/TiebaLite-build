@@ -13,7 +13,10 @@ import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatImageContent
 import com.huanchengfly.tieba.post.api.chat.ws.buildPrivateMessageRequest
 import org.json.JSONObject
+import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.api.models.chat.SendState
@@ -25,6 +28,80 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatRoomStateTest {
+    @Test
+    fun protocolNamespacesRemainSeparateAndKnownBusinessTypesAreClassified() {
+        assertEquals(ChatMessageKind.TEXT, ChatMessageSemantics.classify(99, 1))
+        assertEquals(ChatMessageKind.IMAGE, ChatMessageSemantics.classify(1, 2))
+        assertEquals(ChatMessageKind.VOICE, ChatMessageSemantics.classify(1, 3))
+        assertEquals(ChatMessageKind.LARGE_EMOTICON, ChatMessageSemantics.classify(1, 4))
+        assertEquals(ChatMessageKind.IMAGE_TO_TEXT, ChatMessageSemantics.classify(1, 101))
+        assertEquals(ChatMessageKind.SINGLE_TEXT_IMAGE, ChatMessageSemantics.classify(1, 102))
+        assertEquals(ChatMessageKind.TEXT_TO_SPEECH, ChatMessageSemantics.classify(1, 103))
+        assertEquals(ChatMessageKind.AI_INTRODUCTION, ChatMessageSemantics.classify(1, 104))
+        assertEquals(ChatMessageKind.WEB_CHAT, ChatMessageSemantics.classify(1, 1001))
+        assertEquals(ChatMessageKind.POST_SHARE, ChatMessageSemantics.classify(1, 7010, system = true))
+        assertEquals(ChatMessageKind.DELETE_EVENT, ChatMessageSemantics.classify(1, 7025, system = true))
+        assertEquals(ChatMessageKind.EMOTION_REACTION, ChatMessageSemantics.classify(1, 20000, system = true))
+        assertEquals(ChatMessageKind.SYSTEM_EVENT, ChatMessageSemantics.classify(1, 999999, system = true))
+        assertEquals(ChatMessageKind.UNKNOWN, ChatMessageSemantics.classify(7010, null))
+    }
+
+    @Test
+    fun groupParserKeepsTransportTypeAndBusinessTypeSeparate() {
+        val message = ChatApi.parseMessage(
+            JSONObject().apply {
+                put("msgid", 10)
+                put("type", 77)
+                put("from_user", 9)
+                put("create_time", 100)
+                put("content", JSONObject().apply {
+                    put("text", JSONObject().apply {
+                        put("content_type", 2)
+                        put("content_body", JSONObject().apply {
+                            put("src", "https://imgsrc.baidu.com/a.jpg")
+                        })
+                    }.toString())
+                }.toString())
+            },
+            null,
+        )!!
+        assertEquals(77, message.contentType)
+        assertEquals(2, message.semantics.businessType)
+        assertEquals(ChatMessageKind.IMAGE, message.semantics.kind)
+        assertEquals(listOf("https://imgsrc.baidu.com/a.jpg"), message.images)
+    }
+
+    @Test
+    fun groupParserRetainsSystemAndUnknownPayload() {
+        val system = ChatApi.parseMessage(
+            JSONObject().apply {
+                put("msgid", 11)
+                put("type", 7025)
+                put("from_user", 0)
+                put("create_time", 100)
+                put("content", "{\"text\":{\"target_msgid\":\"10\"}}")
+            },
+            null,
+        )!!
+        assertEquals(ChatMessageKind.DELETE_EVENT, system.semantics.kind)
+        assertEquals(10L, system.semantics.targetId)
+        assertEquals("系统", system.senderName)
+        assertTrue(system.semantics.rawPayload!!.isNotEmpty())
+
+        val unknown = ChatApi.parseMessage(
+            JSONObject().apply {
+                put("msgid", 12)
+                put("type", 999)
+                put("from_user", 9)
+                put("create_time", 100)
+                put("content", "{\"text\":{\"content_type\":9999,\"future\":\"value\"}}")
+            },
+            null,
+        )!!
+        assertEquals(ChatMessageKind.UNKNOWN, unknown.semantics.kind)
+        assertTrue(unknown.text.contains("9999"))
+    }
+
     @Test
     fun confirmationTimersDoNotBlockFollowingAcknowledgements() = runBlocking {
         val changes = (1L..32L).map { ChatRoomPartialChange.Send.Success(-it) }

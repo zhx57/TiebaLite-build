@@ -4,6 +4,7 @@ import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,6 +45,7 @@ import com.huanchengfly.tieba.post.utils.Emoticon
 import com.huanchengfly.tieba.post.utils.EmoticonManager
 
 /** 基础表情插入输入框，云表情由聊天页通过图片消息发送。 */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun EmoticonPickerPanel(
     modifier: Modifier = Modifier,
@@ -71,9 +73,12 @@ fun EmoticonPickerPanel(
             val scope = rememberCoroutineScope()
             val cache = remember { CloudMemeRepository.cache(context.applicationContext.filesDir) }
             val session = remember {
-                CloudMemeSession(scope, cached = { cache.cached(uid) }) {
-                    cache.load(uid, bduss, force = true)
-                }
+                CloudMemeSession(
+                    scope = scope,
+                    cached = { cache.cached(uid) },
+                    load = { cache.load(uid, bduss, force = true) },
+                    addCollected = { memeId -> cache.addCollected(uid, bduss, memeId) },
+                )
             }
             DisposableEffect(session) { onDispose { session.close() } }
             val state by session.state.collectAsState()
@@ -110,8 +115,17 @@ fun EmoticonPickerPanel(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text(if (onCloudMemeClick != null) "点击表情立即发送" else "当前会话暂不支持云表情发送", color = ExtendedTheme.colors.textSecondary,
-                        fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    Text(
+                        text = when {
+                            state.addingId != null -> "正在同步收藏…"
+                            state.addedId != null -> "已确认加入云收藏，长按表情可再次核对"
+                            onCloudMemeClick != null -> "点击发送，长按普通云表情加入收藏"
+                            else -> "当前会话暂不支持云表情发送"
+                        },
+                        color = ExtendedTheme.colors.textSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
                     TextButton(onClick = session::refresh, enabled = !state.loading) {
                         Text(if (state.loading) "加载中…" else "刷新", color = ExtendedTheme.colors.primary)
                     }
@@ -141,14 +155,22 @@ fun EmoticonPickerPanel(
                             skipNetworkCheck = true,
                             modifier = Modifier.aspectRatio(1f).padding(8.dp)
                                 .background(ExtendedTheme.colors.background)
-                                .clickable(enabled = onCloudMemeClick != null) {
-                                    val selected = runCatching { ChatCloudMeme(meme.id, meme.imageUrl) }.getOrNull()
-                                    if (selected == null) {
-                                        Toast.makeText(context, "此表情缺少有效原图地址，请刷新后重试", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        onCloudMemeClick?.invoke(selected)
-                                    }
-                                },
+                                .combinedClickable(
+                                    enabled = onCloudMemeClick != null ||
+                                        (category == 1 && uid.isNotBlank() && bduss.isNotBlank()),
+                                    onClick = {
+                                        val selected = runCatching { ChatCloudMeme(meme.id, meme.imageUrl) }.getOrNull()
+                                        if (selected == null) {
+                                            Toast.makeText(context, "此表情缺少有效原图地址，请刷新后重试", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            onCloudMemeClick?.invoke(selected)
+                                        }
+                                    },
+                                    onLongClick = if (category == 2) null else {
+                                        { session.addToCollected(meme.id) }
+                                    },
+                                    onLongClickLabel = if (category == 2) null else "加入云收藏",
+                                ),
                         )
                     }
                 }

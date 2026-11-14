@@ -28,7 +28,12 @@ internal data class CloudMeme(val id: String, val imageUrl: String, val thumbnai
     val displayUrl: String get() = thumbnail?.takeIf { it.isNotBlank() } ?: imageUrl
 }
 
-internal data class CloudMemeLists(val collected: List<CloudMeme>, val diy: List<CloudMeme>)
+internal data class CloudMemeLists(
+    val collected: List<CloudMeme>,
+    val diy: List<CloudMeme>,
+    val picUpdateTime: Long? = null,
+    val diyPicUpdateTime: Long? = null,
+)
 
 internal class CloudMemeProtocolException : IOException("云表情响应格式异常，请稍后重试")
 internal class CloudMemeServiceException(val code: Int) : IOException("云表情服务返回错误（$code）")
@@ -46,6 +51,38 @@ internal object CloudMemeRepository {
         RetrofitTiebaApi.OFFICIAL_TIEBA_API.getCloudMemes(bduss).use { parse(it.string()) }
     }
 
+    suspend fun submitCollected(
+        bduss: String,
+        ids: List<String>,
+        picUpdateTime: Long = System.currentTimeMillis(),
+    ) = withContext(Dispatchers.IO) {
+        require(bduss.isNotBlank())
+        val uniqueIds = ids.filter(String::isNotBlank).distinct()
+        val pics = if (uniqueIds.isEmpty()) {
+            "all_delete"
+        } else {
+            JsonArray().apply {
+                uniqueIds.forEach { id -> add(JsonObject().apply { addProperty("pic_id", id) }) }
+            }.toString()
+        }
+        RetrofitTiebaApi.OFFICIAL_TIEBA_API.updateCloudMemes(
+            bduss = bduss,
+            pics = pics,
+            picUpdateTime = picUpdateTime.toString(),
+        ).use { response ->
+            try {
+                val root = JsonParser.parseString(response.string()).asJsonObject
+                val code = root.get("error_code")?.let(::scalar)?.toIntOrNull()
+                    ?: throw CloudMemeProtocolException()
+                if (code != 0) throw CloudMemeServiceException(code)
+            } catch (error: CloudMemeServiceException) {
+                throw error
+            } catch (error: Exception) {
+                throw CloudMemeProtocolException()
+            }
+        }
+    }
+
     fun parse(json: String): CloudMemeLists {
         try {
             val root = JsonParser.parseString(json).asJsonObject
@@ -53,7 +90,12 @@ internal object CloudMemeRepository {
             val code = scalar(codeElement).toIntOrNull() ?: throw CloudMemeProtocolException()
             if (code != 0) throw CloudMemeServiceException(code)
             val data = root.getAsJsonObject("data") ?: throw CloudMemeProtocolException()
-            return CloudMemeLists(parseList(data, "pic_ids"), parseList(data, "diy_pic_ids"))
+            return CloudMemeLists(
+                collected = parseList(data, "pic_ids"),
+                diy = parseList(data, "diy_pic_ids"),
+                picUpdateTime = optionalLong(data, "pic_update_time"),
+                diyPicUpdateTime = optionalLong(data, "diy_pic_update_time"),
+            )
         } catch (error: CloudMemeServiceException) {
             throw error
         } catch (error: Exception) {
@@ -86,6 +128,12 @@ internal object CloudMemeRepository {
         if (!value.isJsonPrimitive || !value.asJsonPrimitive.isString) throw CloudMemeProtocolException()
         return value.asString
     }
+
+    private fun optionalLong(item: JsonObject, name: String): Long? {
+        val value = item.get(name) ?: return null
+        if (value.isJsonNull || !value.isJsonPrimitive) return null
+        return value.asString.toLongOrNull()
+    }
 }
 
 internal data class CloudMemeSnapshot(val lists: CloudMemeLists, val updatedAt: Long) {
@@ -103,8 +151,16 @@ internal fun reconcileCloudMemes(previous: CloudMemeLists?, incoming: CloudMemeL
     }
     val collected = reconcile(previous.collected, incoming.collected)
     val diy = reconcile(previous.diy, incoming.diy)
-    return if (collected === previous.collected && diy === previous.diy) previous
-    else CloudMemeLists(collected, diy)
+    return if (collected === previous.collected && diy === previous.diy &&
+        incoming.picUpdateTime == previous.picUpdateTime &&
+        incoming.diyPicUpdateTime == previous.diyPicUpdateTime
+    ) previous
+    else CloudMemeLists(
+        collected = collected,
+        diy = diy,
+        picUpdateTime = incoming.picUpdateTime,
+        diyPicUpdateTime = incoming.diyPicUpdateTime,
+    )
 }
 
 internal class CloudMemeCache(
@@ -154,6 +210,33 @@ internal class CloudMemeCache(
             }
         }
 
+    suspend fun addCollected(
+        uid: String,
+        bduss: String,
+        memeId: String,
+    ): CloudMemeLists = withContext(Dispatchers.IO) {
+        require(uid.isNotBlank() && bduss.isNotBlank() && memeId.isNotBlank())
+        lock(uid).withLock {
+            val latest = fetch(bduss)
+            if (latest.collected.any { it.id == memeId }) {
+                memory[uid] = CloudMemeSnapshot(latest, now())
+                runCatching { write(uid, memory.getValue(uid)) }
+                return@withLock latest
+            }
+            val ids = latest.collected.map { it.id } + memeId
+            CloudMemeRepository.submitCollected(bduss, ids)
+            currentCoroutineContext().ensureActive()
+            val confirmed = fetch(bduss)
+            if (confirmed.collected.none { it.id == memeId }) {
+                throw CloudMemeProtocolException()
+            }
+            val snapshot = CloudMemeSnapshot(confirmed, now())
+            memory[uid] = snapshot
+            runCatching { write(uid, snapshot) }
+            confirmed
+        }
+    }
+
     private fun write(uid: String, snapshot: CloudMemeSnapshot) {
         fun array(memes: List<CloudMeme>) = JsonArray().apply {
             memes.forEach { meme ->
@@ -169,6 +252,8 @@ internal class CloudMemeCache(
             add("data", JsonObject().apply {
                 add("pic_ids", array(snapshot.lists.collected))
                 add("diy_pic_ids", array(snapshot.lists.diy))
+                snapshot.lists.picUpdateTime?.let { addProperty("pic_update_time", it) }
+                snapshot.lists.diyPicUpdateTime?.let { addProperty("diy_pic_update_time", it) }
             })
         }
         val root = JsonObject().apply {
@@ -190,6 +275,8 @@ internal class CloudMemeCache(
 internal data class CloudMemeState(
     val lists: CloudMemeLists? = null,
     val loading: Boolean = false,
+    val addingId: String? = null,
+    val addedId: String? = null,
     val error: String? = null,
 )
 
@@ -197,6 +284,7 @@ internal data class CloudMemeState(
 internal class CloudMemeSession(
     private val scope: CoroutineScope,
     private val cached: suspend () -> CloudMemeSnapshot? = { null },
+    private val addCollected: (suspend (String) -> CloudMemeLists)? = null,
     private val load: suspend () -> CloudMemeLists,
 ) {
     private val mutableState = MutableStateFlow(CloudMemeState())
@@ -209,8 +297,32 @@ internal class CloudMemeSession(
 
     fun refresh() = request(force = true)
 
+    fun addToCollected(memeId: String) {
+        val operation = addCollected ?: return
+        if (closed || mutableState.value.addingId != null) return
+        val requestGeneration = generation
+        mutableState.value = mutableState.value.copy(addingId = memeId, addedId = null, error = null)
+        job = scope.launch {
+            try {
+                val lists = operation(memeId)
+                if (!closed && generation == requestGeneration) {
+                    mutableState.value = CloudMemeState(lists = lists, addedId = memeId)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (!closed && generation == requestGeneration) {
+                    mutableState.value = mutableState.value.copy(
+                        addingId = null,
+                        error = "收藏未确认，请刷新后核对",
+                    )
+                }
+            }
+        }
+    }
+
     private fun request(force: Boolean) {
-        if (closed || state.value.loading) return
+        if (closed || state.value.loading || state.value.addingId != null) return
         val requestGeneration = ++generation
         mutableState.value = state.value.copy(loading = true, error = null)
         job = scope.launch {

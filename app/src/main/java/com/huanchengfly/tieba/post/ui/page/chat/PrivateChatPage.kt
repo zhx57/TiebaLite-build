@@ -213,6 +213,7 @@ fun PrivateChatPage(
                             avatarUrl = message.peerPortrait.ifBlank { peerPortrait },
                             msgTime = message.msgTime,
                             sendState = message.sendState,
+                            semantics = message.semantics,
                             onRetryClick = {
                                 resendTarget = message
                                 resendDialogState.show()

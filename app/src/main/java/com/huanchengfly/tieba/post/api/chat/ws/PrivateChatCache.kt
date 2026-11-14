@@ -3,6 +3,8 @@ package com.huanchengfly.tieba.post.api.chat.ws
 import android.content.Context
 import com.huanchengfly.tieba.post.App
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -22,6 +24,7 @@ import org.json.JSONObject
 object PrivateChatCache {
 
     private const val PREF_NAME = "private_chat_cache"
+    private const val CACHE_VERSION = 2
     private const val MAX_MESSAGES = 200
     private val revision = MutableStateFlow(0L)
     val changes = revision.asStateFlow()
@@ -46,10 +49,39 @@ object PrivateChatCache {
     fun load(selfUid: Long, peerUid: Long): List<ChatWsMessage> {
         val raw = prefs.getString(key(selfUid, peerUid), null) ?: return emptyList()
         return runCatching {
-            val array = JSONArray(raw)
-            (0 until array.length()).mapNotNull { index ->
-                val item = array.optJSONObject(index) ?: return@mapNotNull null
-                ChatWsMessage(
+            val root = JSONObject(raw)
+            root.optJSONArray("messages")
+        }.getOrNull()?.let(::readMessages) ?: runCatching {
+            readMessages(JSONArray(raw))
+        }.getOrDefault(emptyList())
+    }
+
+    private fun readMessages(array: JSONArray): List<ChatWsMessage> = buildList {
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            runCatching {
+                val msgType = item.optInt("msgType")
+                val semanticsObject = item.optJSONObject("semantics")
+                val semantics = semanticsObject?.let {
+                    ChatMessageSemantics(
+                        kind = runCatching { ChatMessageKind.valueOf(it.optString("kind")) }
+                            .getOrDefault(ChatMessageKind.UNKNOWN),
+                        protocolSource = it.optString("protocolSource", "private_chat"),
+                        transportType = it.optInt("transportType", msgType),
+                        businessType = if (it.has("businessType") && !it.isNull("businessType"))
+                            it.optInt("businessType") else null,
+                        targetId = if (it.has("targetId") && !it.isNull("targetId"))
+                            it.optLong("targetId") else null,
+                        summary = it.optString("summary").ifBlank { "未知消息" },
+                        rawPayload = it.optString("rawPayload").takeIf { value -> value.isNotBlank() },
+                    )
+                } ?: ChatMessageSemantics(
+                    kind = ChatMessageSemantics.classify(msgType, null),
+                    protocolSource = "private_chat_legacy_cache",
+                    transportType = msgType,
+                    summary = item.optString("content").ifBlank { "旧缓存消息" },
+                )
+                add(ChatWsMessage(
                     msgId = item.optLong("msgId"),
                     peerUid = item.optLong("peerUid"),
                     peerName = item.optString("peerName"),
@@ -57,7 +89,7 @@ object PrivateChatCache {
                     content = item.optString("content"),
                     msgTime = item.optLong("msgTime"),
                     isSelf = item.optBoolean("isSelf"),
-                    msgType = item.optInt("msgType"),
+                    msgType = msgType,
                     images = item.optJSONArray("images")?.let { images ->
                         (0 until images.length()).mapNotNull {
                             (images.opt(it) as? String)?.takeIf(String::isNotBlank)
@@ -73,9 +105,10 @@ object PrivateChatCache {
                             )
                         }.getOrNull()
                     },
-                )
+                    semantics = semantics,
+                ))
             }
-        }.getOrDefault(emptyList())
+        }
     }
 
     /**
@@ -101,6 +134,15 @@ object PrivateChatCache {
                 put("isSelf", message.isSelf)
                 put("msgType", message.msgType)
                 put("images", JSONArray(message.images))
+                put("semantics", JSONObject().apply {
+                    put("kind", message.semantics.kind.name)
+                    put("protocolSource", message.semantics.protocolSource)
+                    put("transportType", message.semantics.transportType)
+                    message.semantics.businessType?.let { put("businessType", it) }
+                    message.semantics.targetId?.let { put("targetId", it) }
+                    put("summary", message.semantics.summary)
+                    message.semantics.rawPayload?.let { put("rawPayload", it) }
+                })
                 message.cloudMeme?.let { meme ->
                     put("cloudMeme", JSONObject().apply {
                         put("id", meme.id)
@@ -111,7 +153,11 @@ object PrivateChatCache {
                 }
             })
         }
-        prefs.edit().putString(key(selfUid, peerUid), array.toString()).apply()
+        val root = JSONObject().apply {
+            put("version", CACHE_VERSION)
+            put("messages", array)
+        }
+        prefs.edit().putString(key(selfUid, peerUid), root.toString()).apply()
         revision.update { it + 1 }
     }
 }

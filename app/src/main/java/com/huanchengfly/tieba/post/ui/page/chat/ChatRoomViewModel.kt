@@ -8,6 +8,8 @@ import kotlinx.coroutines.delay
 import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
@@ -443,6 +445,13 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                             mentions = mentions,
                             robotSkill = robotSkill,
                             cloudMeme = cloudMeme,
+                            semantics = ChatMessageSemantics(
+                                kind = if (cloudMeme == null) ChatMessageKind.TEXT else ChatMessageKind.IMAGE,
+                                protocolSource = "local_outgoing",
+                                transportType = if (cloudMeme == null) 0 else 1,
+                                businessType = if (cloudMeme == null) 1 else 2,
+                                summary = if (cloudMeme == null) text else "图片消息",
+                            ),
                         )).toImmutableList(),
                         sendRequestId = oldState.sendRequestId + 1,
                     )

@@ -421,6 +421,7 @@ fun ChatRoomPage(
                             sendState = message.sendState,
                             transportAccepted = message.transportAccepted,
                             images = message.images,
+                            semantics = message.semantics,
                             onRetryClick = {
                                 resendTarget = message
                                 resendDialogState.show()

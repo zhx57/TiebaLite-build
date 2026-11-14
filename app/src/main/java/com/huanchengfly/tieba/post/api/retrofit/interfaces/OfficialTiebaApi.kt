@@ -32,6 +32,16 @@ interface OfficialTiebaApi {
         @Field("cmd") cmd: String = "1003351",
     ): okhttp3.ResponseBody
 
+    @Headers("${Header.FORCE_LOGIN}: ${Header.FORCE_LOGIN_TRUE}")
+    @POST("https://tiebac.baidu.com/c/e/meme/collect")
+    @FormUrlEncoded
+    suspend fun updateCloudMemes(
+        @Field("BDUSS") bduss: String,
+        @Field("cmd") cmd: String = "1003339",
+        @Field("pics") pics: String,
+        @Field("pic_update_time") picUpdateTime: String? = null,
+    ): okhttp3.ResponseBody
+
     @POST("/c/f/pb/page")
     @FormUrlEncoded
     fun threadContent(

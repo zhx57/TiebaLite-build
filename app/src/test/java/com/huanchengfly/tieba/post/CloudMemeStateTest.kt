@@ -33,6 +33,27 @@ class CloudMemeStateTest {
     }
 
     @Test
+    fun addingCollectedMemeUsesInjectedAccountScopedOperationAndConfirmsState() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            var added = ""
+            val session = CloudMemeSession(
+                scope = scope,
+                addCollected = { id ->
+                    added = id
+                    lists.copy(collected = lists.collected + CloudMeme(id, "https://example.com/$id", null))
+                },
+                load = { lists },
+            )
+            session.addToCollected("b")
+            assertEquals("b", added)
+            assertEquals("b", session.state.value.addedId)
+            assertTrue(session.state.value.lists!!.collected.any { it.id == "b" })
+            assertNull(session.state.value.addingId)
+        } finally { scope.cancel() }
+    }
+
+    @Test
     fun staleCacheIsVisibleDuringRefreshAndSurvivesFailure() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         try {

@@ -55,6 +55,54 @@ class CloudMemeContractTest {
     }
 
     @Test
+    fun explicitEmptySnapshotUsesAllDeleteSentinel() = runBlocking {
+        var captured: Request? = null
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                captured = chain.request()
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                    .code(200).message("OK").body(response().toResponseBody()).build()
+            }.build()
+        val api = Retrofit.Builder().baseUrl("http://example.com/").client(client)
+            .build().create(OfficialTiebaApi::class.java)
+        api.updateCloudMemes("snapshot-account", pics = "all_delete", picUpdateTime = "1234").close()
+        val form = captured!!.body as FormBody
+        val fields = (0 until form.size).associate { form.name(it) to form.value(it) }
+        assertEquals("all_delete", fields["pics"])
+        assertEquals("1003339", fields["cmd"])
+    }
+
+    @Test
+    fun sendsFullCollectedSnapshotWithPicIdsAndOfficialTimestamp() = runBlocking {
+        var captured: Request? = null
+        val client = OkHttpClient.Builder()
+            .addInterceptor(CommonParamInterceptor("BDUSS" to { "other-account" }, "_client_version" to { "12.0" }))
+            .addInterceptor { chain ->
+                captured = chain.request()
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                    .code(200).message("OK").body(response().toResponseBody()).build()
+            }.build()
+        val api = Retrofit.Builder().baseUrl("http://example.com/").client(client)
+            .build().create(OfficialTiebaApi::class.java)
+        api.updateCloudMemes(
+            bduss = "snapshot-account",
+            pics = "[{\"pic_id\":\"old\"},{\"pic_id\":\"new\"}]",
+            picUpdateTime = "1234",
+        ).close()
+        val request = captured!!
+        assertEquals("POST", request.method)
+        assertEquals("https", request.url.scheme)
+        assertEquals("tiebac.baidu.com", request.url.host)
+        assertEquals("/c/e/meme/collect", request.url.encodedPath)
+        val form = request.body as FormBody
+        val fields = (0 until form.size).associate { form.name(it) to form.value(it) }
+        assertEquals("snapshot-account", fields["BDUSS"])
+        assertEquals("1003339", fields["cmd"])
+        assertEquals("[{\"pic_id\":\"old\"},{\"pic_id\":\"new\"}]", fields["pics"])
+        assertEquals("1234", fields["pic_update_time"])
+    }
+
+    @Test
     fun sendsHttpsPostAndSignsCommandWithSnapshotCredential() = runBlocking {
         var captured: Request? = null
         val client = OkHttpClient.Builder()

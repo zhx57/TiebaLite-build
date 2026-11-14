@@ -1,6 +1,8 @@
 package com.huanchengfly.tieba.post.api.chat
 
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpCrypto
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRobotSkill
@@ -220,13 +222,12 @@ object ChatApi {
      * 线上字段为 msgid / type / from_user / create_time，content 为 JSON 字符串。
      * 正文可能以多种嵌套形态出现（text 字符串、对象、数组、content_body 再包一层），
      * 这里递归提取，避免正常文本被误判成不支持的消息。
-     * from_user 为 0 的是系统消息（入群、退群等），直接丢弃。
+     * from_user 为 0 的是系统消息，保留为系统事件；已读等控制回执不在本接口消息列表中。
      */
     internal fun parseMessage(json: JSONObject, myUid: Long?): ChatRoomMessage? {
         val senderUid = json.optLong("from_user")
-        if (senderUid == 0L) return null
-
-        var msgType = json.optInt("type", 0)
+        val isSystem = senderUid == 0L
+        val transportType = json.optInt("type", 0)
         val content = runCatching {
             when (val raw = json.opt("content")) {
                 is String -> if (raw.isBlank()) null else JSONTokener(raw).nextValue()
@@ -239,12 +240,20 @@ object ChatApi {
         val ext = decodeJson(textObj?.opt("ext")) as? JSONObject
         val senderName = textObj?.optString("name").orEmpty().ifBlank {
             ext?.optString("user_name").orEmpty().ifBlank { ext?.optString("name").orEmpty() }
-        }
+        }.ifBlank { if (isSystem) "系统" else "" }
         val portrait = textObj?.optString("portrait").orEmpty().ifBlank {
             ext?.optString("portrait").orEmpty()
         }
         val senderBduk = textObj?.optString("baidu_uk").orEmpty()
-        msgType = textObj?.optInt("content_type", msgType) ?: msgType
+        val businessType = textObj?.takeIf { it.has("content_type") }?.optInt("content_type")
+            ?: transportType.takeIf { isSystem && it in SYSTEM_BUSINESS_TYPES }
+        val messageKind = ChatMessageSemantics.classify(transportType, businessType, isSystem)
+        val targetId = sequenceOf("msgid", "msg_id", "target_id", "target_msgid", "pid", "tid")
+            .mapNotNull { key ->
+                val value = textObj?.opt(key) ?: envelope?.opt(key)
+                value?.toString()?.toLongOrNull()
+            }
+            .firstOrNull()
         val atData = decodeJson(textObj?.opt("at_data")) as? JSONArray
         val mentions = buildList {
             if (atData != null) for (i in 0 until atData.length()) {
@@ -266,7 +275,7 @@ object ChatApi {
         // 图片消息：图片地址在 content_body 的 src 上，多图时可能是数组或逗号拼接。
         val bodyImages = extractImages(textObj?.opt("content_body"))
         val sourceImages = extractImageSources(textObj?.opt("src"))
-        val textImages = if (msgType == 1) extractImageSources(rawText) else
+        val textImages = if (messageKind == ChatMessageKind.TEXT) extractImageSources(rawText) else
             extractImageSources(rawText).filter { url ->
                 val host = runCatching { url.toHttpUrl().host }.getOrDefault("")
                 host in setOf("imgsa.baidu.com", "imgsrc.baidu.com", "tiebapic.baidu.com")
@@ -299,10 +308,25 @@ object ChatApi {
             senderUid = bdukUid ?: 0L,
             senderName = senderName,
             senderPortrait = portrait,
-            contentType = msgType,
+            contentType = transportType,
             text = text.ifBlank {
-                if (images.isEmpty()) "[暂未支持的消息类型 $msgType]" else ""
+                when {
+                    images.isNotEmpty() -> ""
+                    messageKind == ChatMessageKind.SYSTEM_EVENT -> "系统消息"
+                    messageKind == ChatMessageKind.DELETE_EVENT -> "消息已删除"
+                    messageKind == ChatMessageKind.EMOTION_REACTION -> "表情回应"
+                    else -> "[暂未支持的消息类型 ${businessType ?: transportType}]"
+                }
             },
+            semantics = ChatMessageSemantics(
+                kind = messageKind,
+                protocolSource = "chatroom",
+                transportType = transportType,
+                businessType = businessType,
+                targetId = targetId,
+                summary = text.ifBlank { messageKind.name },
+                rawPayload = ChatMessageSemantics.limitedRawPayload(rawContent),
+            ),
             images = images,
             msgTime = json.optLong("create_time") * 1000L,
             isSelf = isSelf,
@@ -319,16 +343,22 @@ object ChatApi {
     private fun decodeUid(bduk: String): Long =
         runCatching { BlcpCrypto.bduk2UserId(bduk) }.getOrDefault(0L)
 
-    private fun extractImageSources(node: Any?): List<String> = when (val value = decodeJson(node)) {
-        is String -> value.split(Regex("[\\s,]+"))
-            .mapNotNull(::normalizeImageUrl)
-        is JSONArray -> (0 until value.length()).flatMap { extractImageSources(value.opt(it)) }
-        is JSONObject -> listOf("src", "url", "original", "big", "small")
-            .flatMap { extractImageSources(value.opt(it)) }
-        else -> emptyList()
+    private fun extractImageSources(node: Any?, depth: Int = 0): List<String> {
+        if (depth > 8) return emptyList()
+        return when (val value = decodeJson(node)) {
+            is String -> value.take(4096).split(Regex("[\\s,]+"))
+                .mapNotNull(::normalizeImageUrl)
+            is JSONArray -> (0 until minOf(value.length(), 64))
+                .flatMap { extractImageSources(value.opt(it), depth + 1) }
+            is JSONObject -> listOf("src", "url", "original", "big", "small")
+                .flatMap { extractImageSources(value.opt(it), depth + 1) }
+            else -> emptyList()
+        }
     }
 
-    private fun extractImages(node: Any?): List<String> = when (node) {
+    private fun extractImages(node: Any?, depth: Int = 0): List<String> {
+        if (depth > 8) return emptyList()
+        return when (node) {
         null -> emptyList()
 
         is JSONObject -> {
@@ -340,13 +370,13 @@ object ChatApi {
                 direct
             } else {
                 val body = node.opt("content_body")
-                extractImages(body).ifEmpty { extractImages(node.opt("text")) }
+                extractImages(body, depth + 1).ifEmpty { extractImages(node.opt("text"), depth + 1) }
             }
         }
 
         is JSONArray -> buildList {
-            for (i in 0 until node.length()) {
-                addAll(extractImages(node.opt(i)))
+            for (i in 0 until minOf(node.length(), 64)) {
+                addAll(extractImages(node.opt(i), depth + 1))
             }
         }
 
@@ -354,7 +384,7 @@ object ChatApi {
             val trimmed = node.trim()
             when {
                 trimmed.startsWith("{") || trimmed.startsWith("[") ->
-                    runCatching { extractImages(JSONTokener(trimmed).nextValue()) }
+                    runCatching { extractImages(JSONTokener(trimmed).nextValue(), depth + 1) }
                         .getOrDefault(emptyList())
 
                 else -> emptyList()
@@ -362,6 +392,7 @@ object ChatApi {
         }
 
         else -> emptyList()
+        }
     }
 
     /**
@@ -397,6 +428,7 @@ object ChatApi {
     }
 
     private val EMOTICON_ID_REGEX = Regex("image_emoticon\\d+")
+    private val SYSTEM_BUSINESS_TYPES = setOf(7010, 7025, 20000)
 
     /**
      * 解析正文，与 aiotieba 的 ChatroomMsg.from_json 保持一致。
@@ -405,7 +437,9 @@ object ChatApi {
      * -> 若其中有 content_body 再解一层 -> 最终取 text。
      * 任何一层解析失败都返回空串，绝不把 JSON 原文当作消息内容显示。
      */
-    private fun extractText(node: Any?): String = when (node) {
+    private fun extractText(node: Any?, depth: Int = 0): String {
+        if (depth > 8) return ""
+        return when (node) {
         null -> ""
         is JSONObject -> {
             // 空正文不能挡住同层分享内容；只沿内容字段解析，避免读出 ext 中的用户资料。
@@ -413,7 +447,7 @@ object ChatApi {
                 "content_body", "text", "str", "msg", "content",
                 "share", "share_info", "thread", "thread_info",
             )
-                .map { extractText(node.opt(it)) }
+                .map { extractText(node.opt(it), depth + 1) }
                 .firstOrNull { it.isNotBlank() }
                 .orEmpty()
             val links = listOf("url", "link", "jump_url")
@@ -429,8 +463,8 @@ object ChatApi {
         }
 
         is JSONArray -> buildString {
-            for (i in 0 until node.length()) {
-                append(extractText(node.opt(i)))
+            for (i in 0 until minOf(node.length(), 64)) {
+                append(extractText(node.opt(i), depth + 1))
             }
         }
 
@@ -438,13 +472,14 @@ object ChatApi {
             val trimmed = node.trim()
             if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
                 // 字符串本身还是 JSON，继续解一层；解析失败则丢弃
-                runCatching { extractText(JSONTokener(trimmed).nextValue()) }.getOrDefault("")
+                runCatching { extractText(JSONTokener(trimmed).nextValue(), depth + 1) }.getOrDefault("")
             } else {
-                trimmed
+                trimmed.take(4096)
             }
         }
 
         else -> ""
+        }
     }
 
     private fun execute(request: Request): String {

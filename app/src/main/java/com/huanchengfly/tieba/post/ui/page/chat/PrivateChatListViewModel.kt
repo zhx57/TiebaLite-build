@@ -239,7 +239,7 @@ fun List<ChatWsMessage>.toSessions(): ImmutableList<PrivateSession> {
                 peerUid = peerUid,
                 peerName = latest.peerName,
                 peerPortrait = latest.peerPortrait,
-                lastMessage = latest.content,
+                lastMessage = latest.content.ifBlank { latest.semantics.summary },
                 lastTime = latest.msgTime,
                 unreadCount = 0,
             )

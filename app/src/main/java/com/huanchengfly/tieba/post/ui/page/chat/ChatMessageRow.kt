@@ -44,6 +44,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.huanchengfly.tieba.post.R
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.models.PhotoViewData
 import com.huanchengfly.tieba.post.models.PicItem
@@ -80,6 +82,7 @@ fun ChatMessageRow(
     modifier: Modifier = Modifier,
     images: List<String> = emptyList(),
     transportAccepted: Boolean = false,
+    semantics: ChatMessageSemantics = ChatMessageSemantics(),
     onAvatarClick: () -> Unit = {},
     onAvatarLongClick: (() -> Unit)? = null,
 ) {
@@ -93,9 +96,27 @@ fun ChatMessageRow(
         clipboard.setPrimaryClip(ClipData.newPlainText("message", text))
         Toast.makeText(context, R.string.chat_message_copied, Toast.LENGTH_SHORT).show()
     }
+    val semanticLabel = when (semantics.kind) {
+        ChatMessageKind.VOICE -> "语音消息"
+        ChatMessageKind.LARGE_EMOTICON -> "大表情"
+        ChatMessageKind.IMAGE_TO_TEXT -> "图生文"
+        ChatMessageKind.SINGLE_TEXT_IMAGE -> "图文消息"
+        ChatMessageKind.TEXT_TO_SPEECH -> "文字转语音"
+        ChatMessageKind.AI_INTRODUCTION -> "AI 介绍"
+        ChatMessageKind.WEB_CHAT -> "WebChat 消息"
+        ChatMessageKind.POST_SHARE -> "帖子分享"
+        ChatMessageKind.DELETE_EVENT -> "消息已删除"
+        ChatMessageKind.EMOTION_REACTION -> "表情回应"
+        ChatMessageKind.SYSTEM_EVENT -> "系统消息"
+        ChatMessageKind.CONTROL -> "控制消息"
+        ChatMessageKind.UNKNOWN -> semantics.summary.takeIf { it.isNotBlank() } ?: "未知消息"
+        else -> null
+    }
     val displayText = when {
-        hasImages -> text
-        else -> text.ifBlank { stringResource(id = R.string.text_chat_unsupported_message) }
+        text.isNotBlank() -> text
+        hasImages -> ""
+        semanticLabel != null -> semanticLabel
+        else -> stringResource(id = R.string.text_chat_unsupported_message)
     }
 
     val annotatedText = remember(displayText) { annotateChatLinks(displayText) }

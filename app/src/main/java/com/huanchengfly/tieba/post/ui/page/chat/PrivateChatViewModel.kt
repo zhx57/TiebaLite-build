@@ -6,6 +6,8 @@ import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatCache
 import com.huanchengfly.tieba.post.components.ImageUploader
 import com.huanchengfly.tieba.post.api.models.chat.SendState
@@ -236,6 +238,13 @@ class PrivateChatViewModel @Inject constructor() :
                 msgType = if (cloudMeme != null) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
                 images = preparedCloudMeme?.let { listOf(it.sendImageUrl) }.orEmpty(),
                 cloudMeme = preparedCloudMeme ?: cloudMeme,
+                semantics = ChatMessageSemantics(
+                    kind = if (preparedCloudMeme == null) ChatMessageKind.TEXT else ChatMessageKind.IMAGE,
+                    protocolSource = "local_outgoing",
+                    transportType = if (preparedCloudMeme == null) ChatWsConstants.MSG_TYPE_PRIVATE else ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE,
+                    businessType = if (preparedCloudMeme == null) 1 else 2,
+                    summary = if (preparedCloudMeme == null) content else "图片消息",
+                ),
             )
             PrivateChatCache.save(client.selfUid, peerUid, mergePrivateMessages(cached, listOf(message)))
             return message
@@ -328,6 +337,13 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
                             msgType = if (cloudMeme != null) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
                             images = cloudMeme?.let { listOf(it.imageUrl) }.orEmpty(),
                             cloudMeme = cloudMeme,
+                            semantics = ChatMessageSemantics(
+                                kind = if (cloudMeme == null) ChatMessageKind.TEXT else ChatMessageKind.IMAGE,
+                                protocolSource = "local_outgoing",
+                                transportType = if (cloudMeme == null) ChatWsConstants.MSG_TYPE_PRIVATE else ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE,
+                                businessType = if (cloudMeme == null) 1 else 2,
+                                summary = if (cloudMeme == null) content else "图片消息",
+                            ),
                         )).toImmutableList(),
                         sendRequestId = oldState.sendRequestId + 1,
                     )
