@@ -146,6 +146,10 @@ fun ChatComposer(
     val currentOnValueChange = rememberUpdatedState(onValueChange)
     val currentShowEmoticonPanel = rememberUpdatedState(showEmoticonPanel)
     val currentDismissEmoticonPanel = rememberUpdatedState(onDismissEmoticonPanel)
+    val textColor = ExtendedTheme.colors.text.toArgb()
+    val disabledTextColor = ExtendedTheme.colors.textDisabled.toArgb()
+    val surfaceColor = ExtendedTheme.colors.bottomBarSurface.toArgb()
+    val placeholderColor = ExtendedTheme.colors.textSecondary.toArgb()
 
     LaunchedEffect(enabled) {
         if (!enabled) menuExpanded = false
@@ -188,9 +192,6 @@ fun ChatComposer(
             AndroidView(
                 factory = { context ->
                     UndoableEditText(context).apply {
-                        val textColor = ExtendedTheme.colors.text.toArgb()
-                        val surfaceColor = ExtendedTheme.colors.bottomBarSurface.toArgb()
-                        val placeholderColor = ExtendedTheme.colors.textSecondary.toArgb()
                         setTextColor(textColor)
                         setHintTextColor(placeholderColor)
                         setBackgroundColor(surfaceColor)
@@ -239,15 +240,9 @@ fun ChatComposer(
                         )
                         editText.setSelection(selection)
                     }
-                    editText.setTextColor(
-                        if (enabled) ExtendedTheme.colors.text.toArgb()
-                        else ExtendedTheme.colors.textDisabled.toArgb()
-                    )
-                    editText.setHintTextColor(
-                        if (enabled) ExtendedTheme.colors.textSecondary.toArgb()
-                        else ExtendedTheme.colors.textDisabled.toArgb()
-                    )
-                    editText.setBackgroundColor(ExtendedTheme.colors.bottomBarSurface.toArgb())
+                    editText.setTextColor(if (enabled) textColor else disabledTextColor)
+                    editText.setHintTextColor(if (enabled) placeholderColor else disabledTextColor)
+                    editText.setBackgroundColor(surfaceColor)
                 },
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp),
             )
