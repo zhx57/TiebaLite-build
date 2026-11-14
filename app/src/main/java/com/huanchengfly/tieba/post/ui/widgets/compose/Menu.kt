@@ -142,7 +142,7 @@ fun LongClickMenu(
                 interactionSource = interactionSource,
                 indication = indication,
                 enabled = enabled,
-                onClick = onClick,
+                onClick = onClick ?: {},
                 onDoubleClick = onDoubleClick ?: {},
                 onLongClick = {
                     menuState.expanded = true
