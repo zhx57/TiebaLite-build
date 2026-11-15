@@ -440,18 +440,31 @@ object ChatApi {
     /**
      * 提取语音消息的播放地址。
      *
-     * 群聊语音有两种下发形态：一种是 text/content_body 里直接给完整语音链接
-     * （点开能在浏览器播放的那种），另一种只给 voice_md5 需要自行拼接。
-     * 这里优先使用原始链接，避免丢掉链接里可能带的额外参数。
+     * 群聊语音有两种下发形态：一种是 text/content_body 里直接给完整语音链接，
+     * 另一种只给 voice_md5 需要自行拼接。优先按 voice_md5 复用回帖的音频地址，
+     * 只有拿不到 voice_md5 时才退回到音频直链。
      */
     private fun extractVoiceUrl(textObj: JSONObject?, content: Any?, rawText: String): String? {
-        sequenceOf<Any?>(rawText, textObj, content)
+        val originUrl = sequenceOf<Any?>(rawText, textObj, content)
             .mapNotNull { findVoiceUrlInNode(it) }
             .firstOrNull()
-            ?.let { return it }
-        val md5 = listOfNotNull(findVoiceMd5(textObj), findVoiceMd5(content)).firstOrNull()
-            ?: return null
-        return voiceUrlOf(md5)
+        // 与回帖语音保持一致：只要有 voice_md5 就一律走标准音频地址。
+        // 消息里给的链接有时是详情页而不是音频流，直接交给播放器会一直缓冲。
+        val md5 = listOfNotNull(
+            findVoiceMd5(textObj),
+            findVoiceMd5(content),
+            originUrl?.let(::extractVoiceMd5FromUrl),
+        ).firstOrNull()
+        if (md5 != null) return voiceUrlOf(md5)
+        return originUrl?.takeIf(::isDirectAudioUrl)
+    }
+
+    private fun extractVoiceMd5FromUrl(url: String): String? =
+        runCatching { url.toHttpUrl().queryParameter("voice_md5")?.takeIf { it.isNotBlank() } }.getOrNull()
+
+    private fun isDirectAudioUrl(url: String): Boolean {
+        val path = url.substringBefore('?').substringBefore('#').lowercase()
+        return AUDIO_EXTENSIONS.any { path.endsWith(it) }
     }
 
     /** 与回帖语音气泡使用同一个播放地址格式。 */

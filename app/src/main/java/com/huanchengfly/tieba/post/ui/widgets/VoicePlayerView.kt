@@ -24,19 +24,24 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
 import com.airbnb.lottie.LottieAnimationView
 import com.airbnb.lottie.LottieProperty
 import com.airbnb.lottie.SimpleColorFilter
 import com.airbnb.lottie.model.KeyPath
 import com.airbnb.lottie.value.LottieValueCallback
 import com.huanchengfly.tieba.post.R
+import com.huanchengfly.tieba.post.api.getUserAgent
 import com.huanchengfly.tieba.post.ui.common.theme.utils.ColorStateListUtils
 import com.huanchengfly.tieba.post.ui.common.theme.utils.ThemeUtils
+import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.DisplayUtil
 import com.huanchengfly.tieba.post.utils.FileUtil
 import com.huanchengfly.tieba.post.utils.PopupUtil
@@ -343,6 +348,19 @@ class VoicePlayerView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * 加载失败时收回 loading 状态，避免语音气泡无限转圈。
+     *
+     * 失败后把 completed 置 true，再次点击会走 startPlay 重新请求。
+     */
+    override fun onPlayerError(error: PlaybackException) {
+        Log.e(TAG, "onPlayerError: ${error.errorCode}", error)
+        hasPrepared = false
+        completed = true
+        setState(STATE_PAUSING)
+        setText(calculateTime(duration / 1000))
+    }
+
     @IntDef(STATE_LOADING, STATE_PLAYING, STATE_PAUSING)
     @Retention(AnnotationRetention.SOURCE)
     private annotation class IconState
@@ -380,7 +398,7 @@ class VoicePlayerView @JvmOverloads constructor(
         @Throws(IOException::class)
         override fun setDataSource(url: String?) {
             mExoPlayer.setMediaSource(
-                DefaultMediaSourceFactory(voicePlayerView.context)
+                Manager.getMediaSourceFactory(voicePlayerView.context)
                     .createMediaSource(
                         MediaItem.fromUri(url!!)
                     )
@@ -460,8 +478,37 @@ class VoicePlayerView @JvmOverloads constructor(
         @JvmStatic
         private var sExoPlayer: ExoPlayer? = null
 
+        private var sMediaSourceFactory: DefaultMediaSourceFactory? = null
+
         @JvmStatic
         private var current: VoicePlayerView? = null
+
+        /**
+         * 语音请求与浏览器保持一致：带上同一 UA、登录态 Cookie 与 Referer。
+         *
+         * 贴吧语音地址在缺少这些头时可能返回非音频内容，表现为播放器一直缓冲不结束；
+         * 同时允许跨协议重定向，兼容 http 跳到 https 的 CDN 地址。
+         */
+        @OptIn(UnstableApi::class)
+        fun getMediaSourceFactory(context: Context): MediaSource.Factory {
+            sMediaSourceFactory?.let { return it }
+            synchronized(Manager::class.java) {
+                if (sMediaSourceFactory == null) {
+                    val headers = linkedMapOf<String, String>()
+                    AccountUtil.getCookie()?.takeIf { it.isNotBlank() }?.let { headers["Cookie"] = it }
+                    headers["Referer"] = "https://tieba.baidu.com/"
+                    val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+                        .setUserAgent(getUserAgent())
+                        .setDefaultRequestProperties(headers)
+                        .setAllowCrossProtocolRedirects(true)
+                        .setConnectTimeoutMs(15_000)
+                        .setReadTimeoutMs(20_000)
+                    sMediaSourceFactory = DefaultMediaSourceFactory(context)
+                        .setDataSourceFactory(httpDataSourceFactory)
+                }
+            }
+            return sMediaSourceFactory!!
+        }
 
         @OptIn(UnstableApi::class)
         fun getExoPlayer(context: Context): ExoPlayer {
@@ -469,6 +516,7 @@ class VoicePlayerView @JvmOverloads constructor(
                 synchronized(Manager::class.java) {
                     if (sExoPlayer == null) {
                         sExoPlayer = ExoPlayer.Builder(context)
+                            .setMediaSourceFactory(getMediaSourceFactory(context))
                             .setAudioAttributes(
                                 AudioAttributes.Builder()
                                     .setUsage(C.USAGE_MEDIA)
@@ -501,6 +549,7 @@ class VoicePlayerView @JvmOverloads constructor(
                 sExoPlayer!!.release()
             }
             sExoPlayer = null
+            sMediaSourceFactory = null
         }
     }
 
