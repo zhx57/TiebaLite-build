@@ -1140,19 +1140,34 @@ class ChatRoomStateTest {
 
     @Test
     fun groupVoiceMessageNeverBecomesImage() {
+        val voiceUrl = "https://tiebac.baidu.com/c/p/voice?voice_md5=abc123&play_from=pb_voice_play"
         val voiceBody = JSONObject()
             .put("voice_md5", "abc123")
-            .put("during_time", 8)
-            .put("src", "https://tiebac.baidu.com/c/v/voice_sample")
-        val voiceWithType2 = received(imagePayload(2, voiceBody.toString(), "https://tiebac.baidu.com/c/v/voice_sample"))
-        assertEquals(ChatMessageKind.VOICE, voiceWithType2.semantics.kind)
-        assertTrue(voiceWithType2.images.isEmpty())
-        assertEquals("[语音消息 8秒]", voiceWithType2.text)
+            .put("during_time", 8000)
+            .put("src", voiceUrl)
+        val voiceWithUrl = received(imagePayload(2, voiceBody.toString(), voiceUrl))
+        assertEquals(ChatMessageKind.VOICE, voiceWithUrl.semantics.kind)
+        assertTrue(voiceWithUrl.images.isEmpty())
+        assertEquals(voiceUrl, voiceWithUrl.voiceUrl)
+        assertEquals(8000, voiceWithUrl.voiceDurationMs)
+        assertEquals("", voiceWithUrl.text)
+
+        // 只给 voice_md5 时，按回帖语音气泡相同的地址格式拼接。
+        val md5Only = received(
+            imagePayload(2, JSONObject().put("voice_md5", "abc123").put("during_time", 8).toString())
+        )
+        assertEquals(ChatMessageKind.VOICE, md5Only.semantics.kind)
+        assertEquals(
+            "https://tiebac.baidu.com/c/p/voice?voice_md5=abc123&play_from=pb_voice_play",
+            md5Only.voiceUrl,
+        )
+        assertEquals(8000, md5Only.voiceDurationMs)
 
         val audioUrlOnly = received(imagePayload(2, JSONObject().put("src", "https://example.com/clip.amr").toString()))
         assertEquals(ChatMessageKind.VOICE, audioUrlOnly.semantics.kind)
         assertTrue(audioUrlOnly.images.isEmpty())
-        assertEquals("[语音消息]", audioUrlOnly.text)
+        assertEquals("https://example.com/clip.amr", audioUrlOnly.voiceUrl)
+        assertEquals("", audioUrlOnly.text)
     }
 
     @Test

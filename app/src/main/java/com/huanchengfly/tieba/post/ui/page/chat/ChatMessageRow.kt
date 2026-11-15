@@ -65,6 +65,7 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.LongClickMenu
 import com.huanchengfly.tieba.post.ui.widgets.compose.NetworkImage
 import com.huanchengfly.tieba.post.ui.widgets.compose.rememberMenuState
 import com.huanchengfly.tieba.post.ui.widgets.compose.Sizes
+import com.huanchengfly.tieba.post.ui.widgets.compose.VoicePlayer
 import com.huanchengfly.tieba.post.utils.DateTimeUtils
 import com.huanchengfly.tieba.post.utils.StringUtil
 import com.huanchengfly.tieba.post.utils.appPreferences
@@ -100,6 +101,10 @@ fun ChatMessageRow(
     images: List<String> = emptyList(),
     transportAccepted: Boolean = false,
     semantics: ChatMessageSemantics = ChatMessageSemantics(),
+    /** 语音消息播放地址；非空时渲染与回帖一致的语音气泡。 */
+    voiceUrl: String? = null,
+    /** 语音时长，单位毫秒。 */
+    voiceDurationMs: Int = 0,
     onAvatarClick: () -> Unit = {},
     onAvatarLongClick: (() -> Unit)? = null,
 ) {
@@ -217,7 +222,13 @@ fun ChatMessageRow(
                                 isSelf = isSelf,
                             )
                         }
-                        if (!hasImages || text.isNotBlank()) {
+                        if (voiceUrl != null) {
+                            // 与回帖语音共用同一套播放器与进度动画，避免出现两个语音实现。
+                            VoicePlayer(
+                                url = voiceUrl,
+                                duration = voiceDurationMs,
+                            )
+                        } else if (!hasImages || text.isNotBlank()) {
                             PbContentText(
                                 text = annotatedText,
                                 modifier = Modifier

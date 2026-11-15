@@ -152,6 +152,10 @@ data class ChatRoomMessage(
     val cloudMeme: ChatCloudMeme? = null,
     /** 保留群聊外层类型、内层业务类型和未知消息摘要，不覆盖旧展示字段。 */
     val semantics: ChatMessageSemantics = ChatMessageSemantics(),
+    /** 语音消息可直接播放的地址；非语音消息为 null。 */
+    val voiceUrl: String? = null,
+    /** 语音时长，单位毫秒，仅用于气泡初始文案，播放时以解码出的真实时长为准。 */
+    val voiceDurationMs: Int = 0,
 ) {
     val localPendingId: Long?
         get() = msgId.takeIf { isLocal && it < 0 }
