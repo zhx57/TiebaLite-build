@@ -2,6 +2,7 @@ package com.huanchengfly.tieba.post.repository
 
 import com.google.gson.Gson
 import com.huanchengfly.tieba.post.api.models.UploadPictureResultBean
+import kotlinx.serialization.json.Json
 import com.huanchengfly.tieba.post.api.retrofit.interfaces.OfficialTiebaApi
 import com.huanchengfly.tieba.post.api.retrofit.interceptors.CommonParamInterceptor
 import com.huanchengfly.tieba.post.api.retrofit.interceptors.SortAndSignInterceptor
@@ -21,6 +22,16 @@ class CloudMemeContractTest {
     private val pic = """{"pic_id":"123","pic_url":"https://example.com/full.gif","thumbnail":"https://example.com/thumb.gif"}"""
     private fun response(collected: String = "[]", diy: String = "[]") =
         """{"error_code":"0","data":{"pic_ids":$collected,"diy_pic_ids":$diy}}"""
+
+    @Test
+    fun uploadPictureAllowsMissingChunkNumberInFinalResponse() {
+        val result = Json.decodeFromString<UploadPictureResultBean>(
+            """{"error_code":"0","error_msg":"ok","pic_id":"p1","pic_info":{"origin_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/o"},"big_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/b"},"small_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/s"}}}""",
+        )
+        assertEquals("p1", result.picId)
+        assertEquals(null, result.chunkNo)
+        assertEquals("https://example.com/b", result.picInfo!!.bigPic.picUrl)
+    }
 
     @Test
     fun uploadPictureAcceptsSnakeAndCamelCaseResponseFields() {

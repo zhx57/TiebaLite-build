@@ -8,16 +8,16 @@ import kotlinx.serialization.Serializable
 data class UploadPictureResultBean(
     @SerialName("error_code")
     @SerializedName("error_code")
-    val errorCode: String,
+    val errorCode: String = "",
     @SerialName("error_msg")
     @SerializedName("error_msg")
-    val errorMsg: String,
+    val errorMsg: String = "",
     @SerialName("resource_id")
     @SerializedName(value = "resourceId", alternate = ["resource_id"])
     val resourceId: String? = null,
     @SerialName("chunk_no")
     @SerializedName(value = "chunkNo", alternate = ["chunk_no"])
-    val chunkNo: String,
+    val chunkNo: String? = null,
     @SerialName("pic_id")
     @SerializedName(value = "pic_id", alternate = ["picId"])
     val picId: String? = null,
