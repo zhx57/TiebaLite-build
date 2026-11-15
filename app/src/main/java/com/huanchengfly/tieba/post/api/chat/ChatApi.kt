@@ -275,7 +275,7 @@ object ChatApi {
         // 图片消息：图片地址在 content_body 的 src 上，多图时可能是数组或逗号拼接。
         val bodyImages = extractImages(textObj?.opt("content_body"))
         val sourceImages = extractImageSources(textObj?.opt("src"))
-        val textImages = if (transportType == 1) extractImageSources(rawText) else
+        val textImages = if (transportType == 1 || businessType == 1) extractImageSources(rawText) else
             extractImageSources(rawText).filter { url ->
                 val host = runCatching { url.toHttpUrl().host }.getOrDefault("")
                 host in setOf("imgsa.baidu.com", "imgsrc.baidu.com", "tiebapic.baidu.com")
