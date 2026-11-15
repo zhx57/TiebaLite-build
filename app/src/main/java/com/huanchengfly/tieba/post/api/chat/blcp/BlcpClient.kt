@@ -274,11 +274,18 @@ class BlcpClient {
      * 发送 LCM 心跳包，避免长连接静默断开。
      */
     suspend fun sendHeartbeat() {
+        val logId = nextCorrelationId()
+        val request = RpcData(
+            lcm_request = LcmRequest(
+                log_id = logId,
+                timestamp = System.currentTimeMillis(),
+            )
+        )
         val response = send(
             serviceId = BlcpConstants.SERVICE_LCM,
             methodId = BlcpConstants.METHOD_HEARTBEAT,
-            body = RpcData().encode(),
-            correlationId = nextId(),
+            body = request.encode(),
+            correlationId = logId,
         )
         val rpcError = response.meta.response?.error_code ?: 0
         if (rpcError != 0) {
