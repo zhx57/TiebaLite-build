@@ -34,6 +34,15 @@ class CloudMemeContractTest {
     }
 
     @Test
+    fun uploadPictureAcceptsLegacyTopLevelInfoResponse() {
+        val result = Json.decodeFromString<UploadPictureResultBean>(
+            """{"error_code":"0","error_msg":"ok","info":{"pic_id":"legacy-pic","width":"100","height":"100","pic_url":"https://example.com/legacy.jpg"}}""",
+        )
+        assertEquals("legacy-pic", result.resolvedPicId)
+        assertEquals("https://example.com/legacy.jpg", result.resolvedPicInfo!!.bigPic.picUrl)
+    }
+
+    @Test
     fun uploadPictureAcceptsSnakeAndCamelCaseResponseFields() {
         val snake = Gson().fromJson(
             """{"error_code":"0","error_msg":"ok","chunk_no":"1","pic_id":"p1","pic_info":{"origin_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/o"},"big_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/b"},"small_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/s"}}}""",

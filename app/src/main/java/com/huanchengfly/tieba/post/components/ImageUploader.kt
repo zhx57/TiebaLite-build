@@ -160,7 +160,7 @@ class ImageUploader(
                 body.byteStream().use { input -> file.outputStream().use { output -> input.copyTo(output) } }
             }
             val result = uploadSinglePicture(file.absolutePath, isOriginImage = true)
-            val info = result.picInfo ?: error("上传云表情失败：响应缺少图片地址")
+            val info = result.resolvedPicInfo ?: error("上传云表情失败：响应缺少图片地址")
             val bigUrl = info.bigPic.picUrl.takeIf { it.isNotBlank() }
                 ?: info.originPic.picUrl.takeIf { it.isNotBlank() }
                 ?: error("上传云表情失败：响应缺少原图地址")
@@ -249,7 +249,7 @@ suspend fun uploadChatPhoto(uri: Uri): ChatCloudMeme = withContext(Dispatchers.I
             file.outputStream().use { output -> input.copyTo(output) }
         } ?: error("无法读取相册图片")
         val result = ImageUploader("").uploadSinglePicture(file.absolutePath, isOriginImage = true)
-        val info = result.picInfo ?: error("上传图片失败：响应缺少图片地址")
+        val info = result.resolvedPicInfo ?: error("上传图片失败：响应缺少图片地址")
         val bigUrl = info.bigPic.picUrl.takeIf { it.isNotBlank() }
             ?: info.originPic.picUrl.takeIf { it.isNotBlank() }
             ?: error("上传图片失败：响应缺少大图地址")
@@ -259,7 +259,7 @@ suspend fun uploadChatPhoto(uri: Uri): ChatCloudMeme = withContext(Dispatchers.I
             imageUrl = bigUrl,
             uploadedImageUrl = bigUrl,
             uploadedThumbnailUrl = smallUrl,
-            officialPicId = result.picId?.takeIf { it.isNotBlank() },
+            officialPicId = result.resolvedPicId?.takeIf { it.isNotBlank() },
         )
     } finally {
         file.delete()

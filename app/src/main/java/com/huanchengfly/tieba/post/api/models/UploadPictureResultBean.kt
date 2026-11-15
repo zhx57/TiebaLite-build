@@ -23,8 +23,35 @@ data class UploadPictureResultBean(
     val picId: String? = null,
     @SerialName("pic_info")
     @SerializedName(value = "pic_info", alternate = ["picInfo"])
-    val picInfo: PicInfo? = null
-)
+    val picInfo: PicInfo? = null,
+    @SerialName("info")
+    @SerializedName("info")
+    val info: UploadInfo? = null,
+) {
+    val resolvedPicInfo: PicInfo?
+        get() = picInfo ?: info?.toPicInfo()
+
+    val resolvedPicId: String?
+        get() = picId ?: info?.picId
+}
+
+@Serializable
+data class UploadInfo(
+    @SerialName("pic_id")
+    @SerializedName(value = "pic_id", alternate = ["picId"])
+    val picId: String? = null,
+    val width: String = "",
+    val height: String = "",
+    @SerialName("pic_url")
+    @SerializedName(value = "pic_url", alternate = ["picUrl"])
+    val picUrl: String = "",
+) {
+    fun toPicInfo() = PicInfo(
+        originPic = PicInfoItem(width, height, "", picUrl),
+        bigPic = PicInfoItem(width, height, "", picUrl),
+        smallPic = PicInfoItem(width, height, "", picUrl),
+    )
+}
 
 @Serializable
 data class PicInfo(
