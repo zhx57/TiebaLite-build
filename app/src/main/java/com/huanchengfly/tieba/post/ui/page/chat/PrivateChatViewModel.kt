@@ -288,6 +288,7 @@ class PrivateChatViewModel @Inject constructor() :
                 "账号已切换，已取消发送"
             }
             onPrepared(preparedCloudMeme)
+            val sentAt = System.currentTimeMillis()
             val msgId = client.sendMessage(peerUid, content, preparedCloudMeme)
             val message = ChatWsMessage(
                 msgId = msgId,
@@ -297,7 +298,7 @@ class PrivateChatViewModel @Inject constructor() :
                 peerName = "",
                 peerPortrait = "",
                 content = content,
-                msgTime = System.currentTimeMillis(),
+                msgTime = sentAt,
                 isSelf = true,
                 msgType = if (preparedCloudMeme != null) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
                 images = preparedCloudMeme?.let { listOf(it.sendImageUrl) }.orEmpty(),

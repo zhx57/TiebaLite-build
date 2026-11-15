@@ -517,6 +517,15 @@ class ChatRoomStateTest {
     }
 
     @Test
+    fun stalePrivateFetchResultsCannotEnterAnotherAccountOrConversation() {
+        val current = PrivateChatUiState(accountUid = 99L, peerUid = 8L)
+        val stale = persistentListOf(privateMessage(1L, 7L, 100L, "旧消息"))
+        assertEquals(current, PrivateChatPartialChange.Load.Cached(stale, 42L, 7L).reduce(current))
+        assertEquals(current, PrivateChatPartialChange.Load.Success(stale, 42L, 7L).reduce(current))
+        assertEquals(current, PrivateChatPartialChange.Poll.Success(stale, 42L, 7L).reduce(current))
+    }
+
+    @Test
     fun switchingPrivateAccountOrPeerClearsPreviousTimeline() {
         val old = PrivateChatUiState(messages = persistentListOf(privateMessage(1L, 7L, 100L, "旧消息")),
             accountUid = 42L, peerUid = 7L)
