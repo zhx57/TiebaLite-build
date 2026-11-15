@@ -255,10 +255,11 @@ suspend fun uploadChatPhoto(uri: Uri): ChatCloudMeme = withContext(Dispatchers.I
             ?: error("上传图片失败：响应缺少大图地址")
         val smallUrl = info.smallPic.picUrl.takeIf { it.isNotBlank() } ?: bigUrl
         ChatCloudMeme(
-            id = "local_photo_${uri}",
+            id = "uploaded_photo_${System.currentTimeMillis()}",
             imageUrl = bigUrl,
             uploadedImageUrl = bigUrl,
             uploadedThumbnailUrl = smallUrl,
+            officialPicId = result.picId?.takeIf { it.isNotBlank() },
         )
     } finally {
         file.delete()

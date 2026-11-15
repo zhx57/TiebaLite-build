@@ -83,6 +83,7 @@ data class ChatMessageSemantics(
             businessType == 104 -> ChatMessageKind.AI_INTRODUCTION
             businessType == 1001 || businessType == 1002 -> ChatMessageKind.WEB_CHAT
             transportType == 1 && businessType == null -> ChatMessageKind.TEXT
+            transportType == 81 && (businessType == null || businessType == 0) -> ChatMessageKind.TEXT
             else -> ChatMessageKind.UNKNOWN
         }
 
@@ -97,6 +98,7 @@ data class ChatCloudMeme(
     val imageUrl: String,
     val uploadedImageUrl: String? = null,
     val uploadedThumbnailUrl: String? = null,
+    val officialPicId: String? = null,
 ) {
     init {
         require(id.isNotBlank()) { "云表情 id 不能为空" }

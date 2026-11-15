@@ -1,5 +1,7 @@
 package com.huanchengfly.tieba.post.repository
 
+import com.google.gson.Gson
+import com.huanchengfly.tieba.post.api.models.UploadPictureResultBean
 import com.huanchengfly.tieba.post.api.retrofit.interfaces.OfficialTiebaApi
 import com.huanchengfly.tieba.post.api.retrofit.interceptors.CommonParamInterceptor
 import com.huanchengfly.tieba.post.api.retrofit.interceptors.SortAndSignInterceptor
@@ -19,6 +21,22 @@ class CloudMemeContractTest {
     private val pic = """{"pic_id":"123","pic_url":"https://example.com/full.gif","thumbnail":"https://example.com/thumb.gif"}"""
     private fun response(collected: String = "[]", diy: String = "[]") =
         """{"error_code":"0","data":{"pic_ids":$collected,"diy_pic_ids":$diy}}"""
+
+    @Test
+    fun uploadPictureAcceptsSnakeAndCamelCaseResponseFields() {
+        val snake = Gson().fromJson(
+            """{"error_code":"0","error_msg":"ok","chunk_no":"1","pic_id":"p1","pic_info":{"origin_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/o"},"big_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/b"},"small_pic":{"width":"1","height":"1","type":"gif","pic_url":"https://example.com/s"}}}""",
+            UploadPictureResultBean::class.java,
+        )
+        val camel = Gson().fromJson(
+            """{"errorCode":"0","errorMsg":"ok","chunkNo":"1","picId":"p2","picInfo":{"originPic":{"width":"1","height":"1","type":"gif","picUrl":"https://example.com/o"},"bigPic":{"width":"1","height":"1","type":"gif","picUrl":"https://example.com/b"},"smallPic":{"width":"1","height":"1","type":"gif","picUrl":"https://example.com/s"}}}""",
+            UploadPictureResultBean::class.java,
+        )
+        assertEquals("p1", snake.picId)
+        assertEquals("https://example.com/b", snake.picInfo!!.bigPic.picUrl)
+        assertEquals("p2", camel.picId)
+        assertEquals("https://example.com/s", camel.picInfo!!.smallPic.picUrl)
+    }
 
     @Test
     fun parsesBothListsAndRealEmptyArrays() {

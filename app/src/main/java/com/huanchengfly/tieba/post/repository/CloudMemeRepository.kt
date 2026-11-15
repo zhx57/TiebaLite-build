@@ -275,8 +275,6 @@ internal class CloudMemeCache(
 internal data class CloudMemeState(
     val lists: CloudMemeLists? = null,
     val loading: Boolean = false,
-    val addingId: String? = null,
-    val addedId: String? = null,
     val error: String? = null,
 )
 
@@ -284,7 +282,6 @@ internal data class CloudMemeState(
 internal class CloudMemeSession(
     private val scope: CoroutineScope,
     private val cached: suspend () -> CloudMemeSnapshot? = { null },
-    private val addCollected: (suspend (String) -> CloudMemeLists)? = null,
     private val load: suspend () -> CloudMemeLists,
 ) {
     private val mutableState = MutableStateFlow(CloudMemeState())
@@ -297,32 +294,8 @@ internal class CloudMemeSession(
 
     fun refresh() = request(force = true)
 
-    fun addToCollected(memeId: String) {
-        val operation = addCollected ?: return
-        if (closed || mutableState.value.addingId != null) return
-        val requestGeneration = generation
-        mutableState.value = mutableState.value.copy(addingId = memeId, addedId = null, error = null)
-        job = scope.launch {
-            try {
-                val lists = operation(memeId)
-                if (!closed && generation == requestGeneration) {
-                    mutableState.value = CloudMemeState(lists = lists, addedId = memeId)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                if (!closed && generation == requestGeneration) {
-                    mutableState.value = mutableState.value.copy(
-                        addingId = null,
-                        error = "收藏未确认，请刷新后核对",
-                    )
-                }
-            }
-        }
-    }
-
     private fun request(force: Boolean) {
-        if (closed || state.value.loading || state.value.addingId != null) return
+        if (closed || state.value.loading) return
         val requestGeneration = ++generation
         mutableState.value = state.value.copy(loading = true, error = null)
         job = scope.launch {

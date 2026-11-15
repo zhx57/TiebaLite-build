@@ -316,6 +316,7 @@ object ChatApi {
                     messageKind == ChatMessageKind.SYSTEM_EVENT -> "系统消息"
                     messageKind == ChatMessageKind.DELETE_EVENT -> "消息已删除"
                     messageKind == ChatMessageKind.EMOTION_REACTION -> "表情回应"
+                    messageKind == ChatMessageKind.TEXT -> "文本消息"
                     else -> "[暂未支持的消息类型 ${businessType ?: transportType}]"
                 }
             },

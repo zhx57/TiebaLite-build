@@ -4,7 +4,6 @@ import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -36,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.accompanist.drawablepainter.rememberDrawablePainter
 import com.huanchengfly.tieba.post.R
+import com.huanchengfly.tieba.post.components.uploadChatPhoto
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.repository.CloudMemeRepository
 import com.huanchengfly.tieba.post.repository.CloudMemeSession
@@ -43,9 +43,12 @@ import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.utils.AccountUtil.LocalAccount
 import com.huanchengfly.tieba.post.utils.Emoticon
 import com.huanchengfly.tieba.post.utils.EmoticonManager
+import com.huanchengfly.tieba.post.utils.PickMediasRequest
+import com.huanchengfly.tieba.post.utils.registerPickMediasLauncher
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 /** 基础表情插入输入框，云表情由聊天页通过图片消息发送。 */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun EmoticonPickerPanel(
     modifier: Modifier = Modifier,
@@ -60,6 +63,24 @@ fun EmoticonPickerPanel(
     val account = LocalAccount.current
     val uid = account?.uid.orEmpty()
     val bduss = account?.bduss.orEmpty()
+    val scope = rememberCoroutineScope()
+    val uploadLauncher = registerPickMediasLauncher { result ->
+        result.uris.firstOrNull()?.let { uri ->
+            scope.launch {
+                try {
+                    val meme = uploadChatPhoto(uri)
+                    val cache = CloudMemeRepository.cache(context.applicationContext.filesDir)
+                    val picId = meme.officialPicId ?: error("上传响应缺少官方 pic_id")
+                    cache.addCollected(uid, bduss, picId)
+                    Toast.makeText(context, "已上传并加入云收藏", Toast.LENGTH_SHORT).show()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    Toast.makeText(context, error.message ?: "上传收藏失败", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     Column(modifier = modifier) {
         Row(modifier = Modifier.fillMaxWidth()) {
@@ -77,7 +98,6 @@ fun EmoticonPickerPanel(
                     scope = scope,
                     cached = { cache.cached(uid) },
                     load = { cache.load(uid, bduss, force = true) },
-                    addCollected = { memeId -> cache.addCollected(uid, bduss, memeId) },
                 )
             }
             DisposableEffect(session) { onDispose { session.close() } }
@@ -117,15 +137,21 @@ fun EmoticonPickerPanel(
                 ) {
                     Text(
                         text = when {
-                            state.addingId != null -> "正在同步收藏…"
-                            state.addedId != null -> "已确认加入云收藏，长按表情可再次核对"
-                            onCloudMemeClick != null -> "点击发送，长按普通云表情加入收藏"
+                            onCloudMemeClick != null -> "点击表情发送；上传并收藏请点击右侧按钮"
                             else -> "当前会话暂不支持云表情发送"
                         },
                         color = ExtendedTheme.colors.textSecondary,
                         fontSize = 12.sp,
                         modifier = Modifier.weight(1f),
                     )
+                    if (category == 1) {
+                        TextButton(
+                            onClick = { uploadLauncher.launch(PickMediasRequest(maxItems = 1, mediaType = PickMediasRequest.ImageOnly)) },
+                            enabled = true,
+                        ) {
+                            Text("上传并收藏", color = ExtendedTheme.colors.primary)
+                        }
+                    }
                     TextButton(onClick = session::refresh, enabled = !state.loading) {
                         Text(if (state.loading) "加载中…" else "刷新", color = ExtendedTheme.colors.primary)
                     }
@@ -155,22 +181,14 @@ fun EmoticonPickerPanel(
                             skipNetworkCheck = true,
                             modifier = Modifier.aspectRatio(1f).padding(8.dp)
                                 .background(ExtendedTheme.colors.background)
-                                .combinedClickable(
-                                    enabled = onCloudMemeClick != null ||
-                                        (category == 1 && uid.isNotBlank() && bduss.isNotBlank()),
-                                    onClick = {
-                                        val selected = runCatching { ChatCloudMeme(meme.id, meme.imageUrl) }.getOrNull()
-                                        if (selected == null) {
-                                            Toast.makeText(context, "此表情缺少有效原图地址，请刷新后重试", Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            onCloudMemeClick?.invoke(selected)
-                                        }
-                                    },
-                                    onLongClick = if (category == 2) null else {
-                                        { session.addToCollected(meme.id) }
-                                    },
-                                    onLongClickLabel = if (category == 2) null else "加入云收藏",
-                                ),
+                                .clickable(enabled = onCloudMemeClick != null) {
+                                    val selected = runCatching { ChatCloudMeme(meme.id, meme.imageUrl) }.getOrNull()
+                                    if (selected == null) {
+                                        Toast.makeText(context, "此表情缺少有效原图地址，请刷新后重试", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        onCloudMemeClick?.invoke(selected)
+                                    }
+                                },
                         )
                     }
                 }

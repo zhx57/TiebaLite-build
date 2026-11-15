@@ -46,6 +46,22 @@ class ChatRoomStateTest {
     }
 
     @Test
+    fun transportType81WithNoBusinessTypeIsReadableText() {
+        val message = ChatApi.parseMessage(
+            JSONObject().apply {
+                put("msgid", 9)
+                put("type", 81)
+                put("from_user", 7)
+                put("content", "{\"text\":{\"content_type\":0,\"content_body\":{\"text\":\"分享正文\"}}}")
+            },
+            null,
+        )!!
+        assertEquals(ChatMessageKind.TEXT, message.semantics.kind)
+        assertEquals("分享正文", message.text)
+        assertFalse(message.text.contains("暂未支持"))
+    }
+
+    @Test
     fun groupParserKeepsTransportTypeAndBusinessTypeSeparate() {
         val message = ChatApi.parseMessage(
             JSONObject().apply {
