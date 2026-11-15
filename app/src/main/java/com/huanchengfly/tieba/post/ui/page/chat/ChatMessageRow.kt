@@ -289,7 +289,9 @@ private fun ChatMessageImages(
                     if (it.width > 0 && it.height > 0) it.width.toFloat() / it.height else 1f
                 } ?: 1f
                 androidx.compose.foundation.layout.BoxWithConstraints {
-                    val imageWidth = minOf(maxWidth, if (single) 240.dp else 144.dp, 320.dp * ratio)
+                    val imageWidth = minOf(maxWidth, if (single) 240.dp else 144.dp,
+                        (320.dp * ratio).coerceAtLeast(44.dp))
+                    val imageHeight = (imageWidth / ratio).coerceIn(44.dp, 320.dp)
                     var shouldLoad by remember(url) {
                         androidx.compose.runtime.mutableStateOf(
                             com.huanchengfly.tieba.post.ui.widgets.compose.shouldLoadImage(context, false)
@@ -309,7 +311,7 @@ private fun ChatMessageImages(
                         state = state,
                         contentDescription = stringResource(id = R.string.desc_image),
                         contentScale = ContentScale.Fit,
-                        modifier = Modifier.sizeIn(minWidth = 44.dp, minHeight = 44.dp).width(imageWidth).aspectRatio(ratio)
+                        modifier = Modifier.size(width = imageWidth, height = imageHeight)
                             .clip(RoundedCornerShape(radius))
                             .clickable {
                                 if (!shouldLoad) shouldLoad = true
