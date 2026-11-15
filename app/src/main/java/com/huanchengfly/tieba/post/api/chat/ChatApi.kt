@@ -449,7 +449,8 @@ object ChatApi {
             .mapNotNull { findVoiceUrlInNode(it) }
             .firstOrNull()
             ?.let { return it }
-        val md5 = findVoiceMd5(textObj, content) ?: return null
+        val md5 = listOfNotNull(findVoiceMd5(textObj), findVoiceMd5(content)).firstOrNull()
+            ?: return null
         return voiceUrlOf(md5)
     }
 
