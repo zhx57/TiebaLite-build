@@ -49,6 +49,8 @@ class ChatWebSocketClient {
     private val reqIdGen = AtomicInteger((System.currentTimeMillis() / 1000).toInt())
 
     private val connectMutex = Mutex()
+    private val privateFetchMutex = Mutex()
+    private var connectedCookie: String? = null
 
     @Volatile
     private var webSocket: RawWebSocket? = null
@@ -83,8 +85,12 @@ class ChatWebSocketClient {
      */
     suspend fun connect(cookie: String) = withContext(Dispatchers.IO) {
         connectMutex.withLock {
-            if (connected) return@withLock
+            if (connected && connectedCookie == cookie) return@withLock
             close()
+            selfUid = 0L
+            privateGroupId = 0L
+            privateFetchedMsgId = 0L
+            groupMsgIds.clear()
             // 使用原始 Socket 实现的 WebSocket：
             // 贴吧服务端要求 Sec-WebSocket-Extensions 为 im_version=2.3 且不支持
             // permessage-deflate，OkHttp 无法满足这两点，会在握手后被服务端断开。
@@ -113,6 +119,7 @@ class ChatWebSocketClient {
             try {
                 socket.connect()
                 handshake()
+                connectedCookie = cookie
                 connected = true
             } catch (e: Throwable) {
                 if (webSocket === socket) {
@@ -183,7 +190,10 @@ class ChatWebSocketClient {
      * @param fromStart 为 true 时游标置 0，用于首次进入拉取历史；
      *                  握手返回的 lastMsgId 已是最新一条，直接用它只会拉到空列表。
      */
-    suspend fun fetchPrivateMessages(fromStart: Boolean = false): List<ChatWsMessage> {
+    suspend fun fetchPrivateMessages(fromStart: Boolean = false): List<ChatWsMessage> =
+        privateFetchMutex.withLock { fetchPrivateMessagesUnlocked(fromStart) }
+
+    private suspend fun fetchPrivateMessagesUnlocked(fromStart: Boolean): List<ChatWsMessage> {
         if (privateGroupId == 0L) return emptyList()
         val lastMsgId = if (fromStart) 0L else (groupMsgIds[privateGroupId] ?: 0L)
         val result = fetchPrivateMessages(privateGroupId, lastMsgId)
@@ -197,7 +207,10 @@ class ChatWebSocketClient {
      * 只请求一次 lastMsgId=0 拿到的是很久以前的消息，会话列表里看不到最近联系人。
      * 这里逐批推进游标，最多 [maxPages] 批，兼顾完整性与耗时。
      */
-    suspend fun fetchPrivateHistory(maxPages: Int = 10): List<ChatWsMessage> {
+    suspend fun fetchPrivateHistory(maxPages: Int = 10): List<ChatWsMessage> =
+        privateFetchMutex.withLock { fetchPrivateHistoryUnlocked(maxPages) }
+
+    private suspend fun fetchPrivateHistoryUnlocked(maxPages: Int): List<ChatWsMessage> {
         if (privateGroupId == 0L) return emptyList()
         val target = groupMsgIds[privateGroupId] ?: 0L
         val merged = LinkedHashMap<Long, ChatWsMessage>()
@@ -225,11 +238,11 @@ class ChatWebSocketClient {
      * 与 [fetchPrivateMessages] 不同，这里不回退历史，只返回 [cursor] 之后的新消息；
      * cursor 为 0 时调用方应先通过 [privateLastMsgId] 取当前最新游标建基线。
      */
-    suspend fun fetchPrivateMessagesSince(cursor: Long): List<ChatWsMessage> {
-        if (privateGroupId == 0L) return emptyList()
-        privateFetchedMsgId = cursor
-        return fetchPrivateMessages(privateGroupId, cursor)
-    }
+    suspend fun fetchPrivateMessagesSince(cursor: Long): List<ChatWsMessage> =
+        privateFetchMutex.withLock {
+            if (privateGroupId == 0L) return@withLock emptyList()
+            fetchPrivateMessages(privateGroupId, cursor)
+        }
 
     /** 最近一次拉取实际消费到的游标，不使用握手或推送的最新位置跳过积压。 */
     var privateFetchedMsgId: Long = 0L
@@ -267,12 +280,11 @@ class ChatWebSocketClient {
             throw IllegalStateException("fetch messages failed: $errCode ${response.error?.error_msg}")
         }
         val result = mutableListOf<ChatWsMessage>()
-        response.data_?.groupInfo.orEmpty().forEach { group ->
+        var consumedCursor = lastMsgId
+        response.data_?.groupInfo.orEmpty().filter { it.groupInfo?.groupId == groupId }.forEach { group ->
             group.msgList.orEmpty().forEach { msg ->
                 val msgId = msg.msgId ?: 0L
-                if (groupId == privateGroupId && msgId > privateFetchedMsgId) {
-                    privateFetchedMsgId = msgId
-                }
+                consumedCursor = maxOf(consumedCursor, msgId)
                 val fromUid = msg.userInfo?.userId ?: 0L
                 val msgType = msg.msgType ?: 0
                 // 已读回执不是聊天内容。
@@ -289,6 +301,8 @@ class ChatWebSocketClient {
                     images = parsed.images,
                     msgTime = (msg.createTime ?: 0) * 1000L,
                     isSelf = fromUid == selfUid,
+                    conversationUid = if (fromUid != selfUid) fromUid else 0L,
+                    senderUid = fromUid,
                     semantics = parsed.semantics,
                 )
                 if (msgId > (groupMsgIds[groupId] ?: 0L)) {
@@ -296,6 +310,7 @@ class ChatWebSocketClient {
                 }
             }
         }
+        privateFetchedMsgId = consumedCursor
         return result
     }
 
@@ -338,8 +353,15 @@ class ChatWebSocketClient {
             node != null -> extractPrivateText(node)
             else -> trimmed
         }.take(4096)
+        val summary = when (kind) {
+            ChatMessageKind.IMAGE -> "图片消息"
+            ChatMessageKind.VOICE -> "语音消息"
+            ChatMessageKind.LARGE_EMOTICON -> "表情消息"
+            ChatMessageKind.UNKNOWN -> "[暂未支持的私信类型 $msgType]"
+            else -> "聊天消息"
+        }
         return ParsedPrivateContent(
-            text = text.ifBlank { if (kind == ChatMessageKind.UNKNOWN) "[暂未支持的私信类型 $msgType]" else kind.name },
+            text = if (images.isNotEmpty()) "" else text.ifBlank { summary },
             images = images,
             semantics = ChatMessageSemantics(
                 kind = kind,
@@ -347,7 +369,7 @@ class ChatWebSocketClient {
                 transportType = msgType,
                 businessType = businessType,
                 targetId = targetId,
-                summary = text.ifBlank { kind.name },
+                summary = text.ifBlank { summary },
                 rawPayload = ChatMessageSemantics.limitedRawPayload(raw),
             ),
         )
@@ -381,8 +403,10 @@ class ChatWebSocketClient {
     /**
      * 发送私信。
      */
+    private val outgoingRecordId = java.util.concurrent.atomic.AtomicLong(0L)
+
     suspend fun sendMessage(toUid: Long, content: String, cloudMeme: ChatCloudMeme? = null): Long {
-        val recordId = System.currentTimeMillis()
+        val recordId = outgoingRecordId.updateAndGet { previous -> maxOf(previous + 1L, System.currentTimeMillis()) }
         val request = buildPrivateMessageRequest(toUid, content, recordId, cloudMeme)
         val payload = sendRaw(
             data = request.encode(),
@@ -490,6 +514,8 @@ class ChatWebSocketClient {
             val data = pusherMsg.data_ ?: return@forEach
             val groupId = data.groupId ?: 0L
             if (groupId != 0L) {
+                val notifiedMsgId = data.msgId ?: 0L
+                groupMsgIds.compute(groupId) { _, current -> maxOf(current ?: 0L, notifiedMsgId) }
                 onPushNotify?.invoke(groupId)
             }
         }
@@ -553,5 +579,23 @@ data class ChatWsMessage(
     val msgType: Int = 0,
     val images: List<String> = emptyList(),
     val cloudMeme: ChatCloudMeme? = null,
+    val localPhotoUri: String? = null,
     val semantics: ChatMessageSemantics = ChatMessageSemantics(),
-)
+    /** 已确认的对端；服务端 self 消息缺少收件人时为 0。 */
+    val conversationUid: Long = 0L,
+    /** 实际发送者，与会话对端分开保存。 */
+    val senderUid: Long = 0L,
+    val deliveryConfirmed: Boolean = !isLocal && semantics.protocolSource != "local_outgoing",
+) {
+    val localPendingId: Long? get() = msgId.takeIf { isLocal && it < 0L }
+    val serverMsgId: Long? get() = msgId.takeIf { !isLocal && it > 0L }
+    val transportAccepted: Boolean get() = serverMsgId != null
+}
+
+internal fun ChatWsMessage.privateConversationUid(selfUid: Long = 0L): Long = when {
+    conversationUid > 0L && conversationUid != selfUid -> conversationUid
+    !isSelf && peerUid > 0L && peerUid != selfUid -> peerUid
+    isSelf && (isLocal || semantics.protocolSource == "local_outgoing") &&
+        peerUid > 0L && peerUid != selfUid -> peerUid
+    else -> 0L
+}

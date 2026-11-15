@@ -1,5 +1,6 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
+import android.net.Uri
 import android.util.Log
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
@@ -16,6 +17,8 @@ import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
 import com.huanchengfly.tieba.post.components.ImageUploader
+import com.huanchengfly.tieba.post.components.uploadChatPhoto
+import kotlinx.coroutines.CancellationException
 import com.huanchengfly.tieba.post.arch.BaseViewModel
 import com.huanchengfly.tieba.post.arch.CommonUiEvent
 import com.huanchengfly.tieba.post.arch.PartialChange
@@ -132,6 +135,7 @@ class ChatRoomViewModel @Inject constructor() :
                     .toImmutableList()
                 emit(ChatRoomPartialChange.Load.Success(messages))
             }.catch<ChatRoomPartialChange.Load> {
+                if (it is CancellationException) throw it
                 emit(ChatRoomPartialChange.Load.Failure(it))
             }
 
@@ -141,6 +145,7 @@ class ChatRoomViewModel @Inject constructor() :
                 val latest = ChatApi.getChatRoomMessages(roomId)
                 emit(ChatRoomPartialChange.Poll.Success(latest.toImmutableList()))
             }.catch<ChatRoomPartialChange.Poll> {
+                if (it is CancellationException) throw it
                 // 轮询失败不该打断用户，但需要留下日志便于排查
                 Log.w("ChatRoom", "poll messages failed", it)
                 emit(ChatRoomPartialChange.Poll.Failure)
@@ -155,6 +160,7 @@ class ChatRoomViewModel @Inject constructor() :
                     .toImmutableList()
                 emit(ChatRoomPartialChange.LoadMore.Success(older))
             }.catch<ChatRoomPartialChange.LoadMore> {
+                if (it is CancellationException) throw it
                 emit(ChatRoomPartialChange.LoadMore.Failure(it))
             }
 
@@ -162,13 +168,16 @@ class ChatRoomViewModel @Inject constructor() :
             flow<ChatRoomPartialChange.Robots> {
                 emit(ChatRoomPartialChange.Robots.Start)
                 emit(ChatRoomPartialChange.Robots.Success(ChatApi.getChatRoomRobots(roomId).toImmutableList()))
-            }.catch { emit(ChatRoomPartialChange.Robots.Failure(it.getErrorMessage())) }
+            }.catch {
+                if (it is CancellationException) throw it
+                emit(ChatRoomPartialChange.Robots.Failure(it.getErrorMessage()))
+            }
 
         private fun ChatRoomUiIntent.Send.producePartialChange(): Flow<ChatRoomPartialChange.Send> {
             val pendingId = newPendingId()
             val session = sender()
-            return flow {
-                emit(
+            return channelFlow<ChatRoomPartialChange.Send> {
+                send(
                     ChatRoomPartialChange.Send.Start(
                         pendingId = pendingId,
                         text = text,
@@ -178,10 +187,13 @@ class ChatRoomViewModel @Inject constructor() :
                         mentions = mentions,
                         robotSkill = robotSkill,
                         cloudMeme = cloudMeme,
+                        localPhotoUri = photoUri?.toString(),
                     )
                 )
-                val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
-                emit(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
+                val preparedCloudMeme = cloudMeme?.takeIf { it.uploadedImageUrl != null }
+                    ?: photoUri?.let { uploadChatPhoto(it) }
+                    ?: cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+                send(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
                 session.sendChatRoomMessage(
                     chatroomId = roomId,
                     text = text,
@@ -194,16 +206,20 @@ class ChatRoomViewModel @Inject constructor() :
                     mentions = mentions,
                     robotSkill = robotSkill,
                     cloudMeme = preparedCloudMeme,
+                    onTransmitting = { send(ChatRoomPartialChange.Send.Transmitting(pendingId)) },
                 )
-                emit(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
-            }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
+                send(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
+            }.catch {
+                if (it is CancellationException) throw it
+                emit(ChatRoomPartialChange.Send.Failure(pendingId, it))
+            }
         }
 
         private fun ChatRoomUiIntent.Resend.producePartialChange(): Flow<ChatRoomPartialChange.Send> {
             val pendingId = newPendingId()
             val session = sender()
-            return flow {
-                emit(
+            return channelFlow<ChatRoomPartialChange.Send> {
+                send(
                     ChatRoomPartialChange.Send.Start(
                         pendingId = pendingId,
                         text = text,
@@ -213,11 +229,14 @@ class ChatRoomViewModel @Inject constructor() :
                         mentions = mentions,
                         robotSkill = robotSkill,
                         cloudMeme = cloudMeme,
+                        localPhotoUri = photoUri?.toString(),
                         removeMsgId = failedMsgId,
                     )
                 )
-                val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
-                emit(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
+                val preparedCloudMeme = cloudMeme?.takeIf { it.uploadedImageUrl != null }
+                    ?: photoUri?.let { uploadChatPhoto(it) }
+                    ?: cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+                send(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
                 session.sendChatRoomMessage(
                     chatroomId = roomId,
                     text = text,
@@ -230,9 +249,13 @@ class ChatRoomViewModel @Inject constructor() :
                     mentions = mentions,
                     robotSkill = robotSkill,
                     cloudMeme = preparedCloudMeme,
+                    onTransmitting = { send(ChatRoomPartialChange.Send.Transmitting(pendingId)) },
                 )
-                emit(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
-            }.catch { emit(ChatRoomPartialChange.Send.Failure(pendingId, it)) }
+                send(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
+            }.catch {
+                if (it is CancellationException) throw it
+                emit(ChatRoomPartialChange.Send.Failure(pendingId, it))
+            }
         }
     }
 }
@@ -275,6 +298,7 @@ sealed interface ChatRoomUiIntent : UiIntent {
         val mentions: List<ChatMention> = emptyList(),
         val robotSkill: Int? = null,
         val cloudMeme: ChatCloudMeme? = null,
+        val photoUri: Uri? = null,
     ) : ChatRoomUiIntent
 
     data class Resend(
@@ -291,6 +315,7 @@ sealed interface ChatRoomUiIntent : UiIntent {
         val mentions: List<ChatMention> = emptyList(),
         val robotSkill: Int? = null,
         val cloudMeme: ChatCloudMeme? = null,
+        val photoUri: Uri? = null,
     ) : ChatRoomUiIntent
 }
 
@@ -302,7 +327,8 @@ internal fun mergeServerMessages(
     val merged = current.toMutableList()
     val reserved = current.mapNotNullTo(HashSet()) { it.echoForPendingId }
     val locals = current.filter {
-        it.isLocal && (it.sendState != SendState.FAILED || it.transportAccepted) && it.msgId !in reserved
+        it.isLocal && it.transmissionStarted &&
+            (it.sendState != SendState.FAILED || it.transportAccepted) && it.msgId !in reserved
     }.toMutableList()
     fun comparableImage(url: String): String = url.toHttpUrlOrNull()?.let {
         val port = if (it.port == (if (it.scheme == "https") 443 else 80)) "" else ":${it.port}"
@@ -314,14 +340,13 @@ internal fun mergeServerMessages(
         val existingIndex = merged.indexOfFirst { it.msgId == server.msgId && !it.isLocal }
         val existing = existingIndex.takeIf { it >= 0 }?.let { merged[it] }
         val candidate = if (server.isSelf && existing?.echoForPendingId == null) locals.firstOrNull { local ->
-            local.text == server.text && local.contentType == server.contentType &&
+            server.msgId !in local.knownServerIdsAtSend &&
+                local.text == server.text && local.contentType == server.contentType &&
                 local.images.map(::comparableImage) == server.images.map(::comparableImage) &&
                 local.robotSkill == server.robotSkill &&
                 local.mentions.map { it.baiduUk } == server.mentions.map { it.baiduUk } &&
-                (existing != null || (
-                    server.msgTime >= local.msgTime - 5_000L &&
-                        server.msgTime <= local.msgTime + 120_000L
-                ))
+                server.msgTime >= local.msgTime - 5_000L &&
+                    server.msgTime <= local.msgTime + 120_000L
         } else null
         if (candidate != null) {
             locals.remove(candidate)
@@ -420,12 +445,24 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
     sealed class Send : ChatRoomPartialChange {
         override fun reduce(oldState: ChatRoomUiState): ChatRoomUiState =
             when (this) {
-                is Prepared -> oldState.copy(messages = oldState.messages.map {
-                    if (it.msgId == pendingId) it.copy(
-                        images = preparedCloudMeme?.let { meme -> listOf(meme.sendImageUrl) } ?: it.images,
-                        cloudMeme = preparedCloudMeme ?: it.cloudMeme,
-                    ) else it
+                is Transmitting -> oldState.copy(messages = oldState.messages.map { message ->
+                    if (message.msgId == pendingId) message.copy(
+                        transmissionStarted = true,
+                        msgTime = System.currentTimeMillis(),
+                        knownServerIdsAtSend = oldState.messages.filterNot { it.isLocal }
+                            .mapTo(HashSet()) { it.msgId },
+                    ) else message
                 }.toImmutableList())
+
+                is Prepared -> {
+                    val prepared = oldState.messages.map {
+                        if (it.msgId == pendingId) it.copy(
+                            images = preparedCloudMeme?.let { meme -> listOf(meme.sendImageUrl) } ?: it.images,
+                            cloudMeme = preparedCloudMeme ?: it.cloudMeme,
+                        ) else it
+                    }.toImmutableList()
+                    oldState.copy(messages = mergeServerMessages(prepared, prepared.filterNot { it.isLocal }))
+                }
 
                 is Start -> {
                     val base = oldState.messages.filterNot { it.msgId == removeMsgId }
@@ -435,22 +472,26 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                             senderUid = selfUid,
                             senderName = selfName,
                             senderPortrait = selfPortrait,
-                            contentType = if (cloudMeme == null) 0 else 1,
+                            contentType = if (cloudMeme == null && localPhotoUri == null) 0 else 1,
                             text = text,
-                            images = cloudMeme?.let { listOf(it.sendImageUrl) }.orEmpty(),
+                            images = cloudMeme?.let { listOf(it.sendImageUrl) }
+                                ?: localPhotoUri?.let { listOf(it) }.orEmpty(),
                             msgTime = System.currentTimeMillis(),
                             isSelf = true,
                             sendState = SendState.SENDING,
                             isLocal = true,
+                            localPhotoUri = localPhotoUri,
+                            knownServerIdsAtSend = base.filterNot { it.isLocal }.mapTo(HashSet()) { it.msgId },
+                            transmissionStarted = false,
                             mentions = mentions,
                             robotSkill = robotSkill,
                             cloudMeme = cloudMeme,
                             semantics = ChatMessageSemantics(
-                                kind = if (cloudMeme == null) ChatMessageKind.TEXT else ChatMessageKind.IMAGE,
+                                kind = if (cloudMeme == null && localPhotoUri == null) ChatMessageKind.TEXT else ChatMessageKind.IMAGE,
                                 protocolSource = "local_outgoing",
-                                transportType = if (cloudMeme == null) 0 else 1,
-                                businessType = if (cloudMeme == null) 1 else 2,
-                                summary = if (cloudMeme == null) text else "图片消息",
+                                transportType = if (cloudMeme == null && localPhotoUri == null) 0 else 1,
+                                businessType = if (cloudMeme == null && localPhotoUri == null) 1 else 2,
+                                summary = if (cloudMeme == null && localPhotoUri == null) text else "图片消息",
                             ),
                         )).toImmutableList(),
                         sendRequestId = oldState.sendRequestId + 1,
@@ -459,17 +500,19 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
 
                 is Success -> {
                     val echo = oldState.messages.firstOrNull { it.echoForPendingId == pendingId }
-                    oldState.copy(messages = oldState.messages.mapNotNull {
+                    val accepted = oldState.messages.mapNotNull {
                         when {
                             it.msgId == pendingId && echo != null -> null
                             it.msgId == pendingId -> it.copy(
                                 transportAccepted = true,
+                                transmissionStarted = true,
                                 images = preparedCloudMeme?.let { meme -> listOf(meme.sendImageUrl) } ?: it.images,
                                 cloudMeme = preparedCloudMeme ?: it.cloudMeme,
                             )
                             else -> it
                         }
-                    }.toImmutableList())
+                    }.toImmutableList()
+                    oldState.copy(messages = mergeServerMessages(accepted, accepted.filterNot { it.isLocal }))
                 }
 
                 is Unconfirmed -> oldState.copy(messages = oldState.messages.map {
@@ -490,6 +533,8 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                 }
             }
 
+        data class Transmitting(val pendingId: Long) : Send()
+
         data class Prepared(
             val pendingId: Long,
             val preparedCloudMeme: ChatCloudMeme?,
@@ -505,6 +550,7 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
             val mentions: List<ChatMention> = emptyList(),
             val robotSkill: Int? = null,
             val cloudMeme: ChatCloudMeme? = null,
+            val localPhotoUri: String? = null,
         ) : Send()
 
         data class Success(

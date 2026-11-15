@@ -24,7 +24,34 @@ import org.json.JSONObject
 object PrivateChatCache {
 
     private const val PREF_NAME = "private_chat_cache"
-    private const val CACHE_VERSION = 2
+    private const val CACHE_VERSION = 3
+    private val accountMessages = java.util.concurrent.ConcurrentHashMap<Long, MutableStateFlow<List<ChatWsMessage>>>()
+
+    @Synchronized
+    fun observe(selfUid: Long) = accountMessages.getOrPut(selfUid) {
+        MutableStateFlow(loadAll(selfUid))
+    }.asStateFlow()
+
+    @Synchronized
+    fun saveIncoming(selfUid: Long, messages: List<ChatWsMessage>, consumedCursor: Long? = null) {
+        if (selfUid <= 0L) return
+        val known = loadAll(selfUid).associateBy { it.msgId }
+        messages.mapNotNull { message ->
+            val peerUid = message.privateConversationUid(selfUid).takeIf { it > 0L }
+                ?: known[message.msgId]?.privateConversationUid(selfUid)?.takeIf { it > 0L }
+                ?: return@mapNotNull null
+            message.copy(conversationUid = peerUid)
+        }.groupBy { it.conversationUid }.forEach { (peerUid, batch) ->
+            save(selfUid, peerUid, batch)
+        }
+        consumedCursor?.takeIf { it > syncCursor(selfUid) }?.let {
+            prefs.edit().putLong("cursor_$selfUid", it).apply()
+        }
+    }
+
+    fun syncCursor(selfUid: Long): Long =
+        if (selfUid > 0L) prefs.getLong("cursor_$selfUid", 0L) else 0L
+
     private const val MAX_MESSAGES = 200
     private val revision = MutableStateFlow(0L)
     val changes = revision.asStateFlow()
@@ -47,13 +74,22 @@ object PrivateChatCache {
      * 读取某个会话的缓存消息，按时间正序。
      */
     fun load(selfUid: Long, peerUid: Long): List<ChatWsMessage> {
+        if (selfUid <= 0L || peerUid <= 0L || selfUid == peerUid) return emptyList()
         val raw = prefs.getString(key(selfUid, peerUid), null) ?: return emptyList()
-        return runCatching {
+        val messages = runCatching {
             val root = JSONObject(raw)
             root.optJSONArray("messages")
         }.getOrNull()?.let(::readMessages) ?: runCatching {
             readMessages(JSONArray(raw))
         }.getOrDefault(emptyList())
+        return messages.filter { it.conversationUid == 0L || it.conversationUid == peerUid }
+            .map { message ->
+                message.copy(
+                    conversationUid = peerUid,
+                    senderUid = message.senderUid.takeIf { it > 0L }
+                        ?: if (message.isSelf) selfUid else message.peerUid,
+                )
+            }.sortedBy { it.msgTime }
     }
 
     private fun readMessages(array: JSONArray): List<ChatWsMessage> = buildList {
@@ -89,6 +125,9 @@ object PrivateChatCache {
                     content = item.optString("content"),
                     msgTime = item.optLong("msgTime"),
                     isSelf = item.optBoolean("isSelf"),
+                    deliveryConfirmed = item.optBoolean("deliveryConfirmed", semantics.protocolSource != "local_outgoing"),
+                    conversationUid = item.optLong("conversationUid"),
+                    senderUid = item.optLong("senderUid"),
                     msgType = msgType,
                     images = item.optJSONArray("images")?.let { images ->
                         (0 until images.length()).mapNotNull {
@@ -102,6 +141,7 @@ object PrivateChatCache {
                                 imageUrl = meme.optString("imageUrl"),
                                 uploadedImageUrl = meme.optString("uploadedImageUrl").takeIf { it.isNotBlank() },
                                 uploadedThumbnailUrl = meme.optString("uploadedThumbnailUrl").takeIf { it.isNotBlank() },
+                                officialPicId = meme.optString("officialPicId").takeIf { it.isNotBlank() },
                             )
                         }.getOrNull()
                     },
@@ -116,22 +156,47 @@ object PrivateChatCache {
      */
     @Synchronized
     fun save(selfUid: Long, peerUid: Long, messages: List<ChatWsMessage>) {
-        if (selfUid == 0L) return
-        val trimmed = (load(selfUid, peerUid) + messages)
-            .associateBy { it.msgId }
-            .values
+        if (selfUid <= 0L || peerUid <= 0L || selfUid == peerUid) return
+        val current = load(selfUid, peerUid)
+        val known = current.associateByTo(linkedMapOf()) { it.msgId }
+        messages.forEach { message ->
+            val existing = known[message.msgId]
+            val owner = message.privateConversationUid(selfUid).takeIf { it > 0L }
+                ?: existing?.conversationUid
+            if (owner != peerUid) return@forEach
+            known[message.msgId] = message.copy(
+                conversationUid = peerUid,
+                senderUid = message.senderUid.takeIf { it > 0L }
+                    ?: if (message.isSelf) selfUid else message.peerUid,
+                peerName = message.peerName.ifBlank { existing?.peerName.orEmpty() },
+                peerPortrait = message.peerPortrait.ifBlank { existing?.peerPortrait.orEmpty() },
+                cloudMeme = message.cloudMeme ?: existing?.cloudMeme,
+                deliveryConfirmed = message.deliveryConfirmed || existing?.deliveryConfirmed == true,
+                semantics = if (message.isSelf && existing?.semantics?.protocolSource == "local_outgoing")
+                    existing.semantics else message.semantics,
+            )
+        }
+        val sorted = known.values.sortedBy { it.msgTime }
+        val profileMessages = listOfNotNull(
+            sorted.lastOrNull { !it.isSelf && it.peerName.isNotBlank() },
+            sorted.lastOrNull { !it.isSelf && it.peerPortrait.isNotBlank() },
+        ).distinctBy { it.msgId }
+        val trimmed = (sorted.takeLast(MAX_MESSAGES - profileMessages.size) + profileMessages)
+            .distinctBy { it.msgId }
             .sortedBy { it.msgTime }
-            .takeLast(MAX_MESSAGES)
         val array = JSONArray()
         trimmed.forEach { message ->
             array.put(JSONObject().apply {
                 put("msgId", message.msgId)
                 put("peerUid", message.peerUid)
+                put("conversationUid", message.conversationUid)
+                put("senderUid", message.senderUid)
                 put("peerName", message.peerName)
                 put("peerPortrait", message.peerPortrait)
                 put("content", message.content)
                 put("msgTime", message.msgTime)
                 put("isSelf", message.isSelf)
+                put("deliveryConfirmed", message.deliveryConfirmed)
                 put("msgType", message.msgType)
                 put("images", JSONArray(message.images))
                 put("semantics", JSONObject().apply {
@@ -149,6 +214,7 @@ object PrivateChatCache {
                         put("imageUrl", meme.imageUrl)
                         meme.uploadedImageUrl?.let { put("uploadedImageUrl", it) }
                         meme.uploadedThumbnailUrl?.let { put("uploadedThumbnailUrl", it) }
+                        meme.officialPicId?.let { put("officialPicId", it) }
                     })
                 }
             })
@@ -158,6 +224,7 @@ object PrivateChatCache {
             put("messages", array)
         }
         prefs.edit().putString(key(selfUid, peerUid), root.toString()).apply()
+        accountMessages[selfUid]?.value = loadAll(selfUid)
         revision.update { it + 1 }
     }
 }

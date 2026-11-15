@@ -26,7 +26,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -45,7 +44,6 @@ import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
-import com.huanchengfly.tieba.post.components.uploadChatPhoto
 import com.huanchengfly.tieba.post.utils.PickMediasRequest
 import com.huanchengfly.tieba.post.utils.registerPickMediasLauncher
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
@@ -66,8 +64,6 @@ import com.huanchengfly.tieba.post.utils.Emoticon
 import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.collections.immutable.persistentListOf
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 
@@ -134,31 +130,21 @@ fun ChatRoomPage(
         prop1 = ChatRoomUiState::sendRequestId, initial = 0L,
     )
     val account = LocalAccount.current
-    val coroutineScope = rememberCoroutineScope()
     val photoLauncher = registerPickMediasLauncher { result ->
         val uri = result.uris.firstOrNull()
         val acc = account
         if (uri != null && acc != null) {
-            coroutineScope.launch {
-                try {
-                    val cloudMeme = uploadChatPhoto(uri)
-                    viewModel.send(ChatRoomUiIntent.Send(
-                        roomId = roomId,
-                        text = "",
-                        forumId = fid,
-                        bduss = acc.bduss,
-                        selfName = acc.nameShow ?: acc.name,
-                        selfPortrait = acc.portrait,
-                        selfUid = acc.uid.toLongOrNull() ?: 0L,
-                        cuidGalaxy2 = CuidUtils.getNewCuid(),
-                        cloudMeme = cloudMeme,
-                    ))
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    Toast.makeText(context, error.message ?: "图片上传失败", Toast.LENGTH_SHORT).show()
-                }
-            }
+            viewModel.send(ChatRoomUiIntent.Send(
+                roomId = roomId,
+                text = "",
+                forumId = fid,
+                bduss = acc.bduss,
+                selfName = acc.nameShow ?: acc.name,
+                selfPortrait = acc.portrait,
+                selfUid = acc.uid.toLongOrNull() ?: 0L,
+                cuidGalaxy2 = CuidUtils.getNewCuid(),
+                photoUri = uri,
+            ))
         }
     }
     var input by rememberSaveable(roomId, stateSaver = TextFieldValue.Saver) {
@@ -269,6 +255,8 @@ fun ChatRoomPage(
                         mentions = target.mentions,
                         robotSkill = target.robotSkill,
                         cloudMeme = target.cloudMeme,
+                        photoUri = target.localPhotoUri?.takeIf { target.cloudMeme?.uploadedImageUrl == null }
+                            ?.let(android.net.Uri::parse),
                     )
                 )
             }
@@ -313,16 +301,20 @@ fun ChatRoomPage(
             topBar = {
                 TitleCentredToolbar(
                     title = {
-                        Text(text = roomName.ifBlank { stringResource(id = R.string.title_chat_rooms) })
+                        Text(text = roomName.ifBlank { stringResource(id = R.string.title_chat_rooms) }, modifier = Modifier.padding(horizontal = 56.dp), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     },
                     navigationIcon = { BackNavigationIcon { navigator.navigateUp() } },
                 )
             },
-            bottomBar = {
+        ) { paddingValues ->
+            ChatTimeline(
+                modifier = Modifier.fillMaxSize().padding(paddingValues),
+                composer = { availableHeight ->
                 if (account != null) {
                     Column {
                         ChatComposer(
                             value = input,
+                            availableHeight = availableHeight,
                             onValueChange = { value ->
                                 val insertedAt = value.composition == null &&
                                     value.text.length > input.text.length &&
@@ -395,13 +387,9 @@ fun ChatRoomPage(
                         )
                     }
                 }
-            },
-        ) { paddingValues ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
+                },
             ) {
+            Box(modifier = Modifier.fillMaxSize()) {
                 MyLazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = ChatListContentPadding,
@@ -468,6 +456,7 @@ fun ChatRoomPage(
                         color = ExtendedTheme.colors.textSecondary,
                     )
                 }
+            }
             }
         }
     }

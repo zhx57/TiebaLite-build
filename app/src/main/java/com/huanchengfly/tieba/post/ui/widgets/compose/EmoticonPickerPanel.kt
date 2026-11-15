@@ -47,6 +47,9 @@ import com.huanchengfly.tieba.post.utils.PickMediasRequest
 import com.huanchengfly.tieba.post.utils.registerPickMediasLauncher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.ensureActive
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.BoxWithConstraints
 
 /** 基础表情插入输入框，云表情由聊天页通过图片消息发送。 */
 @Composable
@@ -64,19 +67,46 @@ fun EmoticonPickerPanel(
     val uid = account?.uid.orEmpty()
     val bduss = account?.bduss.orEmpty()
     val scope = rememberCoroutineScope()
+    var uploadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var pickingUpload by remember { mutableStateOf(false) }
+    var pickerAccount by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val currentAccount by androidx.compose.runtime.rememberUpdatedState(uid to bduss)
+    val collectionVersion = remember(uid, bduss) { mutableStateOf(0) }
+    DisposableEffect(uid, bduss) {
+        onDispose {
+            uploadJob?.cancel()
+            uploadJob = null
+        }
+    }
     val uploadLauncher = registerPickMediasLauncher { result ->
-        result.uris.firstOrNull()?.let { uri ->
-            scope.launch {
+        pickingUpload = false
+        val selectedAccount = pickerAccount
+        pickerAccount = null
+        result.uris.firstOrNull()?.takeIf {
+            selectedAccount == currentAccount && uid.isNotBlank() && bduss.isNotBlank() && uploadJob == null
+        }?.let { uri ->
+            uploadJob = scope.launch {
                 try {
                     val meme = uploadChatPhoto(uri)
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if (currentAccount != selectedAccount) return@launch
                     val cache = CloudMemeRepository.cache(context.applicationContext.filesDir)
                     val picId = meme.officialPicId ?: error("上传响应缺少官方 pic_id")
                     cache.addCollected(uid, bduss, picId)
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if (currentAccount != selectedAccount) return@launch
+                    collectionVersion.value++
                     Toast.makeText(context, "已上传并加入云收藏", Toast.LENGTH_SHORT).show()
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
-                    Toast.makeText(context, error.message ?: "上传收藏失败", Toast.LENGTH_SHORT).show()
+                    if (currentAccount == selectedAccount) {
+                        Toast.makeText(context, error.message ?: "上传收藏失败", Toast.LENGTH_SHORT).show()
+                    }
+                } finally {
+                    if (uploadJob === kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]) {
+                        uploadJob = null
+                    }
                 }
             }
         }
@@ -102,6 +132,13 @@ fun EmoticonPickerPanel(
             }
             DisposableEffect(session) { onDispose { session.close() } }
             val state by session.state.collectAsState()
+            var refreshedCollectionVersion by remember { mutableStateOf(0) }
+            LaunchedEffect(collectionVersion.value, state.loading) {
+                if (collectionVersion.value > refreshedCollectionVersion && !state.loading) {
+                    refreshedCollectionVersion = collectionVersion.value
+                    session.refresh()
+                }
+            }
             LaunchedEffect(category) {
                 if (category != 0 && uid.isNotBlank() && bduss.isNotBlank() &&
                     state.lists == null && state.error == null && !state.loading
@@ -121,8 +158,8 @@ fun EmoticonPickerPanel(
                             ),
                             contentDescription = stringResource(id = R.string.emoticon, emoticon.name),
                             contentScale = ContentScale.Fit,
-                            modifier = Modifier.size(48.dp).padding(8.dp)
-                                .clickable { onEmoticonClick(emoticon) },
+                            modifier = Modifier.size(48.dp)
+                                .clickable { onEmoticonClick(emoticon) }.padding(8.dp),
                         )
                     }
                 }
@@ -130,31 +167,38 @@ fun EmoticonPickerPanel(
                 Text("登录后可查看当前账号的云表情", color = ExtendedTheme.colors.textSecondary,
                     modifier = Modifier.padding(12.dp))
             } else {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                     Text(
                         text = when {
-                            onCloudMemeClick != null -> "点击表情发送；上传并收藏请点击右侧按钮"
+                            onCloudMemeClick != null -> "点击表情发送；上传收藏使用下方按钮"
                             else -> "当前会话暂不支持云表情发送"
                         },
                         color = ExtendedTheme.colors.textSecondary,
                         fontSize = 12.sp,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.fillMaxWidth(),
                     )
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     if (category == 1) {
                         TextButton(
-                            onClick = { uploadLauncher.launch(PickMediasRequest(maxItems = 1, mediaType = PickMediasRequest.ImageOnly)) },
-                            enabled = true,
+                            onClick = {
+                                if (uploadJob != null) {
+                                    uploadJob?.cancel()
+                                } else {
+                                    pickerAccount = currentAccount
+                                    pickingUpload = true
+                                    uploadLauncher.launch(PickMediasRequest(maxItems = 1, mediaType = PickMediasRequest.ImageOnly))
+                                }
+                            },
+                            enabled = !pickingUpload,
                         ) {
-                            Text("上传并收藏", color = ExtendedTheme.colors.primary)
+                            Text(if (uploadJob != null) "取消上传" else if (pickingUpload) "选择中…" else "上传收藏", color = ExtendedTheme.colors.primary)
                         }
                     }
                     TextButton(onClick = session::refresh, enabled = !state.loading) {
                         Text(if (state.loading) "加载中…" else "刷新", color = ExtendedTheme.colors.primary)
                     }
+                    }
+                    if (uploadJob != null) Text("正在上传并收藏…", color = ExtendedTheme.colors.textSecondary, fontSize = 12.sp)
                 }
                 state.error?.let { error ->
                     Text(

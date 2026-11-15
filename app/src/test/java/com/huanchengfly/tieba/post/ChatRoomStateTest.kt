@@ -230,6 +230,35 @@ class ChatRoomStateTest {
     }
 
     @Test
+    fun chatRoomMessageExposesDerivedLocalAndServerIds() {
+        val local = message(-7, local = true)
+        val server = message(7)
+        assertEquals(-7L, local.localPendingId)
+        assertEquals(null, local.serverMsgId)
+        assertFalse(local.deliveryConfirmed)
+        assertEquals(null, server.localPendingId)
+        assertEquals(7L, server.serverMsgId)
+        assertTrue(server.deliveryConfirmed)
+    }
+
+    @Test
+    fun localPhotoUriIsRetainedByPendingImageReducer() {
+        val state = ChatRoomPartialChange.Send.Start(
+            pendingId = -8L,
+            text = "",
+            selfUid = 42L,
+            selfName = "测试用户",
+            selfPortrait = "portrait",
+            localPhotoUri = "content://photos/8",
+        ).reduce(ChatRoomUiState())
+        val pending = state.messages.single()
+        assertEquals("content://photos/8", pending.localPhotoUri)
+        assertEquals(listOf("content://photos/8"), pending.images)
+        assertEquals(1, pending.contentType)
+        assertEquals(ChatMessageKind.IMAGE, pending.semantics.kind)
+    }
+
+    @Test
     fun unchangedPollKeepsListIdentityAndHistory() {
         val history = message(1, time = 1L)
         val latest = message(2)
@@ -423,18 +452,78 @@ class ChatRoomStateTest {
             contentType = 1, images = listOf(original),
             cloudMeme = ChatCloudMeme("meme", original),
         )
-        val seenEcho = local.copy(msgId = 10, isLocal = false, images = listOf(uploaded), msgTime = 100L)
+        val seenEcho = local.copy(msgId = 10, isLocal = false, images = listOf(uploaded), msgTime = 200_001L)
         val beforePrepared = mergeServerMessages(listOf(local), listOf(seenEcho))
         assertEquals(2, beforePrepared.size)
         val prepared = ChatCloudMeme("meme", original, uploadedImageUrl = uploaded)
         val preparedState = ChatRoomPartialChange.Send.Prepared(-1L, prepared).reduce(
             ChatRoomUiState(messages = beforePrepared)
         )
-        val afterPrepared = mergeServerMessages(preparedState.messages, listOf(seenEcho))
+        val afterPrepared = preparedState.messages
         assertEquals(listOf(10L), afterPrepared.map { it.msgId })
         assertEquals(-1L, afterPrepared.single().echoForPendingId)
         assertEquals(200_000L, afterPrepared.single().displayTime)
-        assertEquals(100L, afterPrepared.single().msgTime)
+        assertEquals(200_001L, afterPrepared.single().msgTime)
+    }
+
+    @Test
+    fun imageSeenBeforeTransmissionCannotBeClaimedByPreparedOrAccepted() {
+        val uploaded = ChatCloudMeme("photo", "https://example.com/photo.jpg",
+            uploadedImageUrl = "https://example.com/photo.jpg")
+        val started = ChatRoomPartialChange.Send.Start(-1L, "", 42L, "self", "portrait",
+            localPhotoUri = "content://photos/new"
+        ).reduce(ChatRoomUiState())
+        val old = started.messages.single().copy(msgId = 10L, isLocal = false,
+            images = listOf(uploaded.sendImageUrl))
+        val polled = ChatRoomPartialChange.Poll.Success(persistentListOf(old)).reduce(started)
+        val prepared = ChatRoomPartialChange.Send.Prepared(-1L, uploaded).reduce(polled)
+        assertEquals(2, prepared.messages.size)
+        val transmitting = ChatRoomPartialChange.Send.Transmitting(-1L).reduce(prepared)
+        val accepted = ChatRoomPartialChange.Send.Success(-1L, uploaded).reduce(transmitting)
+        assertEquals(2, accepted.messages.size)
+        val echo = old.copy(msgId = 11L, msgTime = System.currentTimeMillis())
+        val confirmed = ChatRoomPartialChange.Poll.Success(persistentListOf(echo)).reduce(accepted)
+        assertEquals(listOf(10L, 11L), confirmed.messages.map { it.msgId }.sorted())
+    }
+
+    @Test
+    fun preparingImageNeverConsumesAnOlderAlreadySeenMessage() {
+        val local = message(-1, time = 200_000L, text = "", local = true).copy(
+            contentType = 1, images = listOf("content://photos/new"),
+        )
+        val uploaded = "https://example.com/uploaded.gif"
+        val old = local.copy(msgId = 10L, isLocal = false, msgTime = 100L,
+            images = listOf(uploaded), displayTime = 100L)
+        val state = ChatRoomPartialChange.Send.Prepared(-1L,
+            ChatCloudMeme("prepared", uploaded, uploadedImageUrl = uploaded)
+        ).reduce(ChatRoomUiState(messages = persistentListOf(old, local)))
+        assertEquals(listOf(10L, -1L), state.messages.map { it.msgId })
+        assertTrue(state.messages.last().isLocal)
+    }
+
+    @Test
+    fun privatePhotoPreparationPreservesUploadedResourceForRetry() {
+        val initial = PrivateChatPartialChange.Send.Start(-1L, "", 42L,
+            localPhotoUri = "content://photos/new"
+        ).reduce(PrivateChatUiState())
+        assertEquals(ChatMessageKind.IMAGE, initial.messages.single().semantics.kind)
+        val uploaded = ChatCloudMeme("photo", "https://example.com/photo.jpg",
+            uploadedImageUrl = "https://example.com/photo.jpg")
+        val prepared = PrivateChatPartialChange.Send.Prepared(-1L, uploaded).reduce(initial)
+        val failed = PrivateChatPartialChange.Send.Failure(-1L, Exception("network")).reduce(prepared)
+        assertEquals(uploaded, failed.messages.single().cloudMeme)
+        assertEquals("content://photos/new", failed.messages.single().localPhotoUri)
+        assertEquals(SendState.FAILED, failed.messages.single().sendState)
+    }
+
+    @Test
+    fun switchingPrivateAccountOrPeerClearsPreviousTimeline() {
+        val old = PrivateChatUiState(messages = persistentListOf(privateMessage(1L, 7L, 100L, "旧消息")),
+            accountUid = 42L, peerUid = 7L)
+        val switched = PrivateChatPartialChange.Load.Start(99L, 8L).reduce(old)
+        assertTrue(switched.messages.isEmpty())
+        assertEquals(99L, switched.accountUid)
+        assertEquals(8L, switched.peerUid)
     }
 
     @Test
@@ -898,6 +987,31 @@ class ChatRoomStateTest {
         val other = privateMessage(2L, 8L, 200L, "其他会话")
         val self = privateMessage(3L, 9L, 300L, "自己发给未知联系人").copy(isSelf = true)
         assertEquals(listOf(incoming), listOf(incoming, other, self).forPrivatePeer(7L))
+    }
+
+    @Test
+    fun privateKnownSessionRetainsSelfHistoryButUnknownSelfHistoryIsDropped() {
+        val self = privateMessage(3L, 42L, 300L, "自己发送").copy(isSelf = true)
+        val cached = self.copy(peerUid = 7L)
+        val incoming = listOf(self, privateMessage(4L, 7L, 400L, "来信"))
+        assertEquals(listOf(incoming[0], incoming[1]), incoming.forPrivatePeer(7L, listOf(cached)))
+        assertEquals(listOf(incoming[1]), incoming.forPrivatePeer(7L))
+    }
+
+    @Test
+    fun privateSessionsUseLatestKnownMessageAndIgnoreUnknownNetworkSelfHistory() {
+        val incoming = privateMessage(1L, 7L, 100L, "来信")
+        val knownSelf = ChatWsMessage(
+            msgId = 2L, peerUid = 7L, peerName = "用户7", peerPortrait = "portrait-7",
+            content = "自己发送", msgTime = 200L, isSelf = true,
+            semantics = ChatMessageSemantics(protocolSource = "local_outgoing"),
+        )
+        val unknownSelf = privateMessage(3L, 42L, 300L, "未知会话").copy(isSelf = true)
+        val sessions = listOf(incoming, knownSelf, unknownSelf).toSessions(selfUid = 42L)
+        assertEquals(1, sessions.size)
+        assertEquals(7L, sessions.single().peerUid)
+        assertEquals("自己发送", sessions.single().lastMessage)
+        assertEquals(200L, sessions.single().lastTime)
     }
 
     @Test

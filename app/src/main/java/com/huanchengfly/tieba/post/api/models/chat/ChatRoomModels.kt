@@ -134,6 +134,10 @@ data class ChatRoomMessage(
     val images: List<String> = emptyList(),
     /** 本地发送状态；服务端返回的消息恒为 [SendState.SENT]。 */
     val sendState: SendState = SendState.SENT,
+    /** 本地图片 URI；服务端消息为空。 */
+    val localPhotoUri: String? = null,
+    val knownServerIdsAtSend: Set<Long> = emptySet(),
+    val transmissionStarted: Boolean = true,
     /** 是否是本地插入的占位消息；服务端返回的消息恒为 false。 */
     val isLocal: Boolean = false,
     val mentions: List<ChatMention> = emptyList(),
@@ -146,7 +150,16 @@ data class ChatRoomMessage(
     val cloudMeme: ChatCloudMeme? = null,
     /** 保留群聊外层类型、内层业务类型和未知消息摘要，不覆盖旧展示字段。 */
     val semantics: ChatMessageSemantics = ChatMessageSemantics(),
-)
+) {
+    val localPendingId: Long?
+        get() = msgId.takeIf { isLocal && it < 0 }
+
+    val serverMsgId: Long?
+        get() = msgId.takeIf { !isLocal && it > 0 }
+
+    val deliveryConfirmed: Boolean
+        get() = serverMsgId != null
+}
 
 /**
  * 本地消息的发送状态。

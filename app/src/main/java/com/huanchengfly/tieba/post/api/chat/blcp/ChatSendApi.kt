@@ -2,7 +2,6 @@ package com.huanchengfly.tieba.post.api.chat.blcp
 
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
-import com.huanchengfly.tieba.post.components.ImageUploader
 import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.SofireUtils
 import kotlinx.coroutines.flow.firstOrNull
@@ -143,10 +142,10 @@ object ChatSendApi {
             mentions: List<ChatMention> = emptyList(),
             robotSkill: Int? = null,
             cloudMeme: ChatCloudMeme? = null,
+            onTransmitting: suspend () -> Unit = {},
         ): ChatCloudMeme? = withContext(Dispatchers.IO) {
-            var stage = "上传云表情"
+            var stage = "连接"
             try {
-                val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
                 mutex.withLock {
                     stage = "连接"
                     val connection = synchronized(lifecycleLock) {
@@ -214,10 +213,11 @@ object ChatSendApi {
                             chatroomId, text, forumId, forumLevel, authenticated.uk,
                             BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
                             selfName, selfPortrait, accountBduss, mentions, robotSkill,
-                            checkNotNull(synchronized(lifecycleLock) { securityToken }), preparedCloudMeme,
+                            checkNotNull(synchronized(lifecycleLock) { securityToken }), cloudMeme,
                         )
+                        onTransmitting()
                         connection.sendMcastMsg(chatroomId, payload)
-                        preparedCloudMeme
+                        cloudMeme
                     } catch (e: Exception) {
                         synchronized(lifecycleLock) {
                             if (blcp === connection) close()

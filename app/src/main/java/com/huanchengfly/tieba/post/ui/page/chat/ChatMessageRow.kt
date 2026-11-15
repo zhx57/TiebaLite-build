@@ -4,6 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
+import androidx.compose.foundation.clickable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import com.huanchengfly.tieba.post.goToActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -12,10 +16,14 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -89,7 +97,9 @@ fun ChatMessageRow(
     val bubbleColor = if (isSelf) ExtendedTheme.colors.primary else ExtendedTheme.colors.chip
     val textColor = if (isSelf) ExtendedTheme.colors.onPrimary else ExtendedTheme.colors.onChip
     val hasImages = images.isNotEmpty()
-    val compact = LocalConfiguration.current.screenWidthDp < 360
+    androidx.compose.foundation.layout.BoxWithConstraints(modifier.fillMaxWidth()) {
+    val compact = maxWidth < 360.dp
+    val maxBubbleWidth = (maxWidth - if (compact) 68.dp else 96.dp).coerceAtMost(360.dp)
     val context = LocalContext.current
     val copyMessage = {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -122,7 +132,7 @@ fun ChatMessageRow(
     val annotatedText = remember(displayText) { annotateChatLinks(displayText) }
 
     Row(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = if (compact) 6.dp else 16.dp, vertical = 6.dp),
         horizontalArrangement = if (isSelf) Arrangement.End else Arrangement.Start,
@@ -151,7 +161,7 @@ fun ChatMessageRow(
 
         Column(
             modifier = Modifier
-                .widthIn(max = 280.dp)
+                .widthIn(max = maxBubbleWidth)
                 .padding(horizontal = if (compact) 4.dp else 8.dp),
             horizontalAlignment = if (isSelf) Alignment.End else Alignment.Start,
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -188,24 +198,27 @@ fun ChatMessageRow(
                                 onRetryClick = onRetryClick,
                             )
                         }
+                        Column(
+                            modifier = Modifier.weight(1f, fill = false),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
                         if (hasImages) {
                             ChatMessageImages(
                                 images = images,
                                 isSelf = isSelf,
-                                modifier = Modifier.weight(1f, fill = false),
                             )
                         }
                         if (!hasImages || text.isNotBlank()) {
                             PbContentText(
                                 text = annotatedText,
                                 modifier = Modifier
-                                    .weight(1f, fill = false)
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(bubbleColor)
                                     .padding(horizontal = 10.dp, vertical = 8.dp),
                                 color = textColor,
                                 style = MaterialTheme.typography.body2,
                             )
+                        }
                         }
                     }
                 },
@@ -219,6 +232,7 @@ fun ChatMessageRow(
                 )
             }
         }
+    }
     }
 }
 
@@ -268,19 +282,47 @@ private fun ChatMessageImages(
         horizontalAlignment = if (isSelf) Alignment.End else Alignment.Start,
     ) {
         images.forEachIndexed { index, url ->
-            NetworkImage(
-                imageUri = url,
-                contentDescription = stringResource(id = R.string.desc_image),
-                modifier = Modifier
-                    .focusable()
-                    .clip(RoundedCornerShape(radius))
-                    .size(if (single) 180.dp else 96.dp),
-                photoViewData = PhotoViewData(
-                    picItems = picItems,
-                    index = index,
-                ),
-                contentScale = ContentScale.Crop,
-            )
+            androidx.compose.runtime.key(index, url) {
+                val state = com.github.panpf.sketch.compose.rememberAsyncImageState()
+                val result = state.result as? com.github.panpf.sketch.request.DisplayResult.Success
+                val ratio = result?.imageInfo?.let {
+                    if (it.width > 0 && it.height > 0) it.width.toFloat() / it.height else 1f
+                } ?: 1f
+                androidx.compose.foundation.layout.BoxWithConstraints {
+                    val imageWidth = minOf(maxWidth, if (single) 240.dp else 144.dp, 320.dp * ratio)
+                    var shouldLoad by remember(url) {
+                        androidx.compose.runtime.mutableStateOf(
+                            com.huanchengfly.tieba.post.ui.widgets.compose.shouldLoadImage(context, false)
+                        )
+                    }
+                    val darken = ExtendedTheme.colors.isNightMode && context.appPreferences.imageDarkenWhenNightMode
+                    val request = remember(url, shouldLoad, darken) {
+                        com.github.panpf.sketch.request.DisplayRequest(context, url) {
+                            if (!shouldLoad) depth(com.github.panpf.sketch.request.Depth.LOCAL)
+                            if (darken) {
+                                transformations(com.github.panpf.sketch.transform.MaskTransformation(android.graphics.Color.parseColor("#99000000")))
+                            }
+                        }
+                    }
+                    com.github.panpf.sketch.compose.AsyncImage(
+                        request = request,
+                        state = state,
+                        contentDescription = stringResource(id = R.string.desc_image),
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.sizeIn(minWidth = 44.dp, minHeight = 44.dp).width(imageWidth).aspectRatio(ratio)
+                            .clip(RoundedCornerShape(radius))
+                            .clickable {
+                                if (!shouldLoad) shouldLoad = true
+                                else context.goToActivity<com.huanchengfly.tieba.post.ui.page.photoview.PhotoViewActivity> {
+                                    putExtra(
+                                        com.huanchengfly.tieba.post.ui.page.photoview.PhotoViewActivity.EXTRA_PHOTO_VIEW_DATA,
+                                        PhotoViewData(picItems = picItems, index = index),
+                                    )
+                                }
+                            },
+                    )
+                }
+            }
         }
     }
 }
@@ -299,7 +341,7 @@ fun navigateToUserProfile(navigator: DestinationsNavigator, uid: Long) {
 /**
  * 传输阶段转圈，ACK 后静默核对回显；失败显示感叹号并可点击重发。
  *
- * 固定 20dp，三种状态位置一致，切换时不会引起布局跳动。
+ * 固定 44dp 触控区、20dp 图标，三种状态位置一致，切换时不会引起布局跳动。
  */
 @Composable
 private fun ChatSendStateIndicator(
@@ -307,11 +349,11 @@ private fun ChatSendStateIndicator(
     transportAccepted: Boolean,
     onRetryClick: () -> Unit,
 ) {
-    Box(modifier = Modifier.size(20.dp)) {
+    Box(modifier = Modifier.size(44.dp), contentAlignment = Alignment.Center) {
         when (state) {
             SendState.SENDING -> {
                 if (!transportAccepted) CircularProgressIndicator(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.size(20.dp),
                     strokeWidth = 2.dp,
                     color = ExtendedTheme.colors.textSecondary,
                 )
@@ -319,13 +361,13 @@ private fun ChatSendStateIndicator(
 
             SendState.FAILED -> IconButton(
                 onClick = onRetryClick,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.size(44.dp),
             ) {
                 Icon(
                     imageVector = Icons.Outlined.ErrorOutline,
                     contentDescription = stringResource(id = R.string.btn_resend),
                     tint = MaterialTheme.colors.error,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.size(20.dp),
                 )
             }
 

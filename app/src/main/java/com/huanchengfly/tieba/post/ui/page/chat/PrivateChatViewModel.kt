@@ -1,5 +1,8 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
+import android.net.Uri
+import kotlinx.coroutines.CancellationException
+import com.huanchengfly.tieba.post.components.uploadChatPhoto
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
@@ -9,6 +12,7 @@ import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
 import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatCache
+import com.huanchengfly.tieba.post.api.chat.ws.privateConversationUid
 import com.huanchengfly.tieba.post.components.ImageUploader
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.arch.BaseViewModel
@@ -23,13 +27,17 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flatMapConcat
+import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.merge
 import java.util.concurrent.atomic.AtomicLong
@@ -47,16 +55,19 @@ class PrivateChatViewModel @Inject constructor() :
     BaseViewModel<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState, PrivateChatUiEvent>() {
 
     private var socket: ChatWebSocketClient? = null
+    private val pushRefresh by lazy { Channel<PrivateChatUiIntent.Poll>(Channel.CONFLATED) }
 
     override fun createInitialState(): PrivateChatUiState = PrivateChatUiState()
 
     override fun createPartialChangeProducer(): PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> =
-        PrivateChatPartialChangeProducer { socket }
+        PrivateChatPartialChangeProducer({ socket }, flow { emitAll(pushRefresh.receiveAsFlow()) })
 
     override fun dispatchEvent(partialChange: PrivateChatPartialChange): UiEvent? =
         when (partialChange) {
             is PrivateChatPartialChange.Load.Failure ->
                 CommonUiEvent.Toast(partialChange.error.message ?: "加载私信失败")
+            is PrivateChatPartialChange.Send.Failure ->
+                CommonUiEvent.Toast(partialChange.error.message ?: "发送私信失败，可点击失败消息重试")
             else -> null
         }
 
@@ -81,10 +92,11 @@ class PrivateChatViewModel @Inject constructor() :
      */
     fun bindPeer(peerUid: Long) {
         activePeerUid = peerUid
-        obtainSocket().onPushNotify = { _ ->
+        val client = obtainSocket()
+        client.onPushNotify = { groupId ->
             val uid = activePeerUid
-            if (uid != 0L) {
-                send(PrivateChatUiIntent.Poll(uid))
+            if (uid != 0L && groupId == client.privateGroupId) {
+                pushRefresh.trySend(PrivateChatUiIntent.Poll(uid))
             }
         }
     }
@@ -102,19 +114,31 @@ class PrivateChatViewModel @Inject constructor() :
 
     private class PrivateChatPartialChangeProducer(
         private val socketProvider: () -> ChatWebSocketClient?,
+        private val pushFlow: Flow<PrivateChatUiIntent.Poll>,
     ) : PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> {
 
         private val pendingSeq = AtomicLong(0)
         private fun newPendingId(): Long = pendingSeq.decrementAndGet()
         private var privateCursor: Long = 0L
         private var historyLoaded = false
+        private var cursorAccountUid = 0L
+        private var cursorPeerUid = 0L
+
+        private fun resetCursor(selfUid: Long, peerUid: Long) {
+            if (cursorAccountUid != selfUid || cursorPeerUid != peerUid) {
+                privateCursor = PrivateChatCache.syncCursor(selfUid)
+                historyLoaded = false
+                cursorAccountUid = selfUid
+                cursorPeerUid = peerUid
+            }
+        }
 
         @OptIn(ExperimentalCoroutinesApi::class)
         override fun toPartialChangeFlow(
             intentFlow: Flow<PrivateChatUiIntent>,
         ): Flow<PrivateChatPartialChange> =
             merge(
-                intentFlow
+                merge(intentFlow, pushFlow)
                     .filter {
                         it is PrivateChatUiIntent.Load ||
                             it is PrivateChatUiIntent.Poll
@@ -123,7 +147,10 @@ class PrivateChatViewModel @Inject constructor() :
                     .flatMapConcat { intent ->
                         when (intent) {
                             is PrivateChatUiIntent.Load -> intent.producePartialChange()
-                            is PrivateChatUiIntent.Poll -> if (historyLoaded) {
+                            is PrivateChatUiIntent.Poll -> if (historyLoaded &&
+                                cursorAccountUid == AccountUtil.getUid()?.toLongOrNull() &&
+                                cursorPeerUid == intent.peerUid
+                            ) {
                                 intent.producePartialChange()
                             } else {
                                 PrivateChatUiIntent.Load(intent.peerUid).producePartialChange()
@@ -132,59 +159,69 @@ class PrivateChatViewModel @Inject constructor() :
                         }
                     },
                 intentFlow.filterIsInstance<PrivateChatUiIntent.Send>()
-                    .flatMapConcat { it.producePartialChange() },
+                    .flatMapMerge { it.producePartialChange() },
                 intentFlow.filterIsInstance<PrivateChatUiIntent.Resend>()
-                    .flatMapConcat { it.producePartialChange() },
+                    .flatMapMerge { it.producePartialChange() },
             )
+
+        private fun matchesAccount(client: ChatWebSocketClient, accountUid: Long, cookie: String): Boolean =
+            AccountUtil.getUid()?.toLongOrNull() == accountUid &&
+                AccountUtil.getCookie().orEmpty() == cookie && client.selfUid == accountUid
 
         private fun PrivateChatUiIntent.Load.producePartialChange(): Flow<PrivateChatPartialChange.Load> =
             flow<PrivateChatPartialChange.Load> {
-                emit(PrivateChatPartialChange.Load.Start)
-                val client = socketProvider() ?: error("chat socket unavailable")
                 val selfUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
+                val cookie = AccountUtil.getCookie().orEmpty()
+                emit(PrivateChatPartialChange.Load.Start(selfUid, peerUid))
+                val client = socketProvider() ?: error("chat socket unavailable")
 
                 // 先展示本地缓存
-                val cached = PrivateChatCache.load(selfUid, peerUid)
-                if (cached.isNotEmpty()) {
-                    emit(PrivateChatPartialChange.Load.Cached(cached.toImmutableList()))
+                resetCursor(selfUid, peerUid)
+                val initialCached = PrivateChatCache.load(selfUid, peerUid)
+                if (initialCached.isNotEmpty()) {
+                    emit(PrivateChatPartialChange.Load.Cached(initialCached.toImmutableList(), selfUid, peerUid))
                 }
 
-                client.connect(AccountUtil.getCookie().orEmpty())
+                client.connect(cookie)
+                if (!matchesAccount(client, selfUid, cookie)) return@flow
                 // 握手游标已是最新一条，单次请求拿不到历史；
                 // 从头按批拉取才能补齐整个会话，避免进入会话看到空白。
-                val incoming = client.fetchPrivateHistory()
-                val peerMessages = incoming.forPrivatePeer(peerUid)
-                val merged = mergePrivateMessages(
-                    PrivateChatCache.load(client.selfUid, peerUid), peerMessages,
-                )
-                PrivateChatCache.save(client.selfUid, peerUid, merged)
+                resetCursor(selfUid, peerUid)
+                val incoming = if (privateCursor == 0L) client.fetchPrivateHistory()
+                    else client.fetchPrivateMessagesSince(privateCursor)
+                if (!matchesAccount(client, selfUid, cookie)) return@flow
+                PrivateChatCache.saveIncoming(selfUid, incoming, client.privateFetchedMsgId)
+                val merged = PrivateChatCache.load(selfUid, peerUid)
                 privateCursor = maxOf(privateCursor, client.privateFetchedMsgId)
                 historyLoaded = true
-                emit(PrivateChatPartialChange.Load.Success(merged.toImmutableList()))
+                emit(PrivateChatPartialChange.Load.Success(merged.toImmutableList(), selfUid, peerUid))
             }.catch<PrivateChatPartialChange.Load> {
+                if (it is CancellationException) throw it
                 emit(PrivateChatPartialChange.Load.Failure(it))
             }
 
         private fun PrivateChatUiIntent.Poll.producePartialChange(): Flow<PrivateChatPartialChange.Poll> =
             flow<PrivateChatPartialChange.Poll> {
+                val selfUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
+                val cookie = AccountUtil.getCookie().orEmpty()
                 val client = socketProvider() ?: error("chat socket unavailable")
-                client.connect(AccountUtil.getCookie().orEmpty())
+                client.connect(cookie)
+                if (!matchesAccount(client, selfUid, cookie)) return@flow
+                resetCursor(selfUid, peerUid)
                 // 推送只唤醒拉取，不能把服务器最新位置当作已经消费的位置。
                 for (page in 0 until 20) {
                     val previousCursor = privateCursor
                     val incoming = client.fetchPrivateMessagesSince(previousCursor)
-                    val peerMessages = incoming.forPrivatePeer(peerUid)
-                    if (peerMessages.isNotEmpty()) {
-                        val merged = mergePrivateMessages(
-                            PrivateChatCache.load(client.selfUid, peerUid), peerMessages,
-                        )
-                        PrivateChatCache.save(client.selfUid, peerUid, merged)
-                        emit(PrivateChatPartialChange.Poll.Success(merged.toImmutableList()))
-                    }
+                    if (!matchesAccount(client, selfUid, cookie)) return@flow
+                    PrivateChatCache.saveIncoming(selfUid, incoming, client.privateFetchedMsgId)
+                    emit(PrivateChatPartialChange.Poll.Success(
+                        PrivateChatCache.load(selfUid, peerUid).toImmutableList(), selfUid, peerUid,
+                    ))
                     privateCursor = maxOf(previousCursor, client.privateFetchedMsgId)
                     if (privateCursor <= previousCursor || privateCursor >= client.privateLastMsgId) break
                 }
             }.catch<PrivateChatPartialChange.Poll> {
+                if (it is CancellationException) throw it
                 emit(PrivateChatPartialChange.Poll.Failure)
             }
 
@@ -197,11 +234,17 @@ class PrivateChatViewModel @Inject constructor() :
                         content = content,
                         peerUid = peerUid,
                         cloudMeme = cloudMeme,
+                        localPhotoUri = photoUri?.toString(),
                     )
                 )
-                val message = saveAndSend(content, peerUid, cloudMeme)
+                val message = saveAndSend(content, peerUid, cloudMeme, photoUri) { prepared ->
+                    emit(PrivateChatPartialChange.Send.Prepared(id, prepared))
+                }
                 emit(PrivateChatPartialChange.Send.Success(id, message))
-            }.catch { emit(PrivateChatPartialChange.Send.Failure(id, it)) }
+            }.catch {
+                if (it is CancellationException) throw it
+                emit(PrivateChatPartialChange.Send.Failure(id, it))
+            }
         }
 
         private fun PrivateChatUiIntent.Resend.producePartialChange(): Flow<PrivateChatPartialChange.Send> {
@@ -214,28 +257,49 @@ class PrivateChatViewModel @Inject constructor() :
                         peerUid = peerUid,
                         removeMsgId = failedMsgId,
                         cloudMeme = cloudMeme,
+                        localPhotoUri = photoUri?.toString(),
                     )
                 )
-                val message = saveAndSend(content, peerUid, cloudMeme)
+                val message = saveAndSend(content, peerUid, cloudMeme, photoUri) { prepared ->
+                    emit(PrivateChatPartialChange.Send.Prepared(id, prepared))
+                }
                 emit(PrivateChatPartialChange.Send.Success(id, message))
-            }.catch { emit(PrivateChatPartialChange.Send.Failure(id, it)) }
+            }.catch {
+                if (it is CancellationException) throw it
+                emit(PrivateChatPartialChange.Send.Failure(id, it))
+            }
         }
 
-        private suspend fun saveAndSend(content: String, peerUid: Long, cloudMeme: ChatCloudMeme?): ChatWsMessage {
+        private suspend fun saveAndSend(
+            content: String,
+            peerUid: Long,
+            cloudMeme: ChatCloudMeme?,
+            photoUri: Uri?,
+            onPrepared: suspend (ChatCloudMeme?) -> Unit,
+        ): ChatWsMessage {
             val client = socketProvider() ?: error("chat socket unavailable")
+            val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: error("请先登录")
             client.connect(AccountUtil.getCookie().orEmpty())
-            val preparedCloudMeme = cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+            check(client.selfUid == accountUid) { "账号已切换，请重新进入会话" }
+            val preparedCloudMeme = cloudMeme?.takeIf { it.uploadedImageUrl != null }
+                ?: photoUri?.let { uploadChatPhoto(it) }
+                ?: cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+            check(AccountUtil.getUid()?.toLongOrNull() == accountUid && client.selfUid == accountUid) {
+                "账号已切换，已取消发送"
+            }
+            onPrepared(preparedCloudMeme)
             val msgId = client.sendMessage(peerUid, content, preparedCloudMeme)
-            val cached = PrivateChatCache.load(client.selfUid, peerUid)
             val message = ChatWsMessage(
                 msgId = msgId,
                 peerUid = peerUid,
+                conversationUid = peerUid,
+                senderUid = accountUid,
                 peerName = "",
                 peerPortrait = "",
                 content = content,
                 msgTime = System.currentTimeMillis(),
                 isSelf = true,
-                msgType = if (cloudMeme != null) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+                msgType = if (preparedCloudMeme != null) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
                 images = preparedCloudMeme?.let { listOf(it.sendImageUrl) }.orEmpty(),
                 cloudMeme = preparedCloudMeme ?: cloudMeme,
                 semantics = ChatMessageSemantics(
@@ -246,7 +310,7 @@ class PrivateChatViewModel @Inject constructor() :
                     summary = if (preparedCloudMeme == null) content else "图片消息",
                 ),
             )
-            PrivateChatCache.save(client.selfUid, peerUid, mergePrivateMessages(cached, listOf(message)))
+            PrivateChatCache.save(accountUid, peerUid, listOf(message))
             return message
         }
     }
@@ -255,18 +319,35 @@ class PrivateChatViewModel @Inject constructor() :
 sealed interface PrivateChatUiIntent : UiIntent {
     data class Load(val peerUid: Long) : PrivateChatUiIntent
     data class Poll(val peerUid: Long) : PrivateChatUiIntent
-    data class Send(val peerUid: Long, val content: String, val cloudMeme: ChatCloudMeme? = null) : PrivateChatUiIntent
+    data class Send(
+        val peerUid: Long,
+        val content: String,
+        val cloudMeme: ChatCloudMeme? = null,
+        val photoUri: Uri? = null,
+    ) : PrivateChatUiIntent
     data class Resend(
         val peerUid: Long,
         val failedMsgId: Long,
         val content: String,
         val cloudMeme: ChatCloudMeme? = null,
+        val photoUri: Uri? = null,
     ) : PrivateChatUiIntent
 }
 
-// 拉取响应只有发送者，没有收件人，不能把所有自己的消息归给当前会话。
-internal fun List<ChatWsMessage>.forPrivatePeer(peerUid: Long): List<ChatWsMessage> =
-    filter { !it.isSelf && it.peerUid == peerUid }
+// 拉取响应只有发送者；self 消息仅在缓存已确认属于当前会话时保留。
+internal fun List<ChatWsMessage>.forPrivatePeer(
+    peerUid: Long,
+    cached: List<ChatWsMessage> = emptyList(),
+): List<ChatWsMessage> {
+    val knownSelfIds = cached.filter {
+        it.isSelf && (it.conversationUid == peerUid ||
+            (it.conversationUid == 0L && it.peerUid == peerUid))
+    }.mapTo(mutableSetOf()) { it.msgId }
+    return filter { message ->
+        val owner = message.privateConversationUid()
+        owner == peerUid || (owner == 0L && message.isSelf && message.msgId in knownSelfIds)
+    }
+}
 
 /** 缓存与网络增量按 msgId 去重合并，按时间正序。 */
 private fun mergePrivateMessages(
@@ -275,8 +356,15 @@ private fun mergePrivateMessages(
 ): List<ChatWsMessage> {
     val messages = current.associateByTo(linkedMapOf()) { it.msgId }
     incoming.forEach { message ->
+        val existing = messages[message.msgId]
         messages[message.msgId] = message.copy(
-            cloudMeme = messages[message.msgId]?.cloudMeme ?: message.cloudMeme,
+            peerUid = if (message.isSelf && existing?.isSelf == true) existing.peerUid else message.peerUid,
+            conversationUid = message.conversationUid.takeIf { it > 0L } ?: existing?.conversationUid ?: 0L,
+            senderUid = message.senderUid.takeIf { it > 0L } ?: existing?.senderUid ?: 0L,
+            isLocal = if (message.isSelf && existing?.isSelf == true) existing.isLocal else message.isLocal,
+            cloudMeme = existing?.cloudMeme ?: message.cloudMeme,
+            deliveryConfirmed = message.deliveryConfirmed || existing?.deliveryConfirmed == true,
+            semantics = if (message.isSelf && existing?.isSelf == true) existing.semantics else message.semantics,
         )
     }
     return messages.values.sortedBy { it.msgTime }
@@ -292,29 +380,52 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
     sealed class Load : PrivateChatPartialChange {
         override fun reduce(oldState: PrivateChatUiState): PrivateChatUiState =
             when (this) {
-                is Start -> oldState.copy(isLoading = true)
-                is Cached -> oldState.copy(messages = mergeIntoState(oldState.messages, messages))
-                is Success -> oldState.copy(
+                is Start -> if (oldState.accountUid != accountUid || oldState.peerUid != peerUid)
+                    PrivateChatUiState(accountUid = accountUid, peerUid = peerUid)
+                else oldState.copy(isLoading = true)
+                is Cached -> if (
+                    (accountUid != 0L && oldState.accountUid != accountUid) ||
+                    (peerUid != 0L && oldState.peerUid != peerUid)
+                ) oldState else oldState.copy(messages = mergeIntoState(oldState.messages, messages))
+                is Success -> if (
+                    (accountUid != 0L && oldState.accountUid != accountUid) ||
+                    (peerUid != 0L && oldState.peerUid != peerUid)
+                ) oldState else oldState.copy(
                     isLoading = false,
                     messages = mergeIntoState(oldState.messages, messages),
                 )
                 is Failure -> oldState.copy(isLoading = false)
             }
 
-        data object Start : Load()
-        data class Cached(val messages: ImmutableList<ChatWsMessage>) : Load()
-        data class Success(val messages: ImmutableList<ChatWsMessage>) : Load()
+        data class Start(val accountUid: Long, val peerUid: Long) : Load()
+        data class Cached(
+            val messages: ImmutableList<ChatWsMessage>,
+            val accountUid: Long = 0L,
+            val peerUid: Long = 0L,
+        ) : Load()
+        data class Success(
+            val messages: ImmutableList<ChatWsMessage>,
+            val accountUid: Long = 0L,
+            val peerUid: Long = 0L,
+        ) : Load()
         data class Failure(val error: Throwable) : Load()
     }
 
     sealed class Poll : PrivateChatPartialChange {
         override fun reduce(oldState: PrivateChatUiState): PrivateChatUiState =
             when (this) {
-                is Success -> oldState.copy(messages = mergeIntoState(oldState.messages, latest))
+                is Success -> if (
+                    (accountUid != 0L && oldState.accountUid != accountUid) ||
+                    (peerUid != 0L && oldState.peerUid != peerUid)
+                ) oldState else oldState.copy(messages = mergeIntoState(oldState.messages, latest))
                 is Failure -> oldState
             }
 
-        data class Success(val latest: ImmutableList<ChatWsMessage>) : Poll()
+        data class Success(
+            val latest: ImmutableList<ChatWsMessage>,
+            val accountUid: Long = 0L,
+            val peerUid: Long = 0L,
+        ) : Poll()
         data object Failure : Poll()
     }
 
@@ -323,10 +434,12 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
             when (this) {
                 is Start -> {
                     val base = oldState.messages.filterNot { it.msgId == removeMsgId }
+                    val hasImage = cloudMeme != null || localPhotoUri != null
                     oldState.copy(
                         messages = (base + ChatWsMessage(
                             msgId = pendingId,
                             peerUid = peerUid,
+                            conversationUid = peerUid,
                             peerName = "",
                             peerPortrait = "",
                             content = content,
@@ -334,22 +447,34 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
                             isSelf = true,
                             sendState = SendState.SENDING,
                             isLocal = true,
-                            msgType = if (cloudMeme != null) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
-                            images = cloudMeme?.let { listOf(it.imageUrl) }.orEmpty(),
+                            msgType = if (hasImage) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+                            images = localPhotoUri?.let { listOf(it) }
+                                ?: cloudMeme?.let { listOf(it.sendImageUrl) }.orEmpty(),
                             cloudMeme = cloudMeme,
+                            localPhotoUri = localPhotoUri,
                             semantics = ChatMessageSemantics(
-                                kind = if (cloudMeme == null) ChatMessageKind.TEXT else ChatMessageKind.IMAGE,
+                                kind = if (hasImage) ChatMessageKind.IMAGE else ChatMessageKind.TEXT,
                                 protocolSource = "local_outgoing",
-                                transportType = if (cloudMeme == null) ChatWsConstants.MSG_TYPE_PRIVATE else ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE,
-                                businessType = if (cloudMeme == null) 1 else 2,
-                                summary = if (cloudMeme == null) content else "图片消息",
+                                transportType = if (hasImage) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+                                businessType = if (hasImage) 2 else 1,
+                                summary = if (hasImage) "图片消息" else content,
                             ),
                         )).toImmutableList(),
                         sendRequestId = oldState.sendRequestId + 1,
                     )
                 }
 
-                is Success -> oldState.copy(
+                is Prepared -> oldState.copy(messages = oldState.messages.map {
+                    if (it.msgId == pendingId) it.copy(
+                        cloudMeme = cloudMeme ?: it.cloudMeme,
+                        images = cloudMeme?.let { meme -> listOf(meme.sendImageUrl) } ?: it.images,
+                    ) else it
+                }.toImmutableList())
+
+                is Success -> if (
+                    (oldState.accountUid > 0L && message.senderUid != oldState.accountUid) ||
+                    (oldState.peerUid > 0L && message.conversationUid != oldState.peerUid)
+                ) oldState else oldState.copy(
                     messages = mergeIntoState(
                         oldState.messages.filterNot { it.msgId == pendingId },
                         listOf(message),
@@ -369,8 +494,10 @@ sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
             val peerUid: Long,
             val removeMsgId: Long? = null,
             val cloudMeme: ChatCloudMeme? = null,
+            val localPhotoUri: String? = null,
         ) : Send()
 
+        data class Prepared(val pendingId: Long, val cloudMeme: ChatCloudMeme?) : Send()
         data class Success(val pendingId: Long, val message: ChatWsMessage) : Send()
         data class Failure(val pendingId: Long, val error: Throwable) : Send()
     }
@@ -381,6 +508,8 @@ data class PrivateChatUiState(
     val sendRequestId: Long = 0L,
     val isLoading: Boolean = true,
     val messages: ImmutableList<ChatWsMessage> = persistentListOf(),
+    val accountUid: Long = 0L,
+    val peerUid: Long = 0L,
 ) : UiState
 
 sealed interface PrivateChatUiEvent : UiEvent

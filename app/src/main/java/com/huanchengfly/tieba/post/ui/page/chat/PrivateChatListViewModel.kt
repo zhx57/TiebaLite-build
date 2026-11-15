@@ -2,11 +2,14 @@ package com.huanchengfly.tieba.post.ui.page.chat
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
-import androidx.lifecycle.viewModelScope
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatCache
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.emitAll
+import com.huanchengfly.tieba.post.api.chat.ws.privateConversationUid
+import com.huanchengfly.tieba.post.utils.AccountUtil
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
@@ -42,7 +45,18 @@ class PrivateChatListViewModel @Inject constructor() :
     BaseViewModel<PrivateChatListUiIntent, PrivateChatListPartialChange, PrivateChatListUiState, PrivateChatListUiEvent>() {
 
     private var socket: ChatWebSocketClient? = null
+    private val pushRefresh by lazy { Channel<PrivateChatListUiIntent.Poll>(Channel.CONFLATED) }
     private var privateCursor = 0L
+    private var cursorAccountUid = 0L
+    private val cacheAccountUid by lazy { MutableStateFlow(AccountUtil.getUid()?.toLongOrNull() ?: 0L) }
+
+    private fun useAccount(selfUid: Long) {
+        if (cursorAccountUid != selfUid) {
+            cursorAccountUid = selfUid
+            privateCursor = PrivateChatCache.syncCursor(selfUid)
+        }
+        cacheAccountUid.value = selfUid
+    }
 
     override fun createInitialState(): PrivateChatListUiState = PrivateChatListUiState()
 
@@ -73,9 +87,11 @@ class PrivateChatListViewModel @Inject constructor() :
 
     fun bindPushNotify(cookie: String) {
         pollCookie = cookie
-        obtainSocket().onPushNotify = { _ ->
-            if (pollCookie.isNotEmpty()) {
-                send(PrivateChatListUiIntent.Poll(pollCookie))
+        useAccount(AccountUtil.getUid()?.toLongOrNull() ?: 0L)
+        val client = obtainSocket()
+        client.onPushNotify = { groupId ->
+            if (pollCookie.isNotEmpty() && groupId == client.privateGroupId) {
+                pushRefresh.trySend(PrivateChatListUiIntent.Poll(pollCookie))
             }
         }
     }
@@ -88,14 +104,16 @@ class PrivateChatListViewModel @Inject constructor() :
             intentFlow: Flow<PrivateChatListUiIntent>,
         ): Flow<PrivateChatListPartialChange> =
             merge(
-                intentFlow.filterIsInstance<PrivateChatListUiIntent.CacheChanged>()
-                    .map {
-                        PrivateChatListPartialChange.Load.Success(
-                            PrivateChatCache.loadAll(socketProvider()?.selfUid ?: 0L).toSessions(),
-                            replace = false,
-                        )
-                    },
-                intentFlow
+                flow {
+                    emitAll(cacheAccountUid.flatMapLatest { selfUid ->
+                        PrivateChatCache.observe(selfUid).map { messages ->
+                            PrivateChatListPartialChange.Load.Success(
+                                messages.toSessions(selfUid), replace = true, accountUid = selfUid,
+                            )
+                        }
+                    })
+                },
+                merge(intentFlow, flow { emitAll(pushRefresh.receiveAsFlow()) })
                 .filter {
                     it is PrivateChatListUiIntent.Load ||
                         it is PrivateChatListUiIntent.Poll
@@ -110,49 +128,72 @@ class PrivateChatListViewModel @Inject constructor() :
                 },
             )
 
+        private fun matchesAccount(accountUid: Long, cookie: String, client: ChatWebSocketClient? = null): Boolean =
+            AccountUtil.getUid()?.toLongOrNull() == accountUid &&
+                AccountUtil.getCookie().orEmpty() == cookie &&
+                (client == null || client.selfUid == accountUid)
+
         /**
          * 静默刷新会话列表，用于定时轮询与推送到达。
          */
         private fun PrivateChatListUiIntent.Poll.producePartialChange(): Flow<PrivateChatListPartialChange.Load> =
             flow {
+                val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
+                val requestCookie = cookie
+                if (!matchesAccount(accountUid, requestCookie)) return@flow
                 val client = socketProvider() ?: throw IllegalStateException("chat socket unavailable")
-                client.connect(cookie)
-                val messages = client.fetchPrivateMessagesSince(privateCursor)
-                privateCursor = maxOf(privateCursor, client.privateFetchedMsgId)
-                emit(
-                    PrivateChatListPartialChange.Load.Success(
-                        (PrivateChatCache.loadAll(client.selfUid) + messages).toSessions(),
-                        replace = false,
-                    )
-                )
-            }.catch { /* 静默失败，等下一次轮询 */ }
+                client.connect(requestCookie)
+                if (!matchesAccount(accountUid, requestCookie, client)) return@flow
+                useAccount(accountUid)
+                for (page in 0 until 20) {
+                    val previousCursor = privateCursor
+                    val messages = client.fetchPrivateMessagesSince(previousCursor)
+                    if (!matchesAccount(accountUid, requestCookie, client)) return@flow
+                    PrivateChatCache.saveIncoming(accountUid, messages, client.privateFetchedMsgId)
+                    privateCursor = maxOf(previousCursor, client.privateFetchedMsgId)
+                    if (privateCursor <= previousCursor || privateCursor >= client.privateLastMsgId) break
+                }
+                emit(PrivateChatListPartialChange.Load.Success(
+                    PrivateChatCache.loadAll(accountUid).toSessions(accountUid), replace = true,
+                    accountUid = accountUid,
+                ))
+            }.catch {
+                if (it is kotlinx.coroutines.CancellationException) throw it
+            }
 
         private fun PrivateChatListUiIntent.Load.producePartialChange(): Flow<PrivateChatListPartialChange.Load> =
             flow {
+                val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
+                val requestCookie = cookie
+                if (!matchesAccount(accountUid, requestCookie)) return@flow
                 emit(PrivateChatListPartialChange.Load.Start)
                 val client = socketProvider() ?: throw IllegalStateException("chat socket unavailable")
-                client.connect(cookie)
+                client.connect(requestCookie)
+                if (!matchesAccount(accountUid, requestCookie, client)) return@flow
                 // 握手游标已是最新，直接增量只会拿到空列表；
                 // 从头按批拉历史，才能看到所有历史会话与最近联系人。
-                val messages = client.fetchPrivateHistory()
-                privateCursor = client.privateFetchedMsgId
+                useAccount(accountUid)
+                val messages = if (privateCursor == 0L) client.fetchPrivateHistory()
+                    else client.fetchPrivateMessagesSince(privateCursor)
+                if (!matchesAccount(accountUid, requestCookie, client)) return@flow
+                PrivateChatCache.saveIncoming(accountUid, messages, client.privateFetchedMsgId)
+                privateCursor = maxOf(privateCursor, client.privateFetchedMsgId)
                 emit(
                     PrivateChatListPartialChange.Load.Success(
-                        (PrivateChatCache.loadAll(client.selfUid) + messages).toSessions(),
+                        PrivateChatCache.loadAll(accountUid).toSessions(accountUid),
                         replace = true,
+                        accountUid = accountUid,
                     )
                 )
-            }.catch { emit(PrivateChatListPartialChange.Load.Failure(it)) }
+            }.catch {
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                emit(PrivateChatListPartialChange.Load.Failure(it))
+            }
     }
 
     init {
         // 提前建好连接对象，保证 Producer 拿到的实例与 onCleared 关闭的是同一个
         obtainSocket()
-        viewModelScope.launch {
-            PrivateChatCache.changes.collect {
-                send(PrivateChatListUiIntent.CacheChanged)
-            }
-        }
     }
 }
 
@@ -170,7 +211,9 @@ sealed interface PrivateChatListPartialChange : PartialChange<PrivateChatListUiS
         override fun reduce(oldState: PrivateChatListUiState): PrivateChatListUiState =
             when (this) {
                 is Start -> oldState.copy(isLoading = true)
-                is Success -> oldState.copy(
+                is Success -> if (
+                    accountUid != 0L && AccountUtil.getUid()?.toLongOrNull() != accountUid
+                ) oldState else oldState.copy(
                     isLoading = false,
                     sessions = if (replace) {
                         sessions
@@ -186,6 +229,7 @@ sealed interface PrivateChatListPartialChange : PartialChange<PrivateChatListUiS
         data class Success(
             val sessions: ImmutableList<PrivateSession>,
             val replace: Boolean,
+            val accountUid: Long = 0L,
         ) : Load()
 
         data class Failure(val error: Throwable) : Load()
@@ -216,8 +260,8 @@ sealed interface PrivateChatListUiEvent : UiEvent
 /**
  * 把消息列表聚合成会话列表。
  *
- * 私信消息组的 userInfo 是发送者，自己发的消息 peerUid 会是自己，
- * 无法据此推断对话方，这里只按对方发来的消息聚合。
+ * 私信消息组的 userInfo 是发送者，网络历史中的 self 消息没有收件人信息，
+ * 只有本地发送记录携带了明确的会话归属，才能参与会话摘要。
  */
 private fun mergePrivateSessions(
     current: ImmutableList<PrivateSession>,
@@ -226,19 +270,27 @@ private fun mergePrivateSessions(
     (current + incoming)
         .groupBy { it.peerUid }
         .values
-        .map { sessions -> sessions.maxBy { it.lastTime } }
+        .map { sessions ->
+            val sorted = sessions.sortedByDescending { it.lastTime }
+            sorted.first().copy(
+                peerName = sorted.firstOrNull { it.peerName.isNotBlank() }?.peerName.orEmpty(),
+                peerPortrait = sorted.firstOrNull { it.peerPortrait.isNotBlank() }?.peerPortrait.orEmpty(),
+            )
+        }
         .sortedByDescending { it.lastTime }
         .toImmutableList()
 
-fun List<ChatWsMessage>.toSessions(): ImmutableList<PrivateSession> {
-    return filter { !it.isSelf && it.peerUid != 0L }
-        .groupBy { it.peerUid }
+fun List<ChatWsMessage>.toSessions(selfUid: Long = 0L): ImmutableList<PrivateSession> {
+    return filter { it.privateConversationUid(selfUid) > 0L }
+        .groupBy { it.privateConversationUid(selfUid) }
         .mapNotNull { (peerUid, messages) ->
             val latest = messages.maxByOrNull { it.msgTime } ?: return@mapNotNull null
+            val profileMessages = messages.filter { !it.isSelf &&
+                (it.senderUid == 0L || it.senderUid == peerUid) }.sortedByDescending { it.msgTime }
             PrivateSession(
                 peerUid = peerUid,
-                peerName = latest.peerName,
-                peerPortrait = latest.peerPortrait,
+                peerName = profileMessages.firstOrNull { it.peerName.isNotBlank() }?.peerName.orEmpty(),
+                peerPortrait = profileMessages.firstOrNull { it.peerPortrait.isNotBlank() }?.peerPortrait.orEmpty(),
                 lastMessage = latest.content.ifBlank { latest.semantics.summary },
                 lastTime = latest.msgTime,
                 unreadCount = 0,
