@@ -306,15 +306,11 @@ fun ChatRoomPage(
                     navigationIcon = { BackNavigationIcon { navigator.navigateUp() } },
                 )
             },
-        ) { paddingValues ->
-            ChatTimeline(
-                modifier = Modifier.fillMaxSize().padding(paddingValues),
-                composer = { availableHeight ->
+            bottomBar = {
                 if (account != null) {
                     Column {
                         ChatComposer(
                             value = input,
-                            availableHeight = availableHeight,
                             onValueChange = { value ->
                                 val insertedAt = value.composition == null &&
                                     value.text.length > input.text.length &&
@@ -387,9 +383,9 @@ fun ChatRoomPage(
                         )
                     }
                 }
-                },
-            ) {
-            Box(modifier = Modifier.fillMaxSize()) {
+            },
+        ) { paddingValues ->
+            Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
                 MyLazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = ChatListContentPadding,
@@ -456,7 +452,6 @@ fun ChatRoomPage(
                         color = ExtendedTheme.colors.textSecondary,
                     )
                 }
-            }
             }
         }
     }

@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
+import com.huanchengfly.tieba.post.api.chat.ws.awaitPrivateChatResponse
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatImageContent
 import com.huanchengfly.tieba.post.api.chat.ws.buildPrivateMessageRequest
@@ -149,6 +150,29 @@ class ChatRoomStateTest {
         )!!
         assertEquals(ChatMessageKind.UNKNOWN, unknown.semantics.kind)
         assertTrue(unknown.text.contains("9999"))
+    }
+
+    @Test
+    fun privateResponseTimeoutIsAFailureInsteadOfCoroutineCancellation() = runBlocking {
+        val response = kotlinx.coroutines.CompletableDeferred<ByteArray>()
+        val failure = runCatching { awaitPrivateChatResponse(response, 1L) }.exceptionOrNull()!!
+        assertTrue(failure is java.net.SocketTimeoutException)
+        assertFalse(failure is kotlinx.coroutines.CancellationException)
+        val pending = PrivateChatPartialChange.Send.Start(-1L, "测试", 42L).reduce(PrivateChatUiState())
+        val failed = PrivateChatPartialChange.Send.Failure(-1L, failure).reduce(pending)
+        assertEquals(SendState.FAILED, failed.messages.single().sendState)
+        assertTrue(failure.message!!.contains("避免重复发送"))
+    }
+
+    @Test
+    fun privateResponseSuccessAndExternalCancellationRemainDistinct() = runBlocking {
+        val payload = byteArrayOf(1, 2, 3)
+        val ready = kotlinx.coroutines.CompletableDeferred(payload)
+        assertTrue(payload.contentEquals(awaitPrivateChatResponse(ready)))
+        val cancelled = kotlinx.coroutines.CompletableDeferred<ByteArray>()
+        cancelled.cancel(kotlinx.coroutines.CancellationException("page closed"))
+        val failure = runCatching { awaitPrivateChatResponse(cancelled) }.exceptionOrNull()
+        assertTrue(failure is kotlinx.coroutines.CancellationException)
     }
 
     @Test

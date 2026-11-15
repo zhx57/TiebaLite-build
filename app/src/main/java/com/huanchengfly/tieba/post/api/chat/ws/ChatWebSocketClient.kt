@@ -20,7 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okio.ByteString.Companion.toByteString
 import org.json.JSONArray
 import org.json.JSONObject
@@ -486,7 +486,7 @@ class ChatWebSocketClient {
             throw IllegalStateException("failed to send websocket frame")
         }
         return try {
-            withTimeout(15_000) { deferred.await() }
+            awaitPrivateChatResponse(deferred)
         } finally {
             pending.remove(reqId)
         }
@@ -559,6 +559,12 @@ internal object PrivateChatImageContent {
         }.getOrDefault(emptyList())
     }
 }
+
+internal suspend fun awaitPrivateChatResponse(
+    response: CompletableDeferred<ByteArray>,
+    timeoutMillis: Long = 15_000L,
+): ByteArray = withTimeoutOrNull(timeoutMillis) { response.await() }
+    ?: throw java.net.SocketTimeoutException("私信请求响应超时，结果尚未确认，请先检查会话，避免重复发送")
 
 /**
  * 一条私信消息。

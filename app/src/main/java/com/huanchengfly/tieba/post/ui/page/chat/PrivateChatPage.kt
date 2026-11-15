@@ -147,13 +147,9 @@ fun PrivateChatPage(
                     navigationIcon = { BackNavigationIcon { navigator.navigateUp() } },
                 )
             },
-        ) { paddingValues ->
-            ChatTimeline(
-                modifier = Modifier.fillMaxSize().padding(paddingValues),
-                composer = { availableHeight ->
+            bottomBar = {
                 ChatComposer(
                     value = input,
-                    availableHeight = availableHeight,
                     onValueChange = { input = it },
                     onSend = {
                         val text = input.text.trim()
@@ -181,9 +177,9 @@ fun PrivateChatPage(
                         viewModel.send(PrivateChatUiIntent.Send(peerUid, "", cloudMeme = meme))
                     },
                 )
-                },
-            ) {
-            Box(modifier = Modifier.fillMaxSize()) {
+            },
+        ) { paddingValues ->
+            Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
                 MyLazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = ChatListContentPadding,
@@ -222,7 +218,6 @@ fun PrivateChatPage(
                         color = ExtendedTheme.colors.primary,
                     )
                 }
-            }
             }
         }
     }
