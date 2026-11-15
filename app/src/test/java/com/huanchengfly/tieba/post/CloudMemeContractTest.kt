@@ -1,6 +1,7 @@
 package com.huanchengfly.tieba.post.repository
 
 import com.huanchengfly.tieba.post.api.retrofit.converter.kotlinx.serialization.asConverterFactory
+import com.huanchengfly.tieba.post.api.retrofit.converter.gson.GsonConverterFactory
 import retrofit2.Converter
 import okhttp3.ResponseBody
 import com.huanchengfly.tieba.post.api.models.UploadPictureResultBean
@@ -32,6 +33,7 @@ class CloudMemeContractTest {
             ignoreUnknownKeys = true
             coerceInputValues = true
         }.asConverterFactory())
+        .addConverterFactory(GsonConverterFactory.create())
         .build().responseBodyConverter(UploadPictureResultBean::class.java, emptyArray())
 
     private fun decodeUpload(raw: String): UploadPictureResultBean =
