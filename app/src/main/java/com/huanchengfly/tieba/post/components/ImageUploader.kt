@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.runningFold
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -97,6 +98,7 @@ class ImageUploader(
                     originFile.copyTo(tempFile, true)
                 } else {
                     val bitmap = BitmapFactory.decodeFile(filePath)
+                        ?: error("无法解码选中的图片文件")
                     val firstCompressResult = ImageUtil.compressImage(bitmap, quality = 95)
                     tempFile.writeBytes(firstCompressResult)
                     if (firstCompressResult.size > maxSize) {
@@ -193,8 +195,11 @@ class ImageUploader(
             val fileMd5 = MD5Util.toMd5(file)
             val isMultipleChunkSize = fileLength % chunkSize == 0L
             val totalChunkNum = fileLength / chunkSize + if (isMultipleChunkSize) 0 else 1
-            val picWatermarkType =
+            val picWatermarkType = if (forumName.isEmpty()) {
+                PIC_WATER_TYPE_NO
+            } else {
                 App.INSTANCE.appPreferences.picWatermarkType ?: PIC_WATER_TYPE_FORUM_NAME
+            }
             val requestBodies = (0 until totalChunkNum).map { chunk ->
                 val isFinish = chunk == totalChunkNum - 1
                 val curChunkSize = if (isFinish) {
@@ -271,20 +276,79 @@ suspend fun uploadChatPhoto(uri: Uri): ChatCloudMeme = withContext(Dispatchers.I
         App.INSTANCE.contentResolver.openInputStream(uri)?.use { input ->
             file.outputStream().use { output -> input.copyTo(output) }
         } ?: error("无法读取相册图片")
-        val result = ImageUploader("").uploadSinglePicture(file.absolutePath, isOriginImage = true)
-        val picture = result.uploadedPicture ?: error("上传图片失败：响应缺少图片资源")
-        val bigUrl = picture.imageUrl ?: error("上传图片失败：响应缺少图片地址")
-        val smallUrl = picture.thumbnailUrl ?: bigUrl
-        ChatCloudMeme(
-            id = "uploaded_photo_${System.currentTimeMillis()}",
-            imageUrl = bigUrl,
-            uploadedImageUrl = bigUrl,
-            uploadedThumbnailUrl = smallUrl,
-            officialPicId = picture.picId,
-        )
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val width = bounds.outWidth.coerceAtLeast(0)
+        val height = bounds.outHeight.coerceAtLeast(0)
+
+        val primaryAttempt = runCatching {
+            val result = ImageUploader("").uploadSinglePicture(file.absolutePath, isOriginImage = true)
+            val picture = result.uploadedPicture ?: error("上传图片失败：响应缺少图片资源")
+            val bigUrl = picture.imageUrl ?: error("上传图片失败：响应缺少图片地址")
+            val smallUrl = picture.thumbnailUrl ?: bigUrl
+            ChatCloudMeme(
+                id = "uploaded_photo_${System.currentTimeMillis()}",
+                imageUrl = bigUrl,
+                uploadedImageUrl = bigUrl,
+                uploadedThumbnailUrl = smallUrl,
+                officialPicId = picture.picId,
+                width = width,
+                height = height,
+            )
+        }
+        primaryAttempt.getOrElse { primaryError ->
+            if (primaryError is CancellationException) throw primaryError
+            // 当 /c/s/uploadPicture 在无吧名场景返回空 info 等缺少地址的响应时，自动回退到网页单图上传接口。
+            val fallbackUrl = runCatching { uploadChatPhotoViaWeb(file) }.getOrNull()
+                ?: throw primaryError
+            ChatCloudMeme(
+                id = "uploaded_photo_${System.currentTimeMillis()}",
+                imageUrl = fallbackUrl,
+                uploadedImageUrl = fallbackUrl,
+                uploadedThumbnailUrl = fallbackUrl,
+                width = width,
+                height = height,
+            )
+        }
     } finally {
         file.delete()
     }
+}
+
+private fun uploadChatPhotoViaWeb(file: File): String? {
+    val uploadSource = if (file.length() <= ImageUploader.IMAGE_MAX_SIZE) {
+        file
+    } else {
+        null
+    }
+    val base64 = if (uploadSource != null) {
+        ImageUtil.imageToBase64(uploadSource)
+    } else {
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        val bytes = ImageUtil.compressImage(bitmap, quality = 90)
+        android.util.Base64.encodeToString(bytes, android.util.Base64.DEFAULT)
+    } ?: return null
+    val response = RetrofitTiebaApi.WEB_TIEBA_API.webUploadPic(base64).execute()
+    if (!response.isSuccessful) return null
+    val bean = response.body() ?: return null
+    val rawSrc = bean.imageSrc?.trim().orEmpty()
+    val baseSrc = bean.imageBaseSrc?.trim().orEmpty()
+    val candidate = when {
+        rawSrc.startsWith("http://") || rawSrc.startsWith("https://") -> rawSrc
+        rawSrc.startsWith("//") -> "https:$rawSrc"
+        rawSrc.isNotBlank() && baseSrc.isNotBlank() -> {
+            val normalizedBase = when {
+                baseSrc.startsWith("http://") || baseSrc.startsWith("https://") -> baseSrc
+                baseSrc.startsWith("//") -> "https:$baseSrc"
+                else -> "https://$baseSrc"
+            }.trimEnd('/')
+            "$normalizedBase/${rawSrc.trimStart('/')}"
+        }
+        else -> return null
+    }
+    return candidate.toHttpUrlOrNull()?.takeIf {
+        it.host.isNotBlank() && it.scheme in setOf("http", "https")
+    }?.toString()
 }
 
 private fun currentUploadAccountKey(): String {

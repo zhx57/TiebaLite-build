@@ -77,6 +77,15 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
  * 结构参考 JetChat 与 compose_chat：整行按收发方靠左/靠右，自己消息的状态指示器
  * 放在气泡左侧同一个内层 Row 里，固定宽度不参与 weight，避免气泡宽度抖动。
  */
+private val NON_IMAGE_MESSAGE_KINDS = setOf(
+    ChatMessageKind.VOICE,
+    ChatMessageKind.TEXT_TO_SPEECH,
+    ChatMessageKind.SYSTEM_EVENT,
+    ChatMessageKind.DELETE_EVENT,
+    ChatMessageKind.EMOTION_REACTION,
+    ChatMessageKind.CONTROL,
+)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatMessageRow(
@@ -96,7 +105,7 @@ fun ChatMessageRow(
 ) {
     val bubbleColor = if (isSelf) ExtendedTheme.colors.primary else ExtendedTheme.colors.chip
     val textColor = if (isSelf) ExtendedTheme.colors.onPrimary else ExtendedTheme.colors.onChip
-    val hasImages = images.isNotEmpty()
+    val hasImages = images.isNotEmpty() && semantics.kind !in NON_IMAGE_MESSAGE_KINDS
     androidx.compose.foundation.layout.BoxWithConstraints(modifier.fillMaxWidth()) {
     val compact = maxWidth < 360.dp
     val maxBubbleWidth = (maxWidth - if (compact) 68.dp else 96.dp).coerceAtMost(360.dp)

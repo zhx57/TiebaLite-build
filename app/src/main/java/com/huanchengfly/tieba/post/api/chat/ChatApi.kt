@@ -248,7 +248,12 @@ object ChatApi {
         val senderBduk = textObj?.optString("baidu_uk").orEmpty()
         val businessType = textObj?.takeIf { it.has("content_type") }?.optInt("content_type")
             ?: transportType.takeIf { isSystem && it in SYSTEM_BUSINESS_TYPES }
-        val messageKind = ChatMessageSemantics.classify(transportType, businessType, isSystem)
+        val voicePayload = !isSystem && isVoicePayload(textObj, content)
+        val messageKind = if (voicePayload) {
+            ChatMessageKind.VOICE
+        } else {
+            ChatMessageSemantics.classify(transportType, businessType, isSystem)
+        }
         val targetId = sequenceOf("msgid", "msg_id", "target_id", "target_msgid", "pid", "tid")
             .mapNotNull { key ->
                 val value = textObj?.opt(key) ?: envelope?.opt(key)
@@ -273,15 +278,20 @@ object ChatApi {
             rawContent?.takeUnless { it.startsWith("{") || it.startsWith("[") }.orEmpty()
         }
 
-        // 图片消息：图片地址在 content_body 的 src 上，多图时可能是数组或逗号拼接。
-        val bodyImages = extractImages(textObj?.opt("content_body"))
-        val sourceImages = extractImageSources(textObj?.opt("src"))
-        val textImages = if (transportType == 1 || businessType == 1) extractImageSources(rawText) else
-            extractImageSources(rawText).filter { url ->
-                val host = runCatching { url.toHttpUrl().host }.getOrDefault("")
-                host in setOf("imgsa.baidu.com", "imgsrc.baidu.com", "tiebapic.baidu.com")
-            }
-        val images = (bodyImages + sourceImages + textImages).distinct()
+        // 只有非语音/非系统控制类的消息才允许提取图片，避免语音音频地址被当成图片框渲染。
+        val images = if (messageKind in NON_IMAGE_MESSAGE_KINDS) {
+            emptyList()
+        } else {
+            // 图片消息：图片地址在 content_body 的 src 上，多图时可能是数组或逗号拼接。
+            val bodyImages = extractImages(textObj?.opt("content_body"))
+            val sourceImages = extractImageSources(textObj?.opt("src"))
+            val textImages = if (transportType == 1 || businessType == 1) extractImageSources(rawText) else
+                extractImageSources(rawText).filter { url ->
+                    val host = runCatching { url.toHttpUrl().host }.getOrDefault("")
+                    host in setOf("imgsa.baidu.com", "imgsrc.baidu.com", "tiebapic.baidu.com")
+                }
+            (bodyImages + sourceImages + textImages).distinct()
+        }
 
         // 表情消息：content_body 的 text 是 image_emoticon25 这类表情 id，
         // 需要转成渲染层认识的 (#表情名)，否则正文为空会被显示成不支持的消息。
@@ -314,6 +324,10 @@ object ChatApi {
             text = text.ifBlank {
                 when {
                     images.isNotEmpty() -> ""
+                    messageKind == ChatMessageKind.VOICE -> {
+                        val seconds = extractVoiceDurationSeconds(textObj, content)
+                        if (seconds > 0) "[语音消息 ${seconds}秒]" else "[语音消息]"
+                    }
                     messageKind == ChatMessageKind.SYSTEM_EVENT -> "[系统事件 ${businessType ?: transportType}，暂无可读正文]"
                     messageKind == ChatMessageKind.DELETE_EVENT -> "消息已删除"
                     messageKind == ChatMessageKind.EMOTION_REACTION -> "表情回应"
@@ -406,10 +420,66 @@ object ChatApi {
      */
     private fun normalizeImageUrl(raw: String): String? {
         val url = raw.trim()
-        return when {
+        val resolved = when {
             url.startsWith("http://") || url.startsWith("https://") -> url
             url.startsWith("//") -> "https:$url"
             url.startsWith("/") -> "https://tiebac.baidu.com$url"
+            else -> return null
+        }
+        val lowerPath = resolved.substringBefore('?').substringBefore('#').lowercase()
+        if (AUDIO_EXTENSIONS.any { lowerPath.endsWith(it) }) return null
+        return resolved
+    }
+
+    private fun isVoicePayload(textObj: JSONObject?, content: Any?): Boolean {
+        return containsVoiceKey(textObj) || containsVoiceKey(content)
+    }
+
+    private fun containsVoiceKey(node: Any?, depth: Int = 0): Boolean {
+        if (depth > 8 || node == null) return false
+        return when (val value = decodeJson(node)) {
+            is JSONObject -> {
+                val keys = value.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (key in VOICE_KEYS && !value.isNull(key) && value.optString(key).isNotBlank()) {
+                        return true
+                    }
+                    if (key in setOf("src", "url", "voice_url", "audio_url")) {
+                        val rawUrl = value.optString(key).substringBefore('?').substringBefore('#').lowercase()
+                        if (AUDIO_EXTENSIONS.any { rawUrl.endsWith(it) }) return true
+                    }
+                }
+                listOf("content_body", "text", "voice", "audio", "speech").any {
+                    containsVoiceKey(value.opt(it), depth + 1)
+                }
+            }
+            is JSONArray -> (0 until minOf(value.length(), 64)).any {
+                containsVoiceKey(value.opt(it), depth + 1)
+            }
+            else -> false
+        }
+    }
+
+    private fun extractVoiceDurationSeconds(textObj: JSONObject?, content: Any?): Int {
+        return findVoiceDuration(textObj) ?: findVoiceDuration(content) ?: 0
+    }
+
+    private fun findVoiceDuration(node: Any?, depth: Int = 0): Int? {
+        if (depth > 8 || node == null) return null
+        return when (val value = decodeJson(node)) {
+            is JSONObject -> {
+                for (key in listOf("during_time", "duration", "voice_time", "audio_time")) {
+                    val raw = value.opt(key)?.toString()?.toLongOrNull() ?: continue
+                    if (raw > 0L) {
+                        return if (raw > 1000L) (raw / 1000L).toInt().coerceAtLeast(1) else raw.toInt()
+                    }
+                }
+                listOf("content_body", "text", "voice", "audio", "speech")
+                    .firstNotNullOfOrNull { findVoiceDuration(value.opt(it), depth + 1) }
+            }
+            is JSONArray -> (0 until minOf(value.length(), 64))
+                .firstNotNullOfOrNull { findVoiceDuration(value.opt(it), depth + 1) }
             else -> null
         }
     }
@@ -432,6 +502,16 @@ object ChatApi {
 
     private val EMOTICON_ID_REGEX = Regex("image_emoticon\\d+")
     private val SYSTEM_BUSINESS_TYPES = setOf(7010, 7025, 20000)
+    private val NON_IMAGE_MESSAGE_KINDS = setOf(
+        ChatMessageKind.VOICE,
+        ChatMessageKind.TEXT_TO_SPEECH,
+        ChatMessageKind.SYSTEM_EVENT,
+        ChatMessageKind.DELETE_EVENT,
+        ChatMessageKind.EMOTION_REACTION,
+        ChatMessageKind.CONTROL,
+    )
+    private val VOICE_KEYS = setOf("voice_md5", "voice", "audio", "speech", "voice_url", "audio_url", "during_time", "duration", "voice_time", "audio_time", "sound")
+    private val AUDIO_EXTENSIONS = setOf(".amr", ".mp3", ".aac", ".wav", ".m4a", ".ogg", ".spx", ".opus")
 
     /**
      * 解析正文，与 aiotieba 的 ChatroomMsg.from_json 保持一致。

@@ -13,7 +13,6 @@ import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
 import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatCache
 import com.huanchengfly.tieba.post.api.chat.ws.privateConversationUid
-import com.huanchengfly.tieba.post.components.ImageUploader
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.arch.BaseViewModel
 import com.huanchengfly.tieba.post.arch.CommonUiEvent
@@ -281,9 +280,7 @@ class PrivateChatViewModel @Inject constructor() :
             val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: error("请先登录")
             client.connect(AccountUtil.getCookie().orEmpty())
             check(client.selfUid == accountUid) { "账号已切换，请重新进入会话" }
-            val preparedCloudMeme = cloudMeme?.takeIf { it.uploadedImageUrl != null }
-                ?: photoUri?.let { uploadChatPhoto(it) }
-                ?: cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+            val preparedCloudMeme = photoUri?.let { uploadChatPhoto(it) } ?: cloudMeme
             check(AccountUtil.getUid()?.toLongOrNull() == accountUid && client.selfUid == accountUid) {
                 "账号已切换，已取消发送"
             }

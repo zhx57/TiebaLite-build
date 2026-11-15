@@ -16,7 +16,6 @@ import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.api.models.chat.SendState
 import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
-import com.huanchengfly.tieba.post.components.ImageUploader
 import com.huanchengfly.tieba.post.components.uploadChatPhoto
 import kotlinx.coroutines.CancellationException
 import com.huanchengfly.tieba.post.arch.BaseViewModel
@@ -190,9 +189,7 @@ class ChatRoomViewModel @Inject constructor() :
                         localPhotoUri = photoUri?.toString(),
                     )
                 )
-                val preparedCloudMeme = cloudMeme?.takeIf { it.uploadedImageUrl != null }
-                    ?: photoUri?.let { uploadChatPhoto(it) }
-                    ?: cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+                val preparedCloudMeme = photoUri?.let { uploadChatPhoto(it) } ?: cloudMeme
                 send(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
                 session.sendChatRoomMessage(
                     chatroomId = roomId,
@@ -233,9 +230,7 @@ class ChatRoomViewModel @Inject constructor() :
                         removeMsgId = failedMsgId,
                     )
                 )
-                val preparedCloudMeme = cloudMeme?.takeIf { it.uploadedImageUrl != null }
-                    ?: photoUri?.let { uploadChatPhoto(it) }
-                    ?: cloudMeme?.let { ImageUploader("").uploadCloudMeme(it) }
+                val preparedCloudMeme = photoUri?.let { uploadChatPhoto(it) } ?: cloudMeme
                 send(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
                 session.sendChatRoomMessage(
                     chatroomId = roomId,

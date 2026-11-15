@@ -61,12 +61,13 @@ class RawWebSocket(
     fun connect() {
         val s = Socket()
         s.connect(InetSocketAddress(host, port), connectTimeoutMs)
-        s.soTimeout = readTimeoutMs
+        s.soTimeout = connectTimeoutMs.coerceAtLeast(10_000)
         socket = s
         input = BufferedInputStream(s.getInputStream())
         output = s.getOutputStream()
         closed = false
         handshake()
+        s.soTimeout = readTimeoutMs
         startReader()
     }
 

@@ -483,10 +483,18 @@ class ChatWebSocketClient {
         )
         if (!socket.sendBinary(frame)) {
             pending.remove(reqId)
+            if (webSocket === socket) {
+                close()
+            }
             throw IllegalStateException("failed to send websocket frame")
         }
         return try {
             awaitPrivateChatResponse(deferred)
+        } catch (e: Throwable) {
+            if (e !is kotlinx.coroutines.CancellationException && webSocket === socket) {
+                close()
+            }
+            throw e
         } finally {
             pending.remove(reqId)
         }
@@ -544,7 +552,12 @@ internal object PrivateChatImageContent {
         put("src", meme.sendThumbnailUrl)
         put("big_src", meme.sendImageUrl)
         put("type", "3")
-        put("bsize", "100,100")
+        val bsize = if (meme.width > 0 && meme.height > 0) {
+            "${meme.width},${meme.height}"
+        } else {
+            "100,100"
+        }
+        put("bsize", bsize)
     }).toString()
 
     fun parse(raw: String, msgType: Int): List<String> {

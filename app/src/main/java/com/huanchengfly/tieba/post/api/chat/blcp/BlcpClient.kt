@@ -4,14 +4,19 @@ import com.huanchengfly.tieba.post.api.models.protos.blcp.Common
 import com.huanchengfly.tieba.post.api.models.protos.blcp.LcmRequest
 import com.huanchengfly.tieba.post.api.models.protos.blcp.RpcData
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.EOFException
 import java.io.IOException
 import java.net.InetSocketAddress
+import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
@@ -43,6 +48,8 @@ class BlcpClient {
     private var started = false
 
     private var connected = false
+
+    private val writeWatchdogScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val isConnected: Boolean
         get() = synchronized(stateLock) {
@@ -254,11 +261,30 @@ class BlcpClient {
             )
         }
         if (response.body.isEmpty()) return
-        val payload = runCatching { JSONObject(String(response.body, Charsets.UTF_8)) }.getOrNull()
-            ?: return
+        val rawBody = String(response.body, Charsets.UTF_8)
+        val payload = runCatching { JSONObject(rawBody) }.getOrNull()
+            ?: throw IllegalStateException("join chatroom failed: invalid response")
         val errCode = payload.optInt("err_code", 0)
         if (errCode != 0) {
             throw IllegalStateException("join chatroom failed: $errCode ${payload.optString("msg")}")
+        }
+    }
+
+    /**
+     * 发送 LCM 心跳包，避免长连接静默断开。
+     */
+    suspend fun sendHeartbeat() {
+        val response = send(
+            serviceId = BlcpConstants.SERVICE_LCM,
+            methodId = BlcpConstants.METHOD_HEARTBEAT,
+            body = RpcData().encode(),
+            correlationId = nextId(),
+        )
+        val rpcError = response.meta.response?.error_code ?: 0
+        if (rpcError != 0) {
+            throw IllegalStateException(
+                "heartbeat failed: RPC $rpcError ${response.meta.response?.error_text.orEmpty()}"
+            )
         }
     }
 
@@ -282,11 +308,22 @@ class BlcpClient {
             body = body,
         )
         try {
-            synchronized(writeLock) {
-                sslSocket.outputStream.write(frame)
-                sslSocket.outputStream.flush()
+            val writeWatchdog = writeWatchdogScope.launch {
+                delay(15_000L)
+                closeConnection(SocketTimeoutException("群聊发送写入超时"))
             }
-            return withTimeout(15_000) { deferred.await() }
+            try {
+                withContext(Dispatchers.IO) {
+                    synchronized(writeLock) {
+                        sslSocket.outputStream.write(frame)
+                        sslSocket.outputStream.flush()
+                    }
+                }
+            } finally {
+                writeWatchdog.cancel()
+            }
+            return withTimeoutOrNull(15_000L) { deferred.await() }
+                ?: throw SocketTimeoutException("群聊请求响应超时，请先检查消息列表后再重试")
         } catch (e: Exception) {
             closeConnection(e)
             throw e

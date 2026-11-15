@@ -99,6 +99,8 @@ data class ChatCloudMeme(
     val uploadedImageUrl: String? = null,
     val uploadedThumbnailUrl: String? = null,
     val officialPicId: String? = null,
+    val width: Int = 0,
+    val height: Int = 0,
 ) {
     init {
         require(id.isNotBlank()) { "云表情 id 不能为空" }

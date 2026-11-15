@@ -1137,4 +1137,40 @@ class ChatRoomStateTest {
         assertEquals(7, failed.robotSkill)
         assertEquals(SendState.FAILED, failed.sendState)
     }
+
+    @Test
+    fun groupVoiceMessageNeverBecomesImage() {
+        val voiceBody = JSONObject()
+            .put("voice_md5", "abc123")
+            .put("during_time", 8)
+            .put("src", "https://tiebac.baidu.com/c/v/voice_sample")
+        val voiceWithType2 = received(imagePayload(2, voiceBody.toString(), "https://tiebac.baidu.com/c/v/voice_sample"))
+        assertEquals(ChatMessageKind.VOICE, voiceWithType2.semantics.kind)
+        assertTrue(voiceWithType2.images.isEmpty())
+        assertEquals("[语音消息 8秒]", voiceWithType2.text)
+
+        val audioUrlOnly = received(imagePayload(2, JSONObject().put("src", "https://example.com/clip.amr").toString()))
+        assertEquals(ChatMessageKind.VOICE, audioUrlOnly.semantics.kind)
+        assertTrue(audioUrlOnly.images.isEmpty())
+        assertEquals("[语音消息]", audioUrlOnly.text)
+    }
+
+    @Test
+    fun groupSendImagePayloadUsesActualDimensionsWhenProvided() {
+        val memeWithSize = ChatCloudMeme(
+            id = "m1",
+            imageUrl = "https://example.com/big.jpg",
+            width = 640,
+            height = 480,
+        )
+        val payload = ChatSendApi.buildMessagePayload(
+            chatroomId = 1L, text = "", forumId = 2L, forumLevel = 0, uk = 123L,
+            bduk = BlcpCrypto.userId2Bduk(42L), triggerId = 1L, selfName = "测试用户",
+            selfPortrait = "self-portrait", bduss = "test-only", mentions = emptyList(), robotSkill = null,
+            zid = "test-device-security-token", cloudMeme = memeWithSize,
+        )
+        val textJson = JSONObject(JSONObject(payload.getString("content")).getString("text"))
+        val contentBody = JSONObject(textJson.getString("content_body"))
+        assertEquals("640,480", contentBody.getString("bsize"))
+    }
 }

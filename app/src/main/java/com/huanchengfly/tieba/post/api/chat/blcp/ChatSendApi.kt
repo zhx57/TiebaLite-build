@@ -193,11 +193,28 @@ object ChatSendApi {
                                 room = chatroomId
                                 securityToken = zid
                                 deadline = connectionDeadline
+                                val keepAliveDelayMs = connectionDeadline.delayMs.coerceAtLeast(30_000L)
                                 expiryClose = scope.launch {
-                                    delay(connectionDeadline.delayMs)
-                                    mutex.withLock {
-                                        synchronized(lifecycleLock) {
-                                            if (blcp === connection && deadline === connectionDeadline) close()
+                                    while (true) {
+                                        delay(keepAliveDelayMs)
+                                        val shouldKeepAlive = synchronized(lifecycleLock) {
+                                            blcp === connection && deadline === connectionDeadline && connection.isConnected
+                                        }
+                                        if (!shouldKeepAlive) break
+                                        val ok = mutex.withLock {
+                                            val stillActive = synchronized(lifecycleLock) {
+                                                blcp === connection && deadline === connectionDeadline
+                                            }
+                                            if (!stillActive) return@withLock false
+                                            runCatching { connection.sendHeartbeat() }.isSuccess
+                                        }
+                                        if (!ok) {
+                                            mutex.withLock {
+                                                synchronized(lifecycleLock) {
+                                                    if (blcp === connection && deadline === connectionDeadline) close()
+                                                }
+                                            }
+                                            break
                                         }
                                     }
                                 }
@@ -205,10 +222,6 @@ object ChatSendApi {
                         }
                         stage = "发送消息"
                         val authenticated = checkNotNull(login)
-                        val currentDeadline = synchronized(lifecycleLock) { deadline }
-                        if (currentDeadline?.isExpired(System.nanoTime()) == true) {
-                            error("登录期限已过，未发送消息")
-                        }
                         val payload = buildMessagePayload(
                             chatroomId, text, forumId, forumLevel, authenticated.uk,
                             BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
@@ -354,7 +367,12 @@ object ChatSendApi {
                     put("src", cloudMeme.sendThumbnailUrl)
                     put("big_src", cloudMeme.sendImageUrl)
                     put("type", "3")
-                    put("bsize", "100,100")
+                    val bsize = if (cloudMeme.width > 0 && cloudMeme.height > 0) {
+                        "${cloudMeme.width},${cloudMeme.height}"
+                    } else {
+                        "100,100"
+                    }
+                    put("bsize", bsize)
                 }.toString(),
             )
             put("src", "")
