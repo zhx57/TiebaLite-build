@@ -88,6 +88,39 @@ class ChatRoomStateTest {
     }
 
     @Test
+    fun missingOrInvalidSenderDoesNotPretendToBeASystemAccount() {
+        for (sender in listOf<Any?>(null, JSONObject.NULL, "invalid")) {
+            val json = JSONObject().put("msgid", 123).put("type", 81)
+                .put("content", "{\"text\":{\"content_type\":0,\"content_body\":{\"text\":\"正常正文\"}}}")
+            if (sender != null) json.put("from_user", sender)
+            val message = ChatApi.parseMessage(json, null)!!
+            assertEquals(ChatMessageKind.TEXT, message.semantics.kind)
+            assertEquals("正常正文", message.text)
+            assertFalse(message.senderName == "系统")
+        }
+    }
+
+    @Test
+    fun emptySystemEventKeepsTypeAndPayloadInsteadOfAnOpaqueLabel() {
+        val message = ChatApi.parseMessage(JSONObject()
+            .put("msgid", 124).put("type", 9999).put("from_user", 0)
+            .put("content", "{\"text\":{\"future_field\":7}}"), null)!!
+        assertEquals(ChatMessageKind.SYSTEM_EVENT, message.semantics.kind)
+        assertTrue(message.text.contains("9999"))
+        assertFalse(message.text == "系统消息")
+        assertTrue(message.semantics.rawPayload!!.contains("future_field"))
+    }
+
+    @Test
+    fun readableSystemMessageStillPreservesItsActualBody() {
+        val message = ChatApi.parseMessage(JSONObject()
+            .put("msgid", 125).put("type", 9999).put("from_user", "0")
+            .put("content", "{\"text\":{\"content_body\":{\"text\":\"有人加入了群聊\"}}}"), null)!!
+        assertEquals("有人加入了群聊", message.text)
+        assertEquals(ChatMessageKind.SYSTEM_EVENT, message.semantics.kind)
+    }
+
+    @Test
     fun groupParserRetainsSystemAndUnknownPayload() {
         val system = ChatApi.parseMessage(
             JSONObject().apply {

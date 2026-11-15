@@ -283,12 +283,13 @@ private fun ChatMessageImages(
     ) {
         images.forEachIndexed { index, url ->
             androidx.compose.runtime.key(index, url) {
-                val state = com.github.panpf.sketch.compose.rememberAsyncImageState()
-                val result = state.result as? com.github.panpf.sketch.request.DisplayResult.Success
-                val ratio = result?.imageInfo?.let {
-                    if (it.width > 0 && it.height > 0) it.width.toFloat() / it.height else 1f
-                } ?: 1f
                 androidx.compose.foundation.layout.BoxWithConstraints {
+                    // 与 AsyncImage 同处子组合，避免图片状态先于 contentScale 初始化而启动。
+                    val state = com.github.panpf.sketch.compose.rememberAsyncImageState()
+                    val result = state.result as? com.github.panpf.sketch.request.DisplayResult.Success
+                    val ratio = result?.imageInfo?.let {
+                        if (it.width > 0 && it.height > 0) it.width.toFloat() / it.height else 1f
+                    } ?: 1f
                     val imageWidth = minOf(maxWidth, if (single) 240.dp else 144.dp,
                         (320.dp * ratio).coerceAtLeast(44.dp))
                     val imageHeight = (imageWidth / ratio).coerceIn(44.dp, 320.dp)

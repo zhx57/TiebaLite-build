@@ -40,7 +40,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.foundation.interaction.PressInteraction
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -79,6 +80,14 @@ fun ChatComposer(
     var menuExpanded by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
+    val inputInteractions = remember { MutableInteractionSource() }
+    val currentPanelVisible by androidx.compose.runtime.rememberUpdatedState(showEmoticonPanel)
+    val dismissPanel by androidx.compose.runtime.rememberUpdatedState(onDismissEmoticonPanel)
+    LaunchedEffect(inputInteractions) {
+        inputInteractions.interactions.collect { interaction ->
+            if (interaction is PressInteraction.Press && currentPanelVisible) dismissPanel()
+        }
+    }
     LaunchedEffect(showEmoticonPanel, enabled) {
         if (!showEmoticonPanel) expanded = false
         if (!enabled) menuExpanded = false
@@ -105,6 +114,7 @@ fun ChatComposer(
                     value = value,
                     onValueChange = onValueChange,
                     enabled = enabled,
+                    interactionSource = inputInteractions,
                     maxLines = if (availableHeight < 360.dp || showEmoticonPanel) 2 else 6,
                     textStyle = MaterialTheme.typography.body1.copy(
                         color = if (enabled) ExtendedTheme.colors.text else ExtendedTheme.colors.textDisabled,
@@ -113,9 +123,6 @@ fun ChatComposer(
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp, max = inputMaxHeight)
                         .clip(RoundedCornerShape(12.dp))
                         .background(ExtendedTheme.colors.bottomBarSurface)
-                        .onFocusChanged {
-                            if (it.isFocused && showEmoticonPanel) onDismissEmoticonPanel()
-                        }
                         .padding(horizontal = 12.dp, vertical = 12.dp),
                     decorationBox = { innerTextField ->
                         Box {
@@ -127,6 +134,20 @@ fun ChatComposer(
                         }
                     },
                 )
+                IconButton(
+                    onClick = {
+                        menuExpanded = false
+                        focusManager.clearFocus(force = true)
+                        keyboard?.hide()
+                        onToggleEmoticonPanel()
+                    },
+                    enabled = enabled,
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(Icons.Outlined.EmojiEmotions,
+                        if (showEmoticonPanel) "关闭表情面板" else "打开表情面板",
+                        tint = if (showEmoticonPanel) ExtendedTheme.colors.primary else ExtendedTheme.colors.text)
+                }
                 Box {
                     IconButton(onClick = { menuExpanded = !menuExpanded }, enabled = enabled, modifier = Modifier.size(48.dp)) {
                         Icon(Icons.Outlined.Add, "更多聊天操作", tint = ExtendedTheme.colors.text)
@@ -137,10 +158,6 @@ fun ChatComposer(
                         modifier = Modifier.heightIn(max = (availableHeight * 0.7f).coerceIn(48.dp, 320.dp))
                             .background(ExtendedTheme.colors.menuBackground),
                     ) {
-                        DropdownMenuItem(onClick = { menuExpanded = false; onToggleEmoticonPanel() }) {
-                            Icon(Icons.Outlined.EmojiEmotions, null, tint = ExtendedTheme.colors.text)
-                            Text(if (showEmoticonPanel) "关闭表情面板" else "打开表情面板", Modifier.padding(start = 12.dp), color = ExtendedTheme.colors.text)
-                        }
                         if (onPhotoClick != null) DropdownMenuItem(onClick = { menuExpanded = false; onPhotoClick() }) {
                             Icon(Icons.Outlined.Image, null, tint = ExtendedTheme.colors.text)
                             Text("图片", Modifier.padding(start = 12.dp), color = ExtendedTheme.colors.text)

@@ -226,7 +226,8 @@ object ChatApi {
      */
     internal fun parseMessage(json: JSONObject, myUid: Long?): ChatRoomMessage? {
         val senderUid = json.optLong("from_user")
-        val isSystem = senderUid == 0L
+        val isSystem = json.opt("from_user")?.takeUnless { it == JSONObject.NULL }
+            ?.toString()?.toLongOrNull() == 0L
         val transportType = json.optInt("type", 0)
         val content = runCatching {
             when (val raw = json.opt("content")) {
@@ -313,7 +314,7 @@ object ChatApi {
             text = text.ifBlank {
                 when {
                     images.isNotEmpty() -> ""
-                    messageKind == ChatMessageKind.SYSTEM_EVENT -> "系统消息"
+                    messageKind == ChatMessageKind.SYSTEM_EVENT -> "[系统事件 ${businessType ?: transportType}，暂无可读正文]"
                     messageKind == ChatMessageKind.DELETE_EVENT -> "消息已删除"
                     messageKind == ChatMessageKind.EMOTION_REACTION -> "表情回应"
                     messageKind == ChatMessageKind.TEXT -> "文本消息"
