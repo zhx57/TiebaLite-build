@@ -39,6 +39,7 @@ import androidx.compose.material.icons.outlined.EmojiEmotions
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +60,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.viewinterop.AndroidView
@@ -157,6 +161,7 @@ fun ChatComposer(
     var menuExpanded by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val currentOnValueChange = rememberUpdatedState(onValueChange)
     val currentShowEmoticonPanel = rememberUpdatedState(showEmoticonPanel)
     val currentDismissEmoticonPanel = rememberUpdatedState(onDismissEmoticonPanel)
@@ -164,6 +169,25 @@ fun ChatComposer(
     val disabledTextColor = ExtendedTheme.colors.textDisabled.toArgb()
     val surfaceColor = ExtendedTheme.colors.bottomBarSurface.toArgb()
     val placeholderColor = ExtendedTheme.colors.textSecondary.toArgb()
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                panelExpanded = false
+                menuExpanded = false
+                focusManager.clearFocus(force = true)
+                keyboardController?.hide()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            panelExpanded = false
+            menuExpanded = false
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+        }
+    }
 
     LaunchedEffect(enabled) {
         if (!enabled) menuExpanded = false

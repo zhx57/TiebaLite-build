@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,6 +24,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.huanchengfly.tieba.post.R
@@ -80,6 +82,19 @@ fun PrivateChatPage(
     }
     var showEmoticonPanel by remember { mutableStateOf(false) }
     var resendTarget by remember { mutableStateOf<ChatWsMessage?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                showEmoticonPanel = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            showEmoticonPanel = false
+        }
+    }
 
     val listState = rememberLazyListState()
     val reversedMessages = remember(messages) { messages.asReversed() }
@@ -90,7 +105,6 @@ fun PrivateChatPage(
     FollowLatestChatMessage(listState, peerUid, sendRequestId)
 
     // 可见时接收推送，回到页面立即补拉，5 秒轮询只作兜底。
-    val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(peerUid, viewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             viewModel.bindPeer(peerUid)

@@ -38,6 +38,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.huanchengfly.tieba.post.R
@@ -159,6 +160,21 @@ fun ChatRoomPage(
     var picker by remember { mutableStateOf<String?>(null) }
     var showEmoticonPanel by remember { mutableStateOf(false) }
     var resendTarget by remember { mutableStateOf<ChatRoomMessage?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                showEmoticonPanel = false
+                picker = null
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            showEmoticonPanel = false
+            picker = null
+        }
+    }
     val mentionCandidates = remember(messages, robots) {
         (robots.map { it.user } + messages.asReversed().mapNotNull { message ->
             message.senderBaiduUk.takeIf { it.isNotBlank() && message.senderName.isNotBlank() }
@@ -199,7 +215,6 @@ fun ChatRoomPage(
     FollowLatestChatMessage(listState, roomId, sendRequestId)
 
     // 首次 Load 已经负责当前页，仅在页面可见时按固定间隔触发后续轮询。
-    val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(roomId, viewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
