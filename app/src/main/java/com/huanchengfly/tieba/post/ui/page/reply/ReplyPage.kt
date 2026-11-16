@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
 import android.view.View
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -31,9 +30,6 @@ import androidx.compose.foundation.layout.requiredHeightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -83,16 +79,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.widget.addTextChangedListener
 import com.github.panpf.sketch.compose.AsyncImage
-import com.google.accompanist.drawablepainter.rememberDrawablePainter
-import com.huanchengfly.tieba.post.App
 import com.huanchengfly.tieba.post.R
+import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.arch.GlobalEvent
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.emitGlobalEvent
 import com.huanchengfly.tieba.post.arch.onEvent
 import com.huanchengfly.tieba.post.arch.onGlobalEvent
 import com.huanchengfly.tieba.post.arch.pageViewModel
-import com.huanchengfly.tieba.post.models.database.Draft
 import com.huanchengfly.tieba.post.pxToDpFloat
 import com.huanchengfly.tieba.post.toMD5
 import com.huanchengfly.tieba.post.toastShort
@@ -108,14 +102,13 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.Dialog
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogNegativeButton
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogPositiveButton
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogState
+import com.huanchengfly.tieba.post.ui.widgets.compose.EmoticonPickerPanel
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyBackHandler
 import com.huanchengfly.tieba.post.ui.widgets.compose.VerticalDivider
 import com.huanchengfly.tieba.post.ui.widgets.compose.rememberDialogState
 import com.huanchengfly.tieba.post.ui.widgets.edittext.widget.UndoableEditText
 import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.DatabaseUtil
-import com.huanchengfly.tieba.post.utils.Emoticon
-import com.huanchengfly.tieba.post.utils.EmoticonManager
 import com.huanchengfly.tieba.post.utils.PickMediasRequest
 import com.huanchengfly.tieba.post.utils.StringUtil
 import com.huanchengfly.tieba.post.utils.appPreferences
@@ -226,7 +219,7 @@ internal fun ReplyPageContent(
     )
     val selectedImageList by viewModel.uiState.collectPartialAsState(
         prop1 = ReplyUiState::selectedImageList,
-        initial = persistentListOf()
+        initial = persistentListOf<String>()
     )
     val isOriginImage by viewModel.uiState.collectPartialAsState(
         prop1 = ReplyUiState::isOriginImage,
@@ -317,7 +310,7 @@ internal fun ReplyPageContent(
         }
     }
 
-    var waitUploadSuccessToSend by remember { mutableStateOf(false) }
+    var submitLocked by remember { mutableStateOf(false) }
     // 楼中楼回复需要带上被回复人的引用前缀，带图和不带图两条路径都要用
     fun buildReplyContent(text: String): String =
         if (subPostId == null || subPostId == 0L) {
@@ -326,27 +319,37 @@ internal fun ReplyPageContent(
             "回复 #(reply, ${replyUserPortrait}, ${replyUserName}) :$text"
         }
 
-    viewModel.onEvent<ReplyUiEvent.UploadSuccess> {
-        if (waitUploadSuccessToSend) {
-            waitUploadSuccessToSend = false
-            val imageContent = it.resultList
-                .joinToString("\n") { image ->
-                    "#(pic,${image.picId ?: 0},${image.picInfo?.originPic?.width ?: 0},${image.picInfo?.originPic?.height ?: 0})"
-                }
-            viewModel.send(
-                ReplyUiIntent.Send(
-                    buildReplyContent("${getText()}\n$imageContent"),
-                    forumId,
-                    forumName,
-                    threadId,
-                    curTbs,
-                    title = threadTitle.takeIf { isTopicThread },
-                    postId,
-                    subPostId,
-                    replyUserId,
-                )
+    // 附件上传成功即发送；submitLocked 在上传与发送全过程保持按钮禁用。
+    viewModel.onEvent<ReplyUiEvent.AttachmentsReady> { event ->
+        // 附件来自点击发送时的快照；正文取上传完成时的最新可编辑内容。
+        val content = buildReplySendContent(
+            text = getText(),
+            localImages = event.localPictures,
+            cloudMemes = event.cloudPictures,
+        )
+        viewModel.send(
+            ReplyUiIntent.Send(
+                buildReplyContent(content),
+                forumId,
+                forumName,
+                threadId,
+                curTbs,
+                title = threadTitle.takeIf { isTopicThread },
+                postId,
+                subPostId,
+                replyUserId,
             )
-        }
+        )
+    }
+
+    viewModel.onEvent<ReplyUiEvent.AttachmentsFailed> {
+        submitLocked = false
+        context.toastShort(R.string.toast_upload_image_failed, it.errorMessage)
+    }
+
+    viewModel.onEvent<ReplyUiEvent.SendFailed> {
+        submitLocked = false
+        context.toastShort(R.string.toast_reply_failed, it.errorCode, it.errorMessage)
     }
 
     var closingPanel by remember { mutableStateOf(false) }
@@ -461,7 +464,13 @@ internal fun ReplyPageContent(
         }
     }
 
-    val canSend by remember { derivedStateOf { !isTextEmpty || selectedImageList.isNotEmpty() } }
+    val selectedCloudMemeList by viewModel.uiState.collectPartialAsState(
+        prop1 = ReplyUiState::selectedCloudMemeList,
+        initial = persistentListOf<ChatCloudMeme>()
+    )
+    val totalAttachmentCount = selectedImageList.size + selectedCloudMemeList.size
+    val canSend = !isReplying && !submitLocked &&
+        (!isTextEmpty || totalAttachmentCount > 0)
 
     val textFieldScrollState = rememberScrollState()
 
@@ -623,6 +632,21 @@ internal fun ReplyPageContent(
 //                placeholder = { Text(text = stringResource(id = R.string.tip_reply)) },
 //            )
         }
+        if (totalAttachmentCount > 0) {
+            ReplyAttachmentStrip(
+                imageUris = selectedImageList,
+                cloudMemes = selectedCloudMemeList,
+                onRemoveImage = { index ->
+                    if (!isReplying) viewModel.send(ReplyUiIntent.RemoveImage(index))
+                },
+                onRemoveCloudMeme = { id ->
+                    if (!isReplying) viewModel.send(ReplyUiIntent.RemoveCloudMeme(id))
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
         Row(
             modifier = Modifier.padding(16.dp),
             horizontalArrangement = Arrangement.spacedBy(24.dp)
@@ -643,13 +667,13 @@ internal fun ReplyPageContent(
             ) {
                 BadgedBox(
                     badge = {
-                        if (selectedImageList.isNotEmpty()) {
+                        if (totalAttachmentCount > 0) {
                             Badge(
                                 backgroundColor = ExtendedTheme.colors.accent,
                                 contentColor = ExtendedTheme.colors.background,
                             ) {
                                 Text(
-                                    text = "${selectedImageList.size}",
+                                    text = "$totalAttachmentCount",
                                     style = MaterialTheme.typography.caption
                                 )
                             }
@@ -683,11 +707,15 @@ internal fun ReplyPageContent(
             } else {
                 IconButton(
                     onClick = {
-                        val replyContent = buildReplyContent(getText())
-                        if (selectedImageList.isEmpty()) {
+                        if (isReplying || submitLocked) return@IconButton
+                        submitLocked = true
+                        // 快照附件，避免上传期间删除或新增导致附件与计数错乱。
+                        val imageSnapshot = selectedImageList.toList()
+                        val cloudMemeSnapshot = selectedCloudMemeList.toList()
+                        if (imageSnapshot.isEmpty() && cloudMemeSnapshot.isEmpty()) {
                             viewModel.send(
                                 ReplyUiIntent.Send(
-                                    content = replyContent,
+                                    content = buildReplyContent(getText()),
                                     forumId = forumId,
                                     forumName = forumName,
                                     threadId = threadId,
@@ -699,12 +727,12 @@ internal fun ReplyPageContent(
                                 )
                             )
                         } else {
-                            waitUploadSuccessToSend = true
                             viewModel.send(
-                                ReplyUiIntent.UploadImages(
-                                    forumName,
-                                    selectedImageList,
-                                    isOriginImage
+                                ReplyUiIntent.UploadAttachments(
+                                    forumName = forumName,
+                                    imageUris = imageSnapshot,
+                                    isOriginImage = isOriginImage,
+                                    cloudMemes = cloudMemeSnapshot,
                                 )
                             )
                         }
@@ -729,12 +757,22 @@ internal fun ReplyPageContent(
             Column(modifier = Modifier.height(panelHeight)) {
                 when (curKeyboardType) {
                     EMOJI -> {
-                        EmoticonPanel(
+                        EmoticonPickerPanel(
                             modifier = Modifier
-                                .fillMaxWidth()
+                                .fillMaxSize()
                                 .padding(horizontal = 8.dp),
                             onEmoticonClick = { emoticon ->
                                 insertEmoticon("#(${emoticon.name})")
+                            },
+                            onCloudMemeClick = { meme ->
+                                // 上传/发送期间不改变待发送附件。
+                                if (!isReplying) {
+                                    if (totalAttachmentCount >= REPLY_MAX_ATTACHMENT_COUNT) {
+                                        context.toastShort("最多只能添加 $REPLY_MAX_ATTACHMENT_COUNT 张图片")
+                                    } else {
+                                        viewModel.send(ReplyUiIntent.AddCloudMeme(meme))
+                                    }
+                                }
                             }
                         )
                     }
@@ -742,11 +780,15 @@ internal fun ReplyPageContent(
                     IMAGE -> {
                         ImagePanel(
                             selectedImages = selectedImageList,
+                            remainingCount = (REPLY_MAX_ATTACHMENT_COUNT - totalAttachmentCount)
+                                .coerceAtLeast(0),
                             onNewImageSelected = { uris ->
-                                viewModel.send(ReplyUiIntent.AddImage(uris.map { it.toString() }))
+                                if (!isReplying) {
+                                    viewModel.send(ReplyUiIntent.AddImage(uris.map { it.toString() }))
+                                }
                             },
                             onRemoveImage = {
-                                viewModel.send(ReplyUiIntent.RemoveImage(it))
+                                if (!isReplying) viewModel.send(ReplyUiIntent.RemoveImage(it))
                             },
                             isOriginImage = isOriginImage,
                             onIsOriginImageChange = {
@@ -869,42 +911,60 @@ fun ReplyPage(
 }
 
 @Composable
-private fun EmoticonPanel(
+private fun ReplyAttachmentStrip(
+    imageUris: ImmutableList<String>,
+    cloudMemes: ImmutableList<ChatCloudMeme>,
+    onRemoveImage: (Int) -> Unit,
+    onRemoveCloudMeme: (String) -> Unit,
     modifier: Modifier = Modifier,
-    onEmoticonClick: (Emoticon) -> Unit,
 ) {
-    val emoticons = remember {
-        EmoticonManager.getAllEmoticon()
-            .filter { it.name.isNotEmpty() }
-    }
-
-    Column(
-        modifier = modifier
+    LazyRow(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(48.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 16.dp)
-        ) {
-            items(emoticons) { emoticon ->
-                Image(
-                    painter = rememberDrawablePainter(
-                        drawable = EmoticonManager.getEmoticonDrawable(
-                            LocalContext.current,
-                            emoticon.id
-                        )
-                    ),
-                    contentDescription = stringResource(
-                        id = R.string.emoticon,
-                        emoticon.name
-                    ),
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .padding(8.dp)
-                        .clickable { onEmoticonClick(emoticon) },
+        itemsIndexed(imageUris, key = { index, uri -> "local_${index}_$uri" }) { index, imageUri ->
+            Box(modifier = Modifier.size(64.dp)) {
+                AsyncImage(
+                    imageUri = imageUri,
+                    contentDescription = stringResource(id = R.string.desc_image),
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
                 )
+                IconButton(
+                    onClick = { onRemoveImage(index) },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(24.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = stringResource(id = R.string.desc_remove_image),
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        }
+        itemsIndexed(cloudMemes, key = { _, meme -> meme.id }) { _, meme ->
+            Box(modifier = Modifier.size(64.dp)) {
+                AsyncImage(
+                    imageUri = meme.sendThumbnailUrl,
+                    contentDescription = "云表情 ${meme.id}",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                IconButton(
+                    onClick = { onRemoveCloudMeme(meme.id) },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(24.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = stringResource(id = R.string.desc_remove_image),
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
         }
     }
@@ -913,6 +973,7 @@ private fun EmoticonPanel(
 @Composable
 private fun ImagePanel(
     selectedImages: ImmutableList<String>,
+    remainingCount: Int,
     onNewImageSelected: (List<Uri>) -> Unit,
     onRemoveImage: (Int) -> Unit,
     isOriginImage: Boolean,
@@ -962,7 +1023,7 @@ private fun ImagePanel(
                     }
                 }
             }
-            if (selectedImages.size < 9) {
+            if (remainingCount > 0) {
                 item {
                     Box(
                         modifier = Modifier
@@ -973,7 +1034,7 @@ private fun ImagePanel(
                                 coroutineScope.emitGlobalEvent(
                                     GlobalEvent.StartSelectImages(
                                         id,
-                                        9 - selectedImages.size,
+                                        remainingCount,
                                         PickMediasRequest.ImageOnly
                                     )
                                 )

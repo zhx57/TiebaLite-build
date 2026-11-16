@@ -19,8 +19,10 @@ import androidx.compose.material.LocalTextStyle
 import androidx.compose.material.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -50,9 +52,11 @@ import com.huanchengfly.tieba.post.ui.common.windowsizeclass.WindowWidthSizeClas
 import com.huanchengfly.tieba.post.ui.page.LocalNavigator
 import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.page.destinations.WebViewPageDestination
+import com.huanchengfly.tieba.post.ui.widgets.compose.CloudMemeImageMenu
 import com.huanchengfly.tieba.post.ui.widgets.compose.EmoticonText
 import com.huanchengfly.tieba.post.ui.widgets.compose.NetworkImage
 import com.huanchengfly.tieba.post.ui.widgets.compose.VoicePlayer
+import com.huanchengfly.tieba.post.ui.widgets.compose.rememberCloudMemeImageCollector
 import com.huanchengfly.tieba.post.utils.EmoticonUtil.emoticonString
 import com.huanchengfly.tieba.post.utils.appPreferences
 import com.huanchengfly.tieba.post.utils.launchUrl
@@ -135,21 +139,25 @@ data class PicContentRender(
     val picId: String,
     val photoViewData: PhotoViewData? = null,
 ) : PbContentRender {
+    /** 收藏优先使用原图；显示用 picUrl 仍保持原逻辑不变。 */
+    private val collectSourceUrl: String
+        get() = originUrl.takeIf { it.isNotBlank() } ?: picUrl
+
     @Composable
     override fun Render() {
         val widthFraction =
             if (LocalWindowSizeClass.current.widthSizeClass == WindowWidthSizeClass.Compact) 1f else 0.5f
         val context = LocalContext.current
 
-        NetworkImage(
+        CollectableNetworkImage(
             imageUri = picUrl,
-            contentDescription = stringResource(id = R.string.desc_image),
+            collectSourceUrl = collectSourceUrl,
+            photoViewData = photoViewData,
             modifier = Modifier
                 .focusable()
                 .clip(RoundedCornerShape(context.appPreferences.radius.dp))
                 .fillMaxWidth(widthFraction)
                 .aspectRatio(width * 1f / height),
-            photoViewData = photoViewData,
             contentScale = ContentScale.Crop
         )
     }
@@ -157,9 +165,10 @@ data class PicContentRender(
     @Composable
     fun FullWidthRender() {
         val context = LocalContext.current
-        NetworkImage(
+        CollectableNetworkImage(
             imageUri = picUrl,
-            contentDescription = stringResource(id = R.string.desc_image),
+            collectSourceUrl = collectSourceUrl,
+            photoViewData = photoViewData,
             modifier = Modifier
                 .focusable()
                 .clip(RoundedCornerShape(context.appPreferences.radius.dp))
@@ -168,13 +177,45 @@ data class PicContentRender(
                     if (width > 0 && height > 0) width * 1f / height
                     else 1f
                 ),
-            photoViewData = photoViewData,
             contentScale = ContentScale.Crop
         )
     }
 
     override fun toString(): String {
         return "[图片]"
+    }
+}
+
+/**
+ * 帖子/回帖图片：单击行为完全交给 NetworkImage，长按只弹收藏菜单。
+ * 这里的 picId 来自 URL 推导，不可信，因此始终走上传换取真实 pic_id 的路径。
+ */
+@Composable
+private fun CollectableNetworkImage(
+    imageUri: String,
+    collectSourceUrl: String,
+    photoViewData: PhotoViewData?,
+    modifier: Modifier,
+    contentScale: ContentScale,
+) {
+    val collector = rememberCloudMemeImageCollector()
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Box {
+        NetworkImage(
+            imageUri = imageUri,
+            contentDescription = stringResource(id = R.string.desc_image),
+            modifier = modifier,
+            photoViewData = photoViewData,
+            contentScale = contentScale,
+            onLongPress = { menuExpanded = true },
+        )
+        CloudMemeImageMenu(
+            expanded = menuExpanded,
+            isCollecting = collector.isCollecting(collectSourceUrl),
+            onDismiss = { menuExpanded = false },
+            onCollect = { collector.collect(collectSourceUrl) },
+        )
     }
 }
 

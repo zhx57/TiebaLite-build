@@ -85,6 +85,61 @@ class CloudMemeStateTest {
     }
 
     @Test
+    fun collectMemeRejectsAccountSwitchBeforeSubmitting() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            var fetches = 0
+            val cache = CloudMemeCache(directory) { fetches++; lists }
+            val error = runCatching {
+                cache.collectMeme(
+                    uid = "a",
+                    bduss = "secret",
+                    picId = "pic_1",
+                    expectedAccount = { "b" to "other" },
+                )
+            }.exceptionOrNull()
+            assertTrue(error is IllegalStateException)
+            assertEquals(0, fetches)
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun collectMemeAppendsWithoutDroppingExistingCollectedItems() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            val existing = CloudMeme("a", "https://example.com/a", null)
+            val added = CloudMeme("b", "https://example.com/b", null)
+            var server = CloudMemeLists(listOf(existing), emptyList())
+            val cache = CloudMemeCache(directory) { server }
+            cache.load("u", "secret")
+            // 服务端接受提交后确认列表包含新收藏，模拟真实收藏接口的最终结果。
+            server = CloudMemeLists(listOf(existing, added), emptyList())
+            val result = cache.collectMeme(
+                uid = "u",
+                bduss = "secret",
+                picId = "b",
+                expectedAccount = { "u" to "secret" },
+            )
+            assertEquals(listOf("a", "b"), result.collected.map { it.id })
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun collectMemeTreatsExistingIdAsIdempotentWithoutDuplicate() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            val cache = CloudMemeCache(directory) { lists }
+            val result = cache.collectMeme(
+                uid = "u",
+                bduss = "secret",
+                picId = "a",
+                expectedAccount = { "u" to "secret" },
+            )
+            assertEquals(listOf("a"), result.collected.map { it.id })
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
     fun diskAndMemoryCacheAreUidScopedFreshAndNeverPersistCredentials() = runBlocking {
         val directory = Files.createTempDirectory("cloud-memes").toFile()
         try {

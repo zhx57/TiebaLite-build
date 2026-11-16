@@ -165,8 +165,14 @@ class ImageUploader(
             val picture = uploadSinglePicture(file.absolutePath, isOriginImage = true).uploadedPicture
                 ?: error("上传云表情失败：响应缺少图片资源")
             check(currentUploadAccountKey() == accountKey) { "上传期间账号已切换" }
-            meme.copy(uploadedImageUrl = picture.imageUrl, uploadedThumbnailUrl = picture.thumbnailUrl,
-                officialPicId = picture.picId)
+            val origin = picture.picInfo?.originPic
+            meme.copy(
+                uploadedImageUrl = picture.imageUrl,
+                uploadedThumbnailUrl = picture.thumbnailUrl,
+                officialPicId = picture.picId,
+                width = origin?.width?.toIntOrNull()?.takeIf { it > 0 } ?: meme.width,
+                height = origin?.height?.toIntOrNull()?.takeIf { it > 0 } ?: meme.height,
+            )
         } finally {
             file.delete()
         }

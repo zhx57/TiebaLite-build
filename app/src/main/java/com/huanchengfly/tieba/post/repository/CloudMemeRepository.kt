@@ -335,3 +335,21 @@ internal class CloudMemeSession(
         mutableState.value = CloudMemeState()
     }
 }
+
+/**
+ * 把一张带可靠官方资源标识的图片加入当前账号的云收藏。
+ *
+ * 调用方必须传入贴吧官方 [picId]，URL 文件名与列表序号不能当作资源标识。
+ * 收藏结果以服务端重新拉取确认为准，避免出现本地提示成功但服务端未生效。
+ */
+internal suspend fun CloudMemeCache.collectMeme(
+    uid: String,
+    bduss: String,
+    picId: String,
+    expectedAccount: () -> Pair<String, String>,
+): CloudMemeLists {
+    require(picId.isNotBlank()) { "缺少可用于收藏的图片资源标识" }
+    val snapshot = expectedAccount()
+    check(snapshot.first == uid && snapshot.second == bduss) { "收藏期间账号已切换" }
+    return addCollected(uid, bduss, picId)
+}

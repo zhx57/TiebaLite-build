@@ -4,9 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
-import androidx.compose.foundation.clickable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import com.huanchengfly.tieba.post.goToActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -37,7 +34,10 @@ import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -61,8 +61,9 @@ import com.huanchengfly.tieba.post.ui.common.PbContentText
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.Avatar
+import com.huanchengfly.tieba.post.ui.widgets.compose.CloudMemeImageMenu
 import com.huanchengfly.tieba.post.ui.widgets.compose.LongClickMenu
-import com.huanchengfly.tieba.post.ui.widgets.compose.NetworkImage
+import com.huanchengfly.tieba.post.ui.widgets.compose.rememberCloudMemeImageCollector
 import com.huanchengfly.tieba.post.ui.widgets.compose.rememberMenuState
 import com.huanchengfly.tieba.post.ui.widgets.compose.Sizes
 import com.huanchengfly.tieba.post.ui.widgets.compose.VoicePlayer
@@ -274,7 +275,11 @@ internal fun annotateChatLinks(text: String): AnnotatedString = buildAnnotatedSt
  *
  * 群聊图片地址是完整的 CDN 链接，直接交给 NetworkImage 加载；
  * 传入 photoViewData 后点击即可全屏查看大图。
+ *
+ * 长按弹收藏菜单，与单击打开大图共用 combinedClickable，
+ * 因此两个动作不会同时触发，也不影响 PhotoView 自身的翻页手势。
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatMessageImages(
     images: List<String>,
@@ -283,6 +288,7 @@ private fun ChatMessageImages(
 ) {
     val context = LocalContext.current
     val radius = context.appPreferences.radius.dp
+    val collector = rememberCloudMemeImageCollector()
     val picItems = remember(images) {
         images.mapIndexed { index, url ->
             PicItem(
@@ -318,6 +324,7 @@ private fun ChatMessageImages(
                             com.huanchengfly.tieba.post.ui.widgets.compose.shouldLoadImage(context, false)
                         )
                     }
+                    var menuExpanded by remember(url) { mutableStateOf(false) }
                     val darken = ExtendedTheme.colors.isNightMode && context.appPreferences.imageDarkenWhenNightMode
                     val request = remember(url, shouldLoad, darken) {
                         com.github.panpf.sketch.request.DisplayRequest(context, url) {
@@ -334,15 +341,24 @@ private fun ChatMessageImages(
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.size(width = imageWidth, height = imageHeight)
                             .clip(RoundedCornerShape(radius))
-                            .clickable {
-                                if (!shouldLoad) shouldLoad = true
-                                else context.goToActivity<com.huanchengfly.tieba.post.ui.page.photoview.PhotoViewActivity> {
-                                    putExtra(
-                                        com.huanchengfly.tieba.post.ui.page.photoview.PhotoViewActivity.EXTRA_PHOTO_VIEW_DATA,
-                                        PhotoViewData(picItems = picItems, index = index),
-                                    )
-                                }
-                            },
+                            .combinedClickable(
+                                onLongClick = { menuExpanded = true },
+                                onClick = {
+                                    if (!shouldLoad) shouldLoad = true
+                                    else context.goToActivity<com.huanchengfly.tieba.post.ui.page.photoview.PhotoViewActivity> {
+                                        putExtra(
+                                            com.huanchengfly.tieba.post.ui.page.photoview.PhotoViewActivity.EXTRA_PHOTO_VIEW_DATA,
+                                            PhotoViewData(picItems = picItems, index = index),
+                                        )
+                                    }
+                                },
+                            ),
+                    )
+                    CloudMemeImageMenu(
+                        expanded = menuExpanded,
+                        isCollecting = collector.isCollecting(url),
+                        onDismiss = { menuExpanded = false },
+                        onCollect = { collector.collect(url) },
                     )
                 }
             }
