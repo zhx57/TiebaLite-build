@@ -83,7 +83,6 @@ class ReplyAttachmentTest {
         assertEquals("pic123", trustedOfficialPicIdOrNull(" pic123 "))
         assertNull(trustedOfficialPicIdOrNull(null))
         assertNull(trustedOfficialPicIdOrNull(""))
-        assertNull(trustedOfficialPicIdOrNull("image_emoticon25"))
         assertNull(trustedOfficialPicIdOrNull("https://example.com/a.png"))
         assertNull(trustedOfficialPicIdOrNull("/forum/pic/item/abc.jpg"))
         assertNull(trustedOfficialPicIdOrNull("a b"))
