@@ -188,6 +188,53 @@ class CloudMemeContractTest {
     }
 
     @Test
+    fun parsesPackageIdsAndKeepsThemAcrossReconciliation() {
+        val raw = """{"error_code":0,"data":{"pic_ids":[],"diy_pic_ids":[],"package_ids":"12_34","pkg_update_time":99}}"""
+        val lists = CloudMemeRepository.parse(raw)
+        assertEquals(listOf("12", "34"), lists.packageIds)
+        assertEquals(99L, lists.packageUpdateTime)
+        val reconciled = reconcileCloudMemes(lists, lists.copy(packageIds = emptyList()))
+        assertEquals(emptyList<String>(), reconciled.packageIds)
+    }
+
+    @Test
+    fun packageDetailsUsePackageIdAndItsOwnWidthAndHeight() {
+        val json = """
+            {"error_code":0,"data":{"id":"12","name":"测试包","cover":"https://example.com/c.jpg",
+            "pics":[
+              {"id":"7","url":"https://example.com/7.gif","thumbnail":"https://example.com/t7.gif","width":60,"height":40},
+              {"id":"8","url":"https://example.com/8.gif","width":"50","height":"30"}
+            ]}}
+        """.trimIndent()
+        val map = CloudMemeRepository.parsePackage(json, "12")
+        assertEquals("12", map.id)
+        assertEquals("测试包", map.name)
+        assertEquals(listOf("7", "8"), map.memes.map { it.id })
+        assertEquals("12_7", map.memes.first().replyIdPart)
+        assertEquals(60, map.memes.first().width)
+        assertEquals(40, map.memes.first().height)
+
+        val wrongId = runCatching {
+            CloudMemeRepository.parsePackage(json, "99")
+        }.exceptionOrNull()
+        assertTrue(wrongId is CloudMemeProtocolException)
+    }
+
+    @Test
+    fun packageDetailsSkipBrokenItemsInsteadOfFailingWholePackage() {
+        val json = """
+            {"error_code":0,"data":{"id":"12","pics":[
+              {"id":"7","url":"https://example.com/7.gif","width":60,"height":40},
+              {"id":"0","url":"https://example.com/bad.gif"},
+              {"id":"","url":""},
+              "bogus"
+            ]}}
+        """.trimIndent()
+        val map = CloudMemeRepository.parsePackage(json, "12")
+        assertEquals(listOf("7"), map.memes.map { it.id })
+    }
+
+    @Test
     fun pic2IdPrefersTopLevelAndRejectsUnconfirmedIds() {
         assertEquals("18446744073709551615", CloudMemeRepository.parsePicId(
             """{"error_code":0,"pics":[{"pic_id":18446744073709551615}],"data":{"pics":[{"pic_id":2}]}}""",

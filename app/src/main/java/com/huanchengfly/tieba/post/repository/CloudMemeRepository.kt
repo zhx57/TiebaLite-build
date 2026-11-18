@@ -31,6 +31,8 @@ internal data class CloudMeme(
     val packageId: String? = null,
     val width: Int? = null,
     val height: Int? = null,
+    /** 官方回帖编辑器展示用的原始标记，收藏列表接口会直接返回。 */
+    val sharpText: String? = null,
 ) {
     val displayUrl: String get() = thumbnail?.takeIf { it.isNotBlank() } ?: imageUrl
     val replyIdPart: String?
@@ -42,6 +44,14 @@ internal data class CloudMeme(
         }
 }
 
+/** 官方表情包组：回帖面板按包展示，包内条目需单独请求详情。 */
+internal data class CloudMemePackage(
+    val id: String,
+    val name: String,
+    val cover: String?,
+    val memes: List<CloudMeme>,
+)
+
 internal fun String.isCloudMemePicId(): Boolean =
     isNotEmpty() && all { it in '0'..'9' } && toULongOrNull()?.let { it > 0uL } == true
 
@@ -50,6 +60,9 @@ internal data class CloudMemeLists(
     val diy: List<CloudMeme>,
     val picUpdateTime: Long? = null,
     val diyPicUpdateTime: Long? = null,
+    /** 表达式包含的包 ID 列表，回帖编辑器按包组织表情。 */
+    val packageIds: List<String> = emptyList(),
+    val packageUpdateTime: Long? = null,
 )
 
 internal class CloudMemeProtocolException : IOException("云表情响应格式异常，请稍后重试")
@@ -73,6 +86,61 @@ internal object CloudMemeRepository {
         val urls = JsonArray().apply { add(imageUrl) }.toString()
         RetrofitTiebaApi.OFFICIAL_TIEBA_API.resolveCloudMemeId(bduss, urls).use { parsePicId(it.string()) }
     }
+
+    /** 拉取单个表情包详情。包内条目带真实宽高，才能生成合法的回帖贴纸标记。 */
+    suspend fun loadPackage(bduss: String, packageId: String): CloudMemePackage =
+        withContext(Dispatchers.IO) {
+            require(bduss.isNotBlank() && packageId.isNotBlank())
+            RetrofitTiebaApi.OFFICIAL_TIEBA_API.getMemePackage(bduss, packageId)
+                .use { parsePackage(it.string(), packageId) }
+        }
+
+    fun parsePackage(json: String, expectedPackageId: String): CloudMemePackage {
+        try {
+            val root = JsonParser.parseString(json).asJsonObject
+            val code = root.get("error_code")?.let(::scalar)?.toIntOrNull()
+                ?: throw CloudMemeProtocolException()
+            if (code != 0) throw CloudMemeServiceException(code)
+            val data = root.getAsJsonObject("data") ?: root
+            val id = optionalString(data, "id")?.takeIf { it.isNotBlank() } ?: expectedPackageId
+            if (id != expectedPackageId) throw CloudMemeProtocolException()
+            val pics = data.get("pics")?.takeIf { it.isJsonArray }?.asJsonArray
+                ?: throw CloudMemeProtocolException()
+            val memes = pics.mapNotNull { element ->
+                if (!element.isJsonObject) return@mapNotNull null
+                parsePackageItem(element.asJsonObject, id)
+            }
+            if (memes.isEmpty()) throw CloudMemeProtocolException()
+            return CloudMemePackage(
+                id = id,
+                name = optionalString(data, "name").orEmpty(),
+                cover = optionalString(data, "cover")?.takeIf { it.isNotBlank() },
+                memes = memes,
+            )
+        } catch (error: CloudMemeServiceException) {
+            throw error
+        } catch (error: Exception) {
+            throw CloudMemeProtocolException()
+        }
+    }
+
+    /** 包内条目单条异常只跳过该条，避免一个坏字段拖垮整个包。 */
+    private fun parsePackageItem(item: JsonObject, packageId: String): CloudMeme? = runCatching {
+        val id = optionalString(item, "id")?.takeIf { it.isCloudMemePicId() } ?: return null
+        val url = optionalString(item, "url").orEmpty()
+        val thumbnail = optionalString(item, "thumbnail")?.takeIf { it.isNotBlank() }
+        if (url.isBlank() && thumbnail == null) return null
+        val width = optionalPositiveInt(item, "width")
+        val height = optionalPositiveInt(item, "height")
+        CloudMeme(
+            id = id,
+            imageUrl = url,
+            thumbnail = thumbnail,
+            packageId = packageId,
+            width = width,
+            height = height,
+        )
+    }.getOrNull()
 
     fun parsePicId(json: String): String {
         try {
@@ -141,6 +209,8 @@ internal object CloudMemeRepository {
                 diy = parseList(data, "diy_pic_ids"),
                 picUpdateTime = optionalLong(data, "pic_update_time"),
                 diyPicUpdateTime = optionalLong(data, "diy_pic_update_time"),
+                packageIds = parsePackageIds(data),
+                packageUpdateTime = optionalLong(data, "pkg_update_time"),
             )
         } catch (error: CloudMemeServiceException) {
             throw error
@@ -172,8 +242,26 @@ internal object CloudMemeRepository {
                 },
                 width = optionalPositiveInt(item, "width"),
                 height = optionalPositiveInt(item, "height"),
+                sharpText = optionalString(item, "sharp_text")?.takeIf { it.isNotBlank() },
             )
         }
+    }
+
+    /**
+     * 官方返回的 package_ids 可能是下划线分隔的字符串，也可能是数组。
+     * 两种情况都按包 ID 拆分，并丢弃非数字项。
+     */
+    private fun parsePackageIds(data: JsonObject): List<String> {
+        val value = data.get("package_ids") ?: return emptyList()
+        if (value.isJsonNull) return emptyList()
+        val raw = when {
+            value.isJsonArray -> value.asJsonArray.mapNotNull { element ->
+                if (element.isJsonPrimitive) element.asString else null
+            }
+            value.isJsonPrimitive -> value.asString.split('_')
+            else -> return emptyList()
+        }
+        return raw.map(String::trim).filter(String::isCloudMemePicId).distinct()
     }
 
     private fun optionalString(item: JsonObject, name: String): String? {
@@ -210,13 +298,17 @@ internal fun reconcileCloudMemes(previous: CloudMemeLists?, incoming: CloudMemeL
     val diy = reconcile(previous.diy, incoming.diy)
     return if (collected === previous.collected && diy === previous.diy &&
         incoming.picUpdateTime == previous.picUpdateTime &&
-        incoming.diyPicUpdateTime == previous.diyPicUpdateTime
+        incoming.diyPicUpdateTime == previous.diyPicUpdateTime &&
+        incoming.packageIds == previous.packageIds &&
+        incoming.packageUpdateTime == previous.packageUpdateTime
     ) previous
     else CloudMemeLists(
         collected = collected,
         diy = diy,
         picUpdateTime = incoming.picUpdateTime,
         diyPicUpdateTime = incoming.diyPicUpdateTime,
+        packageIds = incoming.packageIds,
+        packageUpdateTime = incoming.packageUpdateTime,
     )
 }
 
@@ -314,6 +406,7 @@ internal class CloudMemeCache(
                     meme.packageId?.let { addProperty("pck_id", it) }
                     meme.width?.let { addProperty("width", it) }
                     meme.height?.let { addProperty("height", it) }
+                    meme.sharpText?.let { addProperty("sharp_text", it) }
                 })
             }
         }
@@ -322,8 +415,12 @@ internal class CloudMemeCache(
             add("data", JsonObject().apply {
                 add("pic_ids", array(snapshot.lists.collected))
                 add("diy_pic_ids", array(snapshot.lists.diy))
+                if (snapshot.lists.packageIds.isNotEmpty()) {
+                    addProperty("package_ids", snapshot.lists.packageIds.joinToString("_"))
+                }
                 snapshot.lists.picUpdateTime?.let { addProperty("pic_update_time", it) }
                 snapshot.lists.diyPicUpdateTime?.let { addProperty("diy_pic_update_time", it) }
+                snapshot.lists.packageUpdateTime?.let { addProperty("pkg_update_time", it) }
             })
         }
         val root = JsonObject().apply {

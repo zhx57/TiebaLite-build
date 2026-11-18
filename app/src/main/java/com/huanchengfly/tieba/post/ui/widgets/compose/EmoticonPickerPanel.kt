@@ -131,7 +131,11 @@ private fun EmoticonPickerContent(
 
     Column(modifier = modifier) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            val categories = if (chatMode || onReplyMemeClick != null) listOf("基础", "云收藏", "云 DIY") else listOf("基础")
+            val categories = when {
+                chatMode -> listOf("基础", "云收藏", "云 DIY")
+                onReplyMemeClick != null -> listOf("基础", "云收藏", "云 DIY", "表情包")
+                else -> listOf("基础")
+            }
             categories.forEachIndexed { index, title ->
                 TextButton(onClick = { category = index }, modifier = Modifier.weight(1f)) {
                     Text(title, color = if (category == index) ExtendedTheme.colors.primary else ExtendedTheme.colors.text)
@@ -229,40 +233,146 @@ private fun EmoticonPickerContent(
                     )
                 }
                 val memes = state.lists?.let { if (category == 1) it.collected else it.diy }
-                if (memes != null && memes.isEmpty()) {
-                    Text(if (category == 1) "当前账号暂无云收藏" else "当前账号暂无云 DIY 表情",
-                        color = ExtendedTheme.colors.textSecondary, modifier = Modifier.padding(12.dp))
+                if (category == 3) {
+                    ReplyMemePackageList(
+                        uid = uid,
+                        bduss = bduss,
+                        packageIds = state.lists?.packageIds.orEmpty(),
+                        onSelect = onReplyMemeClick,
+                    )
+                } else {
+                    if (memes != null && memes.isEmpty()) {
+                        Text(if (category == 1) "当前账号暂无云收藏" else "当前账号暂无云 DIY 表情",
+                            color = ExtendedTheme.colors.textSecondary, modifier = Modifier.padding(12.dp))
+                    }
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(72.dp),
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                    ) {
+                        items(memes.orEmpty(), key = { it.id }) { meme ->
+                            NetworkImage(
+                                imageUri = meme.displayUrl,
+                                contentDescription = "云表情 ${meme.id}",
+                                contentScale = ContentScale.Fit,
+                                skipNetworkCheck = true,
+                                modifier = Modifier.aspectRatio(1f).padding(8.dp)
+                                    .background(ExtendedTheme.colors.background)
+                                    .clickable(enabled = onCloudMemeClick != null || onReplyMemeClick != null) {
+                                        if (onReplyMemeClick != null) {
+                                            val active = com.huanchengfly.tieba.post.utils.AccountUtil.currentAccount
+                                            if (active?.uid != uid || active?.bduss != bduss) return@clickable
+                                            if (!state.loading && meme.replyIdPart == null) session.refresh()
+                                            onReplyMemeClick(meme)
+                                            return@clickable
+                                        }
+                                        val selected = runCatching { ChatCloudMeme(meme.id, meme.imageUrl) }.getOrNull()
+                                        if (selected == null) {
+                                            Toast.makeText(context, "此表情缺少有效原图地址，请刷新后重试", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            onCloudMemeClick?.invoke(selected)
+                                        }
+                                    },
+                            )
+                        }
+                    }
                 }
-                LazyVerticalGrid(
+            }
+        }
+    }
+}
+
+/**
+ * 回帖表情包分类：先列出账号的包，点开后再展示包内贴纸。
+ * 包内条目由官方 download 接口单独拉取，不能复用聊天那份扁平收藏。
+ */
+@Composable
+private fun ReplyMemePackageList(
+    uid: String,
+    bduss: String,
+    packageIds: List<String>,
+    onSelect: ((CloudMeme) -> Unit)?,
+) {
+    if (packageIds.isEmpty()) {
+        Text(
+            "当前账号没有可用的回帖表情包",
+            color = ExtendedTheme.colors.textSecondary,
+            modifier = Modifier.padding(12.dp),
+        )
+        return
+    }
+    var selectedPackageId by remember(packageIds) { mutableStateOf<String?>(null) }
+    var package by remember(packageIds) { mutableStateOf<com.huanchengfly.tieba.post.repository.CloudMemePackage?>(null) }
+    var loading by remember(packageIds) { mutableStateOf(false) }
+    var error by remember(packageIds) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(selectedPackageId, bduss) {
+        val id = selectedPackageId ?: return@LaunchedEffect
+        loading = true
+        error = null
+        package = null
+        try {
+            package = com.huanchengfly.tieba.post.repository.CloudMemeRepository.loadPackage(bduss, id)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            error = failure.message ?: "表情包加载失败"
+        } finally {
+            loading = false
+        }
+    }
+
+    val current = package
+    if (selectedPackageId != null && (loading || current != null || error != null)) {
+        Column(Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { selectedPackageId = null; package = null; error = null }) {
+                    Text("返回", color = ExtendedTheme.colors.primary)
+                }
+                Text(
+                    current?.name?.takeIf { it.isNotBlank() } ?: "表情包",
+                    color = ExtendedTheme.colors.text,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            when {
+                loading -> Text("加载中…", color = ExtendedTheme.colors.textSecondary, modifier = Modifier.padding(12.dp))
+                error != null -> Text(error!!, color = ExtendedTheme.colors.textSecondary, modifier = Modifier.padding(12.dp))
+                current != null -> LazyVerticalGrid(
                     columns = GridCells.Adaptive(72.dp),
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 ) {
-                    items(memes.orEmpty(), key = { it.id }) { meme ->
+                    items(current.memes, key = { it.id }) { meme ->
                         NetworkImage(
                             imageUri = meme.displayUrl,
-                            contentDescription = "云表情 ${meme.id}",
+                            contentDescription = "表情包贴纸 ${meme.id}",
                             contentScale = ContentScale.Fit,
                             skipNetworkCheck = true,
                             modifier = Modifier.aspectRatio(1f).padding(8.dp)
                                 .background(ExtendedTheme.colors.background)
-                                .clickable(enabled = onCloudMemeClick != null || onReplyMemeClick != null) {
-                                    if (onReplyMemeClick != null) {
-                                        val active = com.huanchengfly.tieba.post.utils.AccountUtil.currentAccount
-                                        if (active?.uid != uid || active?.bduss != bduss) return@clickable
-                                        if (!state.loading && meme.replyIdPart == null) session.refresh()
-                                        onReplyMemeClick(meme)
-                                        return@clickable
-                                    }
-                                    val selected = runCatching { ChatCloudMeme(meme.id, meme.imageUrl) }.getOrNull()
-                                    if (selected == null) {
-                                        Toast.makeText(context, "此表情缺少有效原图地址，请刷新后重试", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        onCloudMemeClick?.invoke(selected)
-                                    }
+                                .clickable(enabled = onSelect != null) {
+                                    val active = com.huanchengfly.tieba.post.utils.AccountUtil.currentAccount
+                                    if (active?.uid != uid || active?.bduss != bduss) return@clickable
+                                    onSelect?.invoke(meme)
                                 },
                         )
                     }
                 }
+            }
+        }
+        return
+    }
+
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(88.dp),
+        modifier = Modifier.fillMaxWidth().weight(1f),
+    ) {
+        items(packageIds, key = { it }) { id ->
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(8.dp).clickable { selectedPackageId = id },
+            ) {
+                Text("表情包", color = ExtendedTheme.colors.textSecondary, fontSize = 12.sp)
+                Text("#$id", color = ExtendedTheme.colors.text, fontSize = 12.sp)
             }
         }
     }

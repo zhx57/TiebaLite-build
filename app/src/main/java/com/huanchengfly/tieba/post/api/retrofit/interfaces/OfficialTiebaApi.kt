@@ -32,6 +32,21 @@ interface OfficialTiebaApi {
         @Field("cmd") cmd: String = "1003351",
     ): okhttp3.ResponseBody
 
+    /**
+     * 拉取单个表情包详情。
+     *
+     * 官方回帖编辑器把表情包按包组织，包内条目含 id、url、thumbnail、width、height，
+     * 需要带上包 ID 单独请求；这与聊天用的扁平收藏列表不是同一份数据。
+     */
+    @Headers("${Header.FORCE_LOGIN}: ${Header.FORCE_LOGIN_TRUE}")
+    @POST("https://tiebac.baidu.com/c/e/meme/download?cmd=1003338")
+    @FormUrlEncoded
+    suspend fun getMemePackage(
+        @Field("BDUSS") bduss: String,
+        @Field("id") packageId: String,
+        @Field("cmd") cmd: String = "1003338",
+    ): okhttp3.ResponseBody
+
     @Headers("${Header.FORCE_LOGIN}: ${Header.FORCE_LOGIN_TRUE}")
     @POST("https://tiebac.baidu.com/c/e/meme/pic2idJson?cmd=1003353")
     @FormUrlEncoded
