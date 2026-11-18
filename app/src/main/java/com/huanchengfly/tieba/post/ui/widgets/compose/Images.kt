@@ -60,6 +60,7 @@ import com.huanchengfly.tieba.post.models.PhotoViewData
 import com.huanchengfly.tieba.post.repository.CloudMemeCache
 import com.huanchengfly.tieba.post.repository.CloudMemeRepository
 import com.huanchengfly.tieba.post.repository.collectMeme
+import com.huanchengfly.tieba.post.repository.isCloudMemePicId
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.common.windowsizeclass.WindowWidthSizeClass
 import com.huanchengfly.tieba.post.ui.page.photoview.PhotoViewActivity
@@ -72,6 +73,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlin.coroutines.coroutineContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -231,6 +233,35 @@ internal suspend fun collectImageAsCloudMeme(
     }
 }
 
+internal suspend fun collectPostImageAsCloudMeme(
+    imageUrl: String,
+    memePicId: String?,
+    snapshot: Pair<String, String>,
+    expectedAccount: () -> Pair<String, String>,
+    cache: CloudMemeCache,
+    resolvePicId: suspend (String, String) -> String = CloudMemeRepository::resolvePicId,
+): CloudMemeCollectOutcome {
+    val (uid, bduss) = snapshot
+    if (expectedAccount() != snapshot) return CloudMemeCollectOutcome.AccountChanged
+    return try {
+        val picId = memePicId ?: run {
+            val original = collectableImageUrlOrNull(imageUrl)
+                ?: return CloudMemeCollectOutcome.Failed("原图地址无效，无法收藏")
+            resolvePicId(bduss, original)
+        }
+        if (expectedAccount() != snapshot) return CloudMemeCollectOutcome.AccountChanged
+        if (!picId.isCloudMemePicId()) return CloudMemeCollectOutcome.Failed("缺少有效的云表情 ID，无法收藏")
+        cache.collectMeme(uid, bduss, picId, expectedAccount)
+        if (expectedAccount() == snapshot) CloudMemeCollectOutcome.Collected
+        else CloudMemeCollectOutcome.AccountChanged
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        if (expectedAccount() == snapshot) CloudMemeCollectOutcome.Failed(collectFailureMessage(error))
+        else CloudMemeCollectOutcome.AccountChanged
+    }
+}
+
 private fun uploadFailureMessage(error: Throwable): String {
     val detail = error.message?.takeIf { it.isNotBlank() }
     return if (detail != null) "上传图片失败：$detail" else "上传图片失败，请检查网络后重试"
@@ -283,7 +314,19 @@ internal class CloudMemeImageCollector internal constructor(
 
     fun isCollecting(imageUrl: String): Boolean = activeUrls.containsKey(imageUrl.trim())
 
-    fun collect(imageUrl: String, trustedPicId: String? = null) {
+    fun collectPost(imageUrl: String, memePicId: String?) = collectWith(imageUrl, memePicId) { url, snapshot ->
+        collectPostImageAsCloudMeme(url, memePicId, snapshot, expectedAccount, cache)
+    }
+
+    fun collect(imageUrl: String, trustedPicId: String? = null) = collectWith(imageUrl, trustedPicId) { url, _ ->
+        collectImageAsCloudMeme(url, trustedPicId, expectedAccount, cache, uploadImage)
+    }
+
+    private fun collectWith(
+        imageUrl: String,
+        trustedPicId: String?,
+        action: suspend (String, Pair<String, String>) -> CloudMemeCollectOutcome,
+    ) {
         val normalizedUrl = imageUrl.trim()
         if (activeUrls.containsKey(normalizedUrl)) return
         val snapshot = expectedAccount()
@@ -301,13 +344,10 @@ internal class CloudMemeImageCollector internal constructor(
         // LAZY 确保 job 先登记再执行，finally 中才能正确复位状态。
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                when (val outcome = collectImageAsCloudMeme(
-                    imageUrl = normalizedUrl,
-                    trustedPicId = trustedPicId,
-                    expectedAccount = expectedAccount,
-                    cache = cache,
-                    uploadImage = uploadImage,
-                )) {
+                val outcome = action(normalizedUrl, snapshot)
+                coroutineContext.ensureActive()
+                if (expectedAccount() != snapshot) return@launch
+                when (outcome) {
                     CloudMemeCollectOutcome.Collected -> toast("已收藏到云表情")
                     CloudMemeCollectOutcome.AlreadyCollected -> toast("已在云表情收藏中")
                     CloudMemeCollectOutcome.AccountChanged -> Unit

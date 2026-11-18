@@ -15,6 +15,7 @@ import com.huanchengfly.tieba.post.arch.wrapImmutable
 import com.huanchengfly.tieba.post.models.PhotoViewData
 import com.huanchengfly.tieba.post.models.PicItem
 import com.huanchengfly.tieba.post.ui.common.PbContentRender
+import com.huanchengfly.tieba.post.ui.common.MemeContentRender
 import com.huanchengfly.tieba.post.ui.common.PicContentRender
 import com.huanchengfly.tieba.post.ui.common.TextContentRender.Companion.appendText
 import com.huanchengfly.tieba.post.ui.common.VideoContentRender
@@ -338,25 +339,35 @@ val List<PbContent>.renders: ImmutableList<PbContentRender>
                 }
 
                 20 -> {
-                    val width = it.bsize.split(",")[0].toInt()
-                    val height = it.bsize.split(",")[1].toInt()
-                    renders.add(
-                        PicContentRender(
-                            picUrl = it.src,
-                            originUrl = it.src,
-                            showOriginBtn = it.showOriginalBtn == 1,
-                            originSize = it.originSize,
-                            picId = ImageUtil.getPicId(it.src),
-                            width = width,
-                            height = height
-                        )
-                    )
+                    renders.add(it.toType20Render())
                 }
             }
         }
 
         return renders.toImmutableList()
     }
+
+internal fun PbContent.toType20Render(): PbContentRender {
+    memeInfo?.let { meme ->
+        val url = meme.picUrl.ifBlank { meme.thumbnail }.ifBlank { src }
+        if (meme.picId != 0L && url.isNotBlank()) {
+            return MemeContentRender(meme.picId.toULong().toString(), url, meme.width, meme.height)
+        }
+    }
+    val dimensions = bsize.split(',')
+    val width = dimensions.getOrNull(0)?.trim()?.toIntOrNull()?.takeIf { it > 0 } ?: 0
+    val height = dimensions.getOrNull(1)?.trim()?.toIntOrNull()?.takeIf { it > 0 } ?: 0
+    val imageUrl = src.ifBlank { originSrc }
+    return PicContentRender(
+        picUrl = imageUrl,
+        originUrl = originSrc.ifBlank { imageUrl },
+        showOriginBtn = showOriginalBtn == 1,
+        originSize = originSize,
+        picId = ImageUtil.getPicId(imageUrl),
+        width = width,
+        height = height,
+    )
+}
 
 val Post.contentRenders: ImmutableList<PbContentRender>
     get() {

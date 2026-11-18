@@ -37,6 +37,7 @@ import com.google.accompanist.drawablepainter.rememberDrawablePainter
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.components.uploadChatPhoto
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
+import com.huanchengfly.tieba.post.repository.CloudMeme
 import com.huanchengfly.tieba.post.repository.CloudMemeRepository
 import com.huanchengfly.tieba.post.repository.CloudMemeSession
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
@@ -57,6 +58,22 @@ fun EmoticonPickerPanel(
     modifier: Modifier = Modifier,
     onEmoticonClick: (Emoticon) -> Unit,
     onCloudMemeClick: ((ChatCloudMeme) -> Unit)? = null,
+) = EmoticonPickerContent(modifier, onEmoticonClick, onCloudMemeClick, chatMode = true)
+
+@Composable
+internal fun ReplyEmoticonPickerPanel(
+    modifier: Modifier = Modifier,
+    onEmoticonClick: (Emoticon) -> Unit,
+    onCloudMemeClick: ((CloudMeme) -> Unit)?,
+) = EmoticonPickerContent(modifier, onEmoticonClick, onReplyMemeClick = onCloudMemeClick)
+
+@Composable
+private fun EmoticonPickerContent(
+    modifier: Modifier,
+    onEmoticonClick: (Emoticon) -> Unit,
+    onCloudMemeClick: ((ChatCloudMeme) -> Unit)? = null,
+    chatMode: Boolean = false,
+    onReplyMemeClick: ((CloudMeme) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val emoticons = remember {
@@ -78,7 +95,7 @@ fun EmoticonPickerPanel(
             uploadJob = null
         }
     }
-    val uploadLauncher = registerPickMediasLauncher { result ->
+    val uploadLauncher = if (chatMode) registerPickMediasLauncher { result ->
         pickingUpload = false
         val selectedAccount = pickerAccount
         pickerAccount = null
@@ -110,11 +127,12 @@ fun EmoticonPickerPanel(
                 }
             }
         }
-    }
+    } else null
 
     Column(modifier = modifier) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            listOf("基础", "云收藏", "云 DIY").forEachIndexed { index, title ->
+            val categories = if (chatMode || onReplyMemeClick != null) listOf("基础", "云收藏", "云 DIY") else listOf("基础")
+            categories.forEachIndexed { index, title ->
                 TextButton(onClick = { category = index }, modifier = Modifier.weight(1f)) {
                     Text(title, color = if (category == index) ExtendedTheme.colors.primary else ExtendedTheme.colors.text)
                 }
@@ -127,6 +145,7 @@ fun EmoticonPickerPanel(
                 CloudMemeSession(
                     scope = scope,
                     cached = { cache.cached(uid) },
+                    requiresMetadata = !chatMode,
                     load = { cache.load(uid, bduss, force = true) },
                 )
             }
@@ -170,6 +189,7 @@ fun EmoticonPickerPanel(
                 Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                     Text(
                         text = when {
+                            !chatMode -> "点击表情插入正文"
                             onCloudMemeClick != null -> "点击表情发送；上传收藏使用下方按钮"
                             else -> "当前会话暂不支持云表情发送"
                         },
@@ -178,7 +198,7 @@ fun EmoticonPickerPanel(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    if (category == 1) {
+                    if (uploadLauncher != null && category == 1) {
                         TextButton(
                             onClick = {
                                 if (uploadJob != null) {
@@ -225,7 +245,14 @@ fun EmoticonPickerPanel(
                             skipNetworkCheck = true,
                             modifier = Modifier.aspectRatio(1f).padding(8.dp)
                                 .background(ExtendedTheme.colors.background)
-                                .clickable(enabled = onCloudMemeClick != null) {
+                                .clickable(enabled = onCloudMemeClick != null || onReplyMemeClick != null) {
+                                    if (onReplyMemeClick != null) {
+                                        val active = com.huanchengfly.tieba.post.utils.AccountUtil.currentAccount
+                                        if (active?.uid != uid || active?.bduss != bduss) return@clickable
+                                        if (!state.loading && meme.replyIdPart == null) session.refresh()
+                                        onReplyMemeClick(meme)
+                                        return@clickable
+                                    }
                                     val selected = runCatching { ChatCloudMeme(meme.id, meme.imageUrl) }.getOrNull()
                                     if (selected == null) {
                                         Toast.makeText(context, "此表情缺少有效原图地址，请刷新后重试", Toast.LENGTH_SHORT).show()

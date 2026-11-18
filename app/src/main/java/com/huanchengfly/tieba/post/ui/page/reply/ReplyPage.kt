@@ -3,8 +3,17 @@ package com.huanchengfly.tieba.post.ui.page.reply
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.net.Uri
+import android.text.Editable
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.ReplacementSpan
 import android.util.Log
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -77,16 +86,17 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.widget.TextViewCompat
 import androidx.core.widget.addTextChangedListener
 import com.github.panpf.sketch.compose.AsyncImage
 import com.huanchengfly.tieba.post.R
-import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.arch.GlobalEvent
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.emitGlobalEvent
 import com.huanchengfly.tieba.post.arch.onEvent
 import com.huanchengfly.tieba.post.arch.onGlobalEvent
 import com.huanchengfly.tieba.post.arch.pageViewModel
+import com.huanchengfly.tieba.post.components.spans.EmoticonSpanV2
 import com.huanchengfly.tieba.post.pxToDpFloat
 import com.huanchengfly.tieba.post.toMD5
 import com.huanchengfly.tieba.post.toastShort
@@ -102,7 +112,7 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.Dialog
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogNegativeButton
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogPositiveButton
 import com.huanchengfly.tieba.post.ui.widgets.compose.DialogState
-import com.huanchengfly.tieba.post.ui.widgets.compose.EmoticonPickerPanel
+import com.huanchengfly.tieba.post.ui.widgets.compose.ReplyEmoticonPickerPanel
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyBackHandler
 import com.huanchengfly.tieba.post.ui.widgets.compose.VerticalDivider
 import com.huanchengfly.tieba.post.ui.widgets.compose.rememberDialogState
@@ -231,6 +241,7 @@ internal fun ReplyPageContent(
         initial = NONE
     )
     val isTopicThread = replyType == ReplyType.TOPIC_THREAD
+    val supportsNativeMeme = threadId != 0L
     //threadId为0时切换为发主题帖
     if (forumId != 0L && threadId == 0L) viewModel.send(ReplyUiIntent.SwitchReplyType(ReplyType.TOPIC_THREAD))
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -243,22 +254,30 @@ internal fun ReplyPageContent(
     }
 
     fun setText(text: String) {
-        if (editTextView != null) {
-            editTextView?.setText(StringUtil.getEmoticonContent(editTextView!!, text))
-            editTextView?.setSelection(text.length)
+        val editor = editTextView
+        if (editor != null) {
+            editor.restoreReplyDraft(text)
         } else {
             initialText = text
             waitEditTextToSet = true
         }
     }
 
-    fun insertEmoticon(text: String) {
-        editTextView?.apply {
-            val start = selectionStart
-            this.text?.insert(start, text)
-            this.setText(StringUtil.getEmoticonContent(this, this.text))
-            setSelection(start + text.length)
+    fun insertToken(token: String) {
+        val editor = editTextView ?: return
+        val body = editor.text ?: return
+        val first = editor.selectionStart.takeIf { it >= 0 } ?: body.length
+        val last = editor.selectionEnd.takeIf { it >= 0 } ?: first
+        var start = minOf(first, last)
+        var end = maxOf(first, last)
+        for (span in body.getSpans(start, end, ReplyMemeSpan::class.java)) {
+            val spanStart = body.getSpanStart(span)
+            val spanEnd = body.getSpanEnd(span)
+            if (spanStart < start && start < spanEnd) start = spanStart
+            if (spanStart < end && end < spanEnd) end = spanEnd
         }
+        body.replace(start, end, token)
+        editor.setSelection(start + token.length)
     }
 
     val curTextFlow = remember { MutableStateFlow("") }
@@ -311,25 +330,23 @@ internal fun ReplyPageContent(
     }
 
     var submitLocked by remember { mutableStateOf(false) }
-    // 楼中楼回复需要带上被回复人的引用前缀，带图和不带图两条路径都要用
-    fun buildReplyContent(text: String): String =
-        if (subPostId == null || subPostId == 0L) {
-            text
-        } else {
-            "回复 #(reply, ${replyUserPortrait}, ${replyUserName}) :$text"
+    fun validatedReplyText(): String? {
+        val text = getText()
+        if (supportsNativeMeme && text.hasInvalidReplyMemeMarker()) {
+            submitLocked = false
+            context.toastShort("贴纸标记已损坏，请撤销修改或删除后重新插入")
+            return null
         }
+        return text
+    }
 
     // 附件上传成功即发送；submitLocked 在上传与发送全过程保持按钮禁用。
     viewModel.onEvent<ReplyUiEvent.AttachmentsReady> { event ->
         // 附件来自点击发送时的快照；正文取上传完成时的最新可编辑内容。
-        val content = buildReplySendContent(
-            text = getText(),
-            localImages = event.localPictures,
-            cloudMemes = event.cloudPictures,
-        )
+        val text = validatedReplyText() ?: return@onEvent
         viewModel.send(
             ReplyUiIntent.Send(
-                buildReplyContent(content),
+                buildReplySendContent(text, event.localPictures, subPostId, replyUserPortrait, replyUserName),
                 forumId,
                 forumName,
                 threadId,
@@ -464,11 +481,7 @@ internal fun ReplyPageContent(
         }
     }
 
-    val selectedCloudMemeList by viewModel.uiState.collectPartialAsState(
-        prop1 = ReplyUiState::selectedCloudMemeList,
-        initial = persistentListOf<ChatCloudMeme>()
-    )
-    val totalAttachmentCount = selectedImageList.size + selectedCloudMemeList.size
+    val totalAttachmentCount = selectedImageList.size
     val canSend = !isReplying && !submitLocked &&
         (!isTextEmpty || totalAttachmentCount > 0)
 
@@ -595,17 +608,14 @@ internal fun ReplyPageContent(
                                     switchToPanel(NONE, showKeyboardAfterClose = true)
                                 }
                             }
-                            addTextChangedListener(
-                                afterTextChanged = {
-                                    coroutineScope.launch {
-                                        curTextFlow.emit(it?.toString() ?: "")
-                                    }
-                                }
-                            )
+                            installReplyUndoActions()
+                            addTextChangedListener(afterTextChanged = { body ->
+                                if (body != null) renderReplyTokenSpans(body, supportsNativeMeme)
+                                curTextFlow.value = body?.toString().orEmpty()
+                            })
                             if (waitEditTextToSet) {
                                 waitEditTextToSet = false
-                                this.setText(StringUtil.getEmoticonContent(this, initialText))
-                                this.setSelection(initialText.length)
+                                restoreReplyDraft(initialText)
                             }
                         }
                     },
@@ -635,12 +645,8 @@ internal fun ReplyPageContent(
         if (totalAttachmentCount > 0) {
             ReplyAttachmentStrip(
                 imageUris = selectedImageList,
-                cloudMemes = selectedCloudMemeList,
                 onRemoveImage = { index ->
                     if (!isReplying) viewModel.send(ReplyUiIntent.RemoveImage(index))
-                },
-                onRemoveCloudMeme = { id ->
-                    if (!isReplying) viewModel.send(ReplyUiIntent.RemoveCloudMeme(id))
                 },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -708,14 +714,17 @@ internal fun ReplyPageContent(
                 IconButton(
                     onClick = {
                         if (isReplying || submitLocked) return@IconButton
+                        val text = validatedReplyText() ?: return@IconButton
                         submitLocked = true
                         // 快照附件，避免上传期间删除或新增导致附件与计数错乱。
                         val imageSnapshot = selectedImageList.toList()
-                        val cloudMemeSnapshot = selectedCloudMemeList.toList()
-                        if (imageSnapshot.isEmpty() && cloudMemeSnapshot.isEmpty()) {
+                        if (imageSnapshot.isEmpty()) {
                             viewModel.send(
                                 ReplyUiIntent.Send(
-                                    content = buildReplyContent(getText()),
+                                    content = buildReplySendContent(
+                                        text, subPostId = subPostId,
+                                        replyUserPortrait = replyUserPortrait, replyUserName = replyUserName,
+                                    ),
                                     forumId = forumId,
                                     forumName = forumName,
                                     threadId = threadId,
@@ -732,7 +741,6 @@ internal fun ReplyPageContent(
                                     forumName = forumName,
                                     imageUris = imageSnapshot,
                                     isOriginImage = isOriginImage,
-                                    cloudMemes = cloudMemeSnapshot,
                                 )
                             )
                         }
@@ -757,23 +765,18 @@ internal fun ReplyPageContent(
             Column(modifier = Modifier.height(panelHeight)) {
                 when (curKeyboardType) {
                     EMOJI -> {
-                        EmoticonPickerPanel(
+                        ReplyEmoticonPickerPanel(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(horizontal = 8.dp),
                             onEmoticonClick = { emoticon ->
-                                insertEmoticon("#(${emoticon.name})")
+                                insertToken("#(${emoticon.name})")
                             },
-                            onCloudMemeClick = { meme ->
-                                // 上传/发送期间不改变待发送附件。
-                                if (!isReplying) {
-                                    if (totalAttachmentCount >= REPLY_MAX_ATTACHMENT_COUNT) {
-                                        context.toastShort("最多只能添加 $REPLY_MAX_ATTACHMENT_COUNT 张图片")
-                                    } else {
-                                        viewModel.send(ReplyUiIntent.AddCloudMeme(meme))
-                                    }
-                                }
-                            }
+                            onCloudMemeClick = if (supportsNativeMeme) { meme ->
+                                val marker = meme.toReplyMarkerOrNull()
+                                if (marker == null) context.toastShort("此贴纸缺少发送信息，请刷新后重试")
+                                else insertToken(marker)
+                            } else null,
                         )
                     }
 
@@ -913,9 +916,7 @@ fun ReplyPage(
 @Composable
 private fun ReplyAttachmentStrip(
     imageUris: ImmutableList<String>,
-    cloudMemes: ImmutableList<ChatCloudMeme>,
     onRemoveImage: (Int) -> Unit,
-    onRemoveCloudMeme: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LazyRow(
@@ -945,28 +946,81 @@ private fun ReplyAttachmentStrip(
                 }
             }
         }
-        itemsIndexed(cloudMemes, key = { _, meme -> meme.id }) { _, meme ->
-            Box(modifier = Modifier.size(64.dp)) {
-                AsyncImage(
-                    imageUri = meme.sendThumbnailUrl,
-                    contentDescription = "云表情 ${meme.id}",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                IconButton(
-                    onClick = { onRemoveCloudMeme(meme.id) },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .size(24.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = stringResource(id = R.string.desc_remove_image),
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
+    }
+}
+
+private fun UndoableEditText.restoreReplyDraft(draft: String) {
+    mgr.disable()
+    try {
+        setText(draft)
+        setSelection(draft.length)
+    } finally {
+        mgr.enable()
+    }
+}
+
+private fun UndoableEditText.installReplyUndoActions() {
+    TextViewCompat.setCustomSelectionActionModeCallback(this, object : ActionMode.Callback {
+        override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+            mode.menuInflater.inflate(R.menu.menu_undoable_edit_text, menu)
+            return true
         }
+
+        override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+            menu.findItem(R.id.action_undo)?.isEnabled = canUndo()
+            menu.findItem(R.id.action_redo)?.isEnabled = canRedo()
+            return true
+        }
+
+        override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+            val handled = when (item.itemId) {
+                R.id.action_undo -> undo()
+                R.id.action_redo -> redo()
+                else -> return false
+            }
+            if (handled) mode.finish()
+            return handled
+        }
+
+        override fun onDestroyActionMode(mode: ActionMode) = Unit
+    })
+}
+
+// 只修改显示 Span。恢复草稿、编辑、撤销和重做都从原始正文重建。
+private fun UndoableEditText.renderReplyTokenSpans(body: Editable, supportsNativeMeme: Boolean) {
+    body.getSpans(0, body.length, EmoticonSpanV2::class.java).forEach { body.removeSpan(it) }
+    body.getSpans(0, body.length, ReplyMemeSpan::class.java).forEach { body.removeSpan(it) }
+    val source = body.toString()
+    var offset = 0
+    fun renderClassicUntil(end: Int) {
+        if (end > offset) {
+            val classic = StringUtil.getEmoticonContent(this, source.substring(offset, end))
+            TextUtils.copySpansFrom(classic, 0, classic.length, EmoticonSpanV2::class.java, body, offset)
+        }
+    }
+    if (supportsNativeMeme) {
+        replyMemeMarker.findAll(source).forEach { match ->
+            val start = match.range.first
+            val end = match.range.last + 1
+            renderClassicUntil(start)
+            body.setSpan(ReplyMemeSpan(), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            offset = end
+        }
+    }
+    renderClassicUntil(source.length)
+}
+
+private class ReplyMemeSpan : ReplacementSpan() {
+    private val label = "[贴纸]"
+
+    override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int =
+        kotlin.math.ceil(paint.measureText(label)).toInt()
+
+    override fun draw(
+        canvas: Canvas, text: CharSequence?, start: Int, end: Int, x: Float,
+        top: Int, y: Int, bottom: Int, paint: Paint,
+    ) {
+        canvas.drawText(label, x, y.toFloat(), paint)
     }
 }
 

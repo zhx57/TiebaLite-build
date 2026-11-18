@@ -1,5 +1,7 @@
 package com.huanchengfly.tieba.post.repository
 
+import com.huanchengfly.tieba.post.ui.widgets.compose.CloudMemeCollectOutcome
+import com.huanchengfly.tieba.post.ui.widgets.compose.collectPostImageAsCloudMeme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -109,18 +111,32 @@ class CloudMemeStateTest {
         try {
             val existing = CloudMeme("a", "https://example.com/a", null)
             val added = CloudMeme("b", "https://example.com/b", null)
-            var server = CloudMemeLists(listOf(existing), emptyList())
-            val cache = CloudMemeCache(directory) { server }
+            val diy = CloudMeme("d", "https://example.com/d", null)
+            var server = CloudMemeLists(listOf(existing), listOf(diy))
+            val another = CloudMeme("c", "https://example.com/c", null)
+            var writes = 0
+            val cache = CloudMemeCache(directory, submit = { bduss, ids, validate ->
+                validate()
+                assertEquals("secret", bduss)
+                assertEquals(listOf("a", "c", "b"), ids)
+                writes++
+                server = server.copy(collected = ids.map { id ->
+                    listOf(existing, another, added).single { it.id == id }
+                })
+            }) { server }
             cache.load("u", "secret")
-            // 服务端接受提交后确认列表包含新收藏，模拟真实收藏接口的最终结果。
-            server = CloudMemeLists(listOf(existing, added), emptyList())
+            // 写入前必须读取最新列表，不能用旧快照覆盖其他设备的更新。
+            server = server.copy(collected = listOf(existing, another, existing))
             val result = cache.collectMeme(
                 uid = "u",
                 bduss = "secret",
                 picId = "b",
                 expectedAccount = { "u" to "secret" },
             )
-            assertEquals(listOf("a", "b"), result.collected.map { it.id })
+            assertEquals(1, writes)
+            assertEquals(listOf("a", "c", "b"), result.collected.map { it.id })
+            assertEquals(listOf(diy), result.diy)
+            assertEquals(result, cache.cached("u")!!.lists)
         } finally { directory.deleteRecursively() }
     }
 
@@ -136,6 +152,205 @@ class CloudMemeStateTest {
                 expectedAccount = { "u" to "secret" },
             )
             assertEquals(listOf("a"), result.collected.map { it.id })
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun legacyCacheCanPreviewWhileReplyRefreshesMetadata() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val pending = CompletableDeferred<CloudMemeLists>()
+            val session = CloudMemeSession(scope,
+                cached = { CloudMemeSnapshot(lists, System.currentTimeMillis()) },
+                requiresMetadata = true,
+            ) { pending.await() }
+            session.open()
+            assertSame(lists, session.state.value.lists)
+            assertTrue(session.state.value.loading)
+            val ready = CloudMemeLists(listOf(CloudMeme("12", "https://example.com/m", null, "5", 60, 40)), emptyList())
+            pending.complete(ready)
+            assertEquals("5_12", session.state.value.lists!!.collected.single().replyIdPart)
+        } finally { scope.cancel() }
+    }
+
+    @Test
+    fun metadataSurvivesReopeningDiskCache() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            val modern = lists.copy(collected = listOf(CloudMeme("12", "https://example.com/m", null, "5", 60, 40)))
+            CloudMemeCache(directory) { modern }.load("a", "secret")
+            assertEquals(modern, CloudMemeCache(directory).cached("a")!!.lists)
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun collectionChecksAccountAfterReadingAndAtTheWriteBoundary() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            val original = "a" to "secret"
+            for (switchInFetch in listOf(true, false)) {
+                var account = original
+                var submitCalls = 0
+                var writes = 0
+                val cache = CloudMemeCache(directory, submit = { _, _, validate ->
+                    submitCalls++
+                    account = "b" to "other"
+                    validate()
+                    writes++
+                }) {
+                    if (switchInFetch) account = "b" to "other"
+                    lists
+                }
+                val result = collectPostImageAsCloudMeme("", "42", original, { account }, cache) { _, _ ->
+                    error("贴纸自带 ID 不应发起转换请求")
+                }
+                assertEquals(CloudMemeCollectOutcome.AccountChanged, result)
+                assertEquals(if (switchInFetch) 0 else 1, submitCalls)
+                assertEquals(0, writes)
+                assertNull(cache.cached("b"))
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun ordinaryPostImageUsesOnlyConvertedIdAndFailureDoesNotWrite() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            val snapshot = "a" to "secret"
+            val url = "https://example.com/original.jpg?quality=full"
+            var writes = 0
+            var failFetch = false
+            var server = lists
+            val cache = CloudMemeCache(directory, submit = { _, ids, validate ->
+                validate()
+                assertEquals(listOf("a", "42"), ids)
+                writes++
+                server = lists.copy(collected = lists.collected + CloudMeme("42", url, null))
+            }) {
+                if (failFetch) throw IOException("offline")
+                server
+            }
+            val invalid = collectPostImageAsCloudMeme(url, null, snapshot, { snapshot }, cache) { _, _ ->
+                CloudMemeRepository.parsePicId("""{"error_code":0,"pics":[{}]}""")
+            }
+            assertTrue(invalid is CloudMemeCollectOutcome.Failed)
+            failFetch = true
+            val offline = collectPostImageAsCloudMeme(url, null, snapshot, { snapshot }, cache) { _, _ -> "42" }
+            assertTrue(offline is CloudMemeCollectOutcome.Failed)
+            assertEquals(0, writes)
+            failFetch = false
+            val confirmed = collectPostImageAsCloudMeme(url, null, snapshot, { snapshot }, cache) { bduss, original ->
+                assertEquals("secret", bduss)
+                assertEquals(url, original)
+                "42"
+            }
+            assertEquals(CloudMemeCollectOutcome.Collected, confirmed)
+            assertEquals(1, writes)
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun reopenedReplyPanelReadsConfirmedCollectionFromTheSharedCache() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val snapshot = "a" to "credential"
+            val old = CloudMeme("7", "https://example.com/old.gif", null, "0", 40, 30)
+            val added = CloudMeme("42", "https://example.com/new.gif", null, "5", 60, 40)
+            var server = CloudMemeLists(listOf(old), emptyList())
+            val cache = CloudMemeCache(directory, submit = { _, ids, validate ->
+                validate()
+                assertEquals(listOf("7", "42"), ids)
+                server = server.copy(collected = listOf(old, added))
+            }) { server }
+            cache.load(snapshot.first, snapshot.second)
+            val outcome = collectPostImageAsCloudMeme(added.imageUrl, added.id, snapshot, { snapshot }, cache) { _, _ ->
+                error("原生贴纸不应转换 ID")
+            }
+            assertEquals(CloudMemeCollectOutcome.Collected, outcome)
+            val confirmed = checkNotNull(cache.cached(snapshot.first))
+            val session = CloudMemeSession(scope, cached = { confirmed }, requiresMetadata = true) {
+                error("重开面板应直接读取刚确认的完整缓存")
+            }
+            session.open()
+            assertEquals(listOf("7", "5_42"), session.state.value.lists!!.collected.map { it.replyIdPart })
+            assertNull(session.state.value.error)
+            session.close()
+        } finally {
+            scope.cancel()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun invalidNativeStickerIdDoesNotFallBackToImageConversionOrWrite() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            val snapshot = "a" to "credential"
+            var fetches = 0
+            var resolves = 0
+            var writes = 0
+            val cache = CloudMemeCache(directory, submit = { _, _, _ -> writes++ }) {
+                fetches++
+                lists
+            }
+            val result = collectPostImageAsCloudMeme("https://example.com/image.gif", "0", snapshot, { snapshot }, cache) { _, _ ->
+                resolves++
+                "42"
+            }
+            assertTrue(result is CloudMemeCollectOutcome.Failed)
+            assertEquals(0, resolves)
+            assertEquals(0, fetches)
+            assertEquals(0, writes)
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun collectionCancellationAfterLatestFetchPreventsWrite() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            val entered = CompletableDeferred<Unit>()
+            val pending = CompletableDeferred<CloudMemeLists>()
+            var writes = 0
+            val cache = CloudMemeCache(directory, submit = { _, _, validate ->
+                validate()
+                writes++
+            }) {
+                entered.complete(Unit)
+                withContext(NonCancellable) { pending.await() }
+            }
+            val job = launch { cache.collectMeme("a", "secret", "42") { "a" to "secret" } }
+            entered.await()
+            job.cancel()
+            pending.complete(lists)
+            job.join()
+            assertEquals(0, writes)
+            assertNull(cache.cached("a"))
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
+    fun collectionTimeoutIsNotRetriedOrReportedAsConfirmed() = runBlocking {
+        val directory = Files.createTempDirectory("cloud-memes").toFile()
+        try {
+            var fetches = 0
+            var attempts = 0
+            val cache = CloudMemeCache(directory, submit = { _, _, validate ->
+                validate()
+                attempts++
+                throw java.net.SocketTimeoutException("timeout")
+            }) {
+                fetches++
+                lists
+            }
+            val snapshot = "a" to "secret"
+            val outcome = collectPostImageAsCloudMeme("", "42", snapshot, { snapshot }, cache) { _, _ ->
+                error("贴纸自带 ID 不应发起转换请求")
+            }
+            assertTrue(outcome is CloudMemeCollectOutcome.Failed)
+            assertEquals(1, attempts)
+            assertEquals(1, fetches)
+            assertNull(cache.cached("a"))
         } finally { directory.deleteRecursively() }
     }
 

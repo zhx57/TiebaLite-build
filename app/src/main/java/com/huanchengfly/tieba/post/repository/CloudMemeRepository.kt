@@ -24,9 +24,26 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
-internal data class CloudMeme(val id: String, val imageUrl: String, val thumbnail: String?) {
+internal data class CloudMeme(
+    val id: String,
+    val imageUrl: String,
+    val thumbnail: String?,
+    val packageId: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+) {
     val displayUrl: String get() = thumbnail?.takeIf { it.isNotBlank() } ?: imageUrl
+    val replyIdPart: String?
+        get() {
+            if (!id.isCloudMemePicId() || (width ?: 0) <= 0 || (height ?: 0) <= 0) return null
+            val pack = packageId.orEmpty()
+            if (pack.isEmpty() || pack == "0") return id
+            return if (pack.isCloudMemePicId()) "${pack}_$id" else null
+        }
 }
+
+internal fun String.isCloudMemePicId(): Boolean =
+    isNotEmpty() && all { it in '0'..'9' } && toULongOrNull()?.let { it > 0uL } == true
 
 internal data class CloudMemeLists(
     val collected: List<CloudMeme>,
@@ -51,10 +68,37 @@ internal object CloudMemeRepository {
         RetrofitTiebaApi.OFFICIAL_TIEBA_API.getCloudMemes(bduss).use { parse(it.string()) }
     }
 
+    suspend fun resolvePicId(bduss: String, imageUrl: String): String = withContext(Dispatchers.IO) {
+        require(bduss.isNotBlank() && imageUrl.isNotBlank())
+        val urls = JsonArray().apply { add(imageUrl) }.toString()
+        RetrofitTiebaApi.OFFICIAL_TIEBA_API.resolveCloudMemeId(bduss, urls).use { parsePicId(it.string()) }
+    }
+
+    fun parsePicId(json: String): String {
+        try {
+            val root = JsonParser.parseString(json).asJsonObject
+            val code = root.get("error_code")?.let(::scalar)?.toIntOrNull()
+                ?: throw CloudMemeProtocolException()
+            if (code != 0) throw CloudMemeServiceException(code)
+            val pics = root.get("pics")?.asJsonArray
+            val resolved = if (pics == null || pics.size() == 0) {
+                root.getAsJsonObject("data")?.getAsJsonArray("pics")
+            } else pics
+            // 单张原图只接受一个明确的服务端 ID，不从地址或多项响应中猜测。
+            if (resolved == null || resolved.size() != 1) throw CloudMemeProtocolException()
+            return resolved[0].asJsonObject.get("pic_id")?.let(::scalar)
+                ?.takeIf { it.isCloudMemePicId() } ?: throw CloudMemeProtocolException()
+        } catch (error: CloudMemeServiceException) {
+            throw error
+        } catch (error: Exception) {
+            throw CloudMemeProtocolException()
+        }
+    }
+
     suspend fun submitCollected(
         bduss: String,
         ids: List<String>,
-        picUpdateTime: Long = System.currentTimeMillis(),
+        validate: suspend () -> Unit,
     ) = withContext(Dispatchers.IO) {
         require(bduss.isNotBlank())
         val uniqueIds = ids.filter(String::isNotBlank).distinct()
@@ -65,10 +109,12 @@ internal object CloudMemeRepository {
                 uniqueIds.forEach { id -> add(JsonObject().apply { addProperty("pic_id", id) }) }
             }.toString()
         }
-        RetrofitTiebaApi.OFFICIAL_TIEBA_API.updateCloudMemes(
+        val api = RetrofitTiebaApi.OFFICIAL_TIEBA_API
+        validate()
+        api.updateCloudMemes(
             bduss = bduss,
             pics = pics,
-            picUpdateTime = picUpdateTime.toString(),
+            picUpdateTime = System.currentTimeMillis().toString(),
         ).use { response ->
             try {
                 val root = JsonParser.parseString(response.string()).asJsonObject
@@ -118,7 +164,15 @@ internal object CloudMemeRepository {
             val url = optionalString(item, "pic_url").orEmpty()
             val thumbnail = optionalString(item, "thumbnail")
             if (url.isBlank() && thumbnail.isNullOrBlank()) throw CloudMemeProtocolException()
-            CloudMeme(id, url, thumbnail)
+            CloudMeme(
+                id, url, thumbnail,
+                packageId = item.get("pck_id")?.takeUnless { it.isJsonNull }?.let { value ->
+                    // 异常值不可用于回帖，但不影响条目预览及聊天。
+                    if (value.isJsonPrimitive) value.asString else value.toString()
+                },
+                width = optionalPositiveInt(item, "width"),
+                height = optionalPositiveInt(item, "height"),
+            )
         }
     }
 
@@ -128,6 +182,9 @@ internal object CloudMemeRepository {
         if (!value.isJsonPrimitive || !value.asJsonPrimitive.isString) throw CloudMemeProtocolException()
         return value.asString
     }
+
+    private fun optionalPositiveInt(item: JsonObject, name: String): Int? =
+        optionalLong(item, name)?.takeIf { it in 1..Int.MAX_VALUE.toLong() }?.toInt()
 
     private fun optionalLong(item: JsonObject, name: String): Long? {
         val value = item.get(name) ?: return null
@@ -166,6 +223,7 @@ internal fun reconcileCloudMemes(previous: CloudMemeLists?, incoming: CloudMemeL
 internal class CloudMemeCache(
     private val directory: File,
     private val now: () -> Long = System::currentTimeMillis,
+    private val submit: suspend (String, List<String>, suspend () -> Unit) -> Unit = CloudMemeRepository::submitCollected,
     private val fetch: suspend (String) -> CloudMemeLists = CloudMemeRepository::load,
 ) {
     private val memory = ConcurrentHashMap<String, CloudMemeSnapshot>()
@@ -214,19 +272,28 @@ internal class CloudMemeCache(
         uid: String,
         bduss: String,
         memeId: String,
+        validateAccount: () -> Unit = {},
     ): CloudMemeLists = withContext(Dispatchers.IO) {
         require(uid.isNotBlank() && bduss.isNotBlank() && memeId.isNotBlank())
+        suspend fun validate() {
+            currentCoroutineContext().ensureActive()
+            validateAccount()
+        }
         lock(uid).withLock {
+            validate()
             val latest = fetch(bduss)
+            validate()
             if (latest.collected.any { it.id == memeId }) {
                 memory[uid] = CloudMemeSnapshot(latest, now())
                 runCatching { write(uid, memory.getValue(uid)) }
                 return@withLock latest
             }
-            val ids = latest.collected.map { it.id } + memeId
-            CloudMemeRepository.submitCollected(bduss, ids)
-            currentCoroutineContext().ensureActive()
+            val ids = (latest.collected.map { it.id } + memeId).distinct()
+            validate()
+            submit(bduss, ids) { validate() }
+            validate()
             val confirmed = fetch(bduss)
+            validate()
             if (confirmed.collected.none { it.id == memeId }) {
                 throw CloudMemeProtocolException()
             }
@@ -244,6 +311,9 @@ internal class CloudMemeCache(
                     addProperty("pic_id", meme.id)
                     addProperty("pic_url", meme.imageUrl)
                     meme.thumbnail?.let { addProperty("thumbnail", it) }
+                    meme.packageId?.let { addProperty("pck_id", it) }
+                    meme.width?.let { addProperty("width", it) }
+                    meme.height?.let { addProperty("height", it) }
                 })
             }
         }
@@ -282,6 +352,7 @@ internal data class CloudMemeState(
 internal class CloudMemeSession(
     private val scope: CoroutineScope,
     private val cached: suspend () -> CloudMemeSnapshot? = { null },
+    private val requiresMetadata: Boolean = false,
     private val load: suspend () -> CloudMemeLists,
 ) {
     private val mutableState = MutableStateFlow(CloudMemeState())
@@ -303,7 +374,8 @@ internal class CloudMemeSession(
                 val snapshot = if (!force) cached() else null
                 if (closed || generation != requestGeneration) return@launch
                 if (snapshot != null) {
-                    val fresh = snapshot.isFresh()
+                    val fresh = snapshot.isFresh() && (!requiresMetadata ||
+                        (snapshot.lists.collected + snapshot.lists.diy).all { it.replyIdPart != null })
                     mutableState.value = CloudMemeState(snapshot.lists, loading = !fresh)
                     if (fresh) return@launch
                 }
@@ -349,7 +421,7 @@ internal suspend fun CloudMemeCache.collectMeme(
     expectedAccount: () -> Pair<String, String>,
 ): CloudMemeLists {
     require(picId.isNotBlank()) { "缺少可用于收藏的图片资源标识" }
-    val snapshot = expectedAccount()
-    check(snapshot.first == uid && snapshot.second == bduss) { "收藏期间账号已切换" }
-    return addCollected(uid, bduss, picId)
+    return addCollected(uid, bduss, picId) {
+        check(expectedAccount() == (uid to bduss)) { "收藏期间账号已切换" }
+    }
 }

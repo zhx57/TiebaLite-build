@@ -33,6 +33,15 @@ interface OfficialTiebaApi {
     ): okhttp3.ResponseBody
 
     @Headers("${Header.FORCE_LOGIN}: ${Header.FORCE_LOGIN_TRUE}")
+    @POST("https://tiebac.baidu.com/c/e/meme/pic2idJson?cmd=1003353")
+    @FormUrlEncoded
+    suspend fun resolveCloudMemeId(
+        @Field("BDUSS") bduss: String,
+        @Field("pic_urls") picUrls: String,
+        @Field("cmd") cmd: String = "1003353",
+    ): okhttp3.ResponseBody
+
+    @Headers("${Header.FORCE_LOGIN}: ${Header.FORCE_LOGIN_TRUE}")
     @POST("https://tiebac.baidu.com/c/e/meme/collect")
     @FormUrlEncoded
     suspend fun updateCloudMemes(

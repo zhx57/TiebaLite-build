@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.material.ExperimentalMaterialApi
@@ -157,7 +158,7 @@ data class PicContentRender(
                 .focusable()
                 .clip(RoundedCornerShape(context.appPreferences.radius.dp))
                 .fillMaxWidth(widthFraction)
-                .aspectRatio(width * 1f / height),
+                .aspectRatio(if (width > 0 && height > 0) width * 1f / height else 1f),
             contentScale = ContentScale.Crop
         )
     }
@@ -186,10 +187,29 @@ data class PicContentRender(
     }
 }
 
-/**
- * 帖子/回帖图片：单击行为完全交给 NetworkImage，长按只弹收藏菜单。
- * 这里的 picId 来自 URL 推导，不可信，因此始终走上传换取真实 pic_id 的路径。
- */
+@Stable
+internal data class MemeContentRender(
+    val picId: String,
+    val imageUrl: String,
+    val width: Int,
+    val height: Int,
+) : PbContentRender {
+    @Composable
+    override fun Render() {
+        CollectableNetworkImage(
+            imageUri = imageUrl,
+            collectSourceUrl = imageUrl,
+            photoViewData = null,
+            modifier = Modifier.size(128.dp),
+            contentScale = ContentScale.Fit,
+            memePicId = picId,
+        )
+    }
+
+    override fun toString(): String = "[贴纸]"
+}
+
+/** 帖子图片单击仍交给 NetworkImage；长按收藏只使用原图地址或贴纸自带 ID。 */
 @Composable
 private fun CollectableNetworkImage(
     imageUri: String,
@@ -197,6 +217,7 @@ private fun CollectableNetworkImage(
     photoViewData: PhotoViewData?,
     modifier: Modifier,
     contentScale: ContentScale,
+    memePicId: String? = null,
 ) {
     val collector = rememberCloudMemeImageCollector()
     var menuExpanded by remember { mutableStateOf(false) }
@@ -214,7 +235,7 @@ private fun CollectableNetworkImage(
             expanded = menuExpanded,
             isCollecting = collector.isCollecting(collectSourceUrl),
             onDismiss = { menuExpanded = false },
-            onCollect = { collector.collect(collectSourceUrl) },
+            onCollect = { collector.collectPost(collectSourceUrl, memePicId) },
         )
     }
 }
