@@ -278,7 +278,8 @@ class PrivateChatViewModel @Inject constructor() :
         ): ChatWsMessage {
             val client = socketProvider() ?: error("chat socket unavailable")
             val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: error("请先登录")
-            client.connect(AccountUtil.getCookie().orEmpty())
+            val cookie = AccountUtil.getCookie().orEmpty()
+            client.connect(cookie)
             check(client.selfUid == accountUid) { "账号已切换，请重新进入会话" }
             val preparedCloudMeme = photoUri?.let { uploadChatPhoto(it) } ?: cloudMeme
             check(AccountUtil.getUid()?.toLongOrNull() == accountUid && client.selfUid == accountUid) {
@@ -286,7 +287,19 @@ class PrivateChatViewModel @Inject constructor() :
             }
             onPrepared(preparedCloudMeme)
             val sentAt = System.currentTimeMillis()
-            val msgId = client.sendMessage(peerUid, content, preparedCloudMeme)
+            // 长连接可能已被服务端静默断开。仅在连接类失败时重建连接重试一次，
+            // 业务错误（被拉黑、参数错误等）直接抛给用户，避免重复发送。
+            val msgId = try {
+                client.sendMessage(peerUid, content, preparedCloudMeme)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (!error.isRetryableConnectionFailure()) throw error
+                client.close()
+                client.connect(cookie)
+                check(client.selfUid == accountUid) { "账号已切换，请重新进入会话" }
+                client.sendMessage(peerUid, content, preparedCloudMeme)
+            }
             val message = ChatWsMessage(
                 msgId = msgId,
                 peerUid = peerUid,
@@ -373,6 +386,22 @@ private fun mergeIntoState(
     current: List<ChatWsMessage>,
     incoming: List<ChatWsMessage>,
 ): ImmutableList<ChatWsMessage> = mergePrivateMessages(current, incoming).toImmutableList()
+
+/**
+ * 仅连接层异常可以安全重连重试。
+ * 服务端返回的业务错误码表示请求已被处理，重试可能导致重复发送。
+ */
+internal fun Throwable.isRetryableConnectionFailure(): Boolean = when (this) {
+    is java.net.SocketTimeoutException,
+    is java.net.SocketException,
+    is java.io.EOFException,
+    is java.io.IOException -> true
+    else -> message?.let {
+        it.contains("websocket is not connected", ignoreCase = true) ||
+            it.contains("websocket closed", ignoreCase = true) ||
+            it.contains("connection reset", ignoreCase = true)
+    } == true
+}
 
 sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
     sealed class Load : PrivateChatPartialChange {
