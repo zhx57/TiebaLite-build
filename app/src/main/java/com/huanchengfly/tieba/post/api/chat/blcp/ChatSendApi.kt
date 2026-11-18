@@ -23,27 +23,38 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * 吧群发送能力。
+ * 连接保活期限。
  *
- * 群聊发送需要先完成 IM 登录拿到聊天身份（uk / bduk / trigger_id），
- * 再做 BLCP 的 sendMcastMsg。
+ * 服务端通过 next_interval_ms 指定心跳间隔。心跳成功会顺延期限，
+ * 连接可以长期复用；只有心跳失败或连接断开才重建。
  */
 internal class ChatConnectionDeadline private constructor(
-    private val expiresAtNanos: Long,
+    private var expiresAtNanos: Long,
     val delayMs: Long,
 ) {
     fun isExpired(nowNanos: Long): Boolean = nowNanos - expiresAtNanos >= 0L
 
+    /** 心跳成功后按同样的间隔顺延，保持连接可复用。 */
+    @Synchronized
+    fun extendFrom(nowNanos: Long) {
+        expiresAtNanos = nowNanos + TimeUnit.MILLISECONDS.toNanos(delayMs)
+    }
+
     companion object {
+        private const val DEFAULT_HEARTBEAT_MS = 30_000L
+        private const val MIN_HEARTBEAT_MS = 5_000L
+        private const val MAX_HEARTBEAT_MS = 300_000L
+
         fun fromLoginSuccess(loginSuccessAtNanos: Long, nextIntervalMs: Long): ChatConnectionDeadline {
-            val lifetimeMs = if (nextIntervalMs > 0L) {
-                (nextIntervalMs / 2).coerceAtLeast(1L)
+            // 取服务端间隔的一半提前心跳，留出一次失败重试余量。
+            val heartbeatMs = if (nextIntervalMs > 0L) {
+                nextIntervalMs / 2
             } else {
-                30_000L
-            }.coerceAtMost(30_000L)
+                DEFAULT_HEARTBEAT_MS
+            }.coerceIn(MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS)
             return ChatConnectionDeadline(
-                expiresAtNanos = loginSuccessAtNanos + TimeUnit.MILLISECONDS.toNanos(lifetimeMs),
-                delayMs = lifetimeMs,
+                expiresAtNanos = loginSuccessAtNanos + TimeUnit.MILLISECONDS.toNanos(heartbeatMs),
+                delayMs = heartbeatMs,
             )
         }
     }
@@ -193,7 +204,7 @@ object ChatSendApi {
                                 room = chatroomId
                                 securityToken = zid
                                 deadline = connectionDeadline
-                                val keepAliveDelayMs = connectionDeadline.delayMs.coerceAtLeast(30_000L)
+                                val keepAliveDelayMs = connectionDeadline.delayMs
                                 expiryClose = scope.launch {
                                     while (true) {
                                         delay(keepAliveDelayMs)
@@ -216,6 +227,8 @@ object ChatSendApi {
                                             }
                                             break
                                         }
+                                        // 心跳成功后顺延期限，连接保持可复用。
+                                        connectionDeadline.extendFrom(System.nanoTime())
                                     }
                                 }
                             }
