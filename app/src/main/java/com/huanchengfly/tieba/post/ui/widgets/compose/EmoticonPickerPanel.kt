@@ -301,7 +301,9 @@ private fun ReplyMemePackageList(
         return
     }
     var selectedPackageId by remember(packageIds) { mutableStateOf<String?>(null) }
-    var package by remember(packageIds) { mutableStateOf<com.huanchengfly.tieba.post.repository.CloudMemePackage?>(null) }
+    var packageDetail by remember(packageIds) {
+        mutableStateOf<com.huanchengfly.tieba.post.repository.CloudMemePackage?>(null)
+    }
     var loading by remember(packageIds) { mutableStateOf(false) }
     var error by remember(packageIds) { mutableStateOf<String?>(null) }
 
@@ -309,9 +311,9 @@ private fun ReplyMemePackageList(
         val id = selectedPackageId ?: return@LaunchedEffect
         loading = true
         error = null
-        package = null
+        packageDetail = null
         try {
-            package = com.huanchengfly.tieba.post.repository.CloudMemeRepository.loadPackage(bduss, id)
+            packageDetail = com.huanchengfly.tieba.post.repository.CloudMemeRepository.loadPackage(bduss, id)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -321,11 +323,11 @@ private fun ReplyMemePackageList(
         }
     }
 
-    val current = package
+    val current = packageDetail
     if (selectedPackageId != null && (loading || current != null || error != null)) {
         Column(Modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { selectedPackageId = null; package = null; error = null }) {
+                TextButton(onClick = { selectedPackageId = null; packageDetail = null; error = null }) {
                     Text("返回", color = ExtendedTheme.colors.primary)
                 }
                 Text(
@@ -362,17 +364,19 @@ private fun ReplyMemePackageList(
         return
     }
 
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(88.dp),
-        modifier = Modifier.fillMaxWidth().weight(1f),
-    ) {
-        items(packageIds, key = { it }) { id ->
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(8.dp).clickable { selectedPackageId = id },
-            ) {
-                Text("表情包", color = ExtendedTheme.colors.textSecondary, fontSize = 12.sp)
-                Text("#$id", color = ExtendedTheme.colors.text, fontSize = 12.sp)
+    Column(Modifier.fillMaxWidth()) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(88.dp),
+            modifier = Modifier.fillMaxWidth().weight(1f),
+        ) {
+            items(packageIds, key = { it }) { id ->
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(8.dp).clickable { selectedPackageId = id },
+                ) {
+                    Text("表情包", color = ExtendedTheme.colors.textSecondary, fontSize = 12.sp)
+                    Text("#$id", color = ExtendedTheme.colors.text, fontSize = 12.sp)
+                }
             }
         }
     }
