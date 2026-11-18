@@ -372,20 +372,19 @@ object ChatSendApi {
             put("vip", "0")
             put("name", selfName)
             put("portrait", portraitWithTime)
-            put("content_type", if (cloudMeme == null) "0" else "1")
+            // 官方 content_type：文本为 1，图片为 2（ImageMsg）。
+            put("content_type", if (cloudMeme == null) "1" else "2")
             put(
                 "content_body",
                 if (cloudMeme == null) JSONObject().put("text", text).toString()
                 else JSONObject().apply {
-                    put("src", cloudMeme.sendThumbnailUrl)
-                    put("big_src", cloudMeme.sendImageUrl)
-                    put("type", "3")
-                    val bsize = if (cloudMeme.width > 0 && cloudMeme.height > 0) {
-                        "${cloudMeme.width},${cloudMeme.height}"
-                    } else {
-                        "100,100"
+                    // 官方 ImageMsg.getImgContent 只写 url / thumbnail / w / h。
+                    put("url", cloudMeme.sendImageUrl)
+                    put("thumbnail", cloudMeme.sendThumbnailUrl)
+                    if (cloudMeme.width > 0 && cloudMeme.height > 0) {
+                        put("w", cloudMeme.width)
+                        put("h", cloudMeme.height)
                     }
-                    put("bsize", bsize)
                 }.toString(),
             )
             put("src", "")

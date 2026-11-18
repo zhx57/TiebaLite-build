@@ -548,16 +548,17 @@ internal fun buildPrivateMessageRequest(
 }
 
 internal object PrivateChatImageContent {
+    /**
+     * 官方私聊图片同样使用 ImageMsg 的内容结构：url / thumbnail / w / h。
+     * 内容本身是图片对象数组，因此这里保留数组包裹。
+     */
     fun encode(meme: ChatCloudMeme): String = JSONArray().put(JSONObject().apply {
-        put("src", meme.sendThumbnailUrl)
-        put("big_src", meme.sendImageUrl)
-        put("type", "3")
-        val bsize = if (meme.width > 0 && meme.height > 0) {
-            "${meme.width},${meme.height}"
-        } else {
-            "100,100"
+        put("url", meme.sendImageUrl)
+        put("thumbnail", meme.sendThumbnailUrl)
+        if (meme.width > 0 && meme.height > 0) {
+            put("w", meme.width)
+            put("h", meme.height)
         }
-        put("bsize", bsize)
     }).toString()
 
     fun parse(raw: String, msgType: Int): List<String> {
@@ -566,8 +567,8 @@ internal object PrivateChatImageContent {
             val array = JSONArray(raw)
             (0 until array.length()).mapNotNull { index ->
                 val item = array.optJSONObject(index) ?: return@mapNotNull null
-                (item.opt("big_src") as? String)?.takeIf { it.isNotBlank() }
-                    ?: (item.opt("src") as? String)?.takeIf { it.isNotBlank() }
+                item.optString("url").takeIf { it.isNotBlank() }
+                    ?: item.optString("big_src").takeIf { it.isNotBlank() }
             }.distinct()
         }.getOrDefault(emptyList())
     }

@@ -409,10 +409,9 @@ class ChatRoomStateTest {
         )
         val data = JSONObject(JSONObject(request.getString("content")).getString("text"))
         val body = JSONObject(data.getString("content_body"))
-        assertEquals(meme.sendThumbnailUrl, body.getString("src"))
-        assertEquals(meme.sendImageUrl, body.getString("big_src"))
-        assertEquals("3", body.getString("type"))
-        assertEquals("100,100", body.getString("bsize"))
+        assertEquals(meme.sendImageUrl, body.getString("url"))
+        assertEquals(meme.sendThumbnailUrl, body.getString("thumbnail"))
+        assertEquals("2", data.getString("content_type"))
         assertEquals("https://cloud.example/original.gif", meme.imageUrl)
     }
 
@@ -424,15 +423,13 @@ class ChatRoomStateTest {
             "测试用户", "portrait", "test-only", emptyList(), null, "test-zid", cloudMeme = meme,
         )
         val data = JSONObject(JSONObject(request.getString("content")).getString("text"))
-        assertEquals("1", data.getString("content_type"))
+        assertEquals("2", data.getString("content_type"))
         val body = JSONObject(data.getString("content_body"))
-        assertEquals(meme.imageUrl, body.getString("src"))
-        assertEquals(meme.imageUrl, body.getString("big_src"))
-        assertEquals("3", body.getString("type"))
-        assertEquals("100,100", body.getString("bsize"))
+        assertEquals(meme.imageUrl, body.getString("url"))
+        assertEquals(meme.imageUrl, body.getString("thumbnail"))
         assertFalse(body.has("text"))
         val parsed = received(request)
-        assertEquals(1, parsed.contentType)
+        assertEquals(2, parsed.contentType)
         assertEquals(listOf(meme.imageUrl), parsed.images)
         assertEquals("", parsed.text)
     }
@@ -443,7 +440,7 @@ class ChatRoomStateTest {
         val request = payload()
         val envelope = JSONObject(request.getString("content"))
         val body = JSONObject(envelope.getString("text"))
-            .put("content_type", "1")
+            .put("content_type", "2")
             .put("content_body", JSONObject().put("url", original)
                 .put("thumbnail", "https://example.com/preview.jpg").toString())
         envelope.put("text", body.toString())
@@ -684,10 +681,8 @@ class ChatRoomStateTest {
         assertEquals(42L, data.toUid)
         assertEquals(100L, data.recordId)
         val image = org.json.JSONArray(data.content).getJSONObject(0)
-        assertEquals("3", image.getString("type"))
-        assertEquals(meme.imageUrl, image.getString("src"))
-        assertEquals(meme.imageUrl, image.getString("big_src"))
-        assertEquals("100,100", image.getString("bsize"))
+        assertEquals(meme.imageUrl, image.getString("url"))
+        assertEquals(meme.imageUrl, image.getString("thumbnail"))
         assertEquals(listOf(meme.imageUrl), PrivateChatImageContent.parse(data.content.orEmpty(), 2))
         val text = buildPrivateMessageRequest(42L, "普通文字", 101L).data_!!
         assertEquals(ChatWsConstants.MSG_TYPE_PRIVATE, text.msgType)
@@ -698,9 +693,11 @@ class ChatRoomStateTest {
 
     @Test
     fun privateImageParserDoesNotDuplicateOriginalAndPreview() {
-        val raw = """[{"type":"3","src":"https://example.com/small.gif","big_src":"https://example.com/original.gif"}]"""
-        assertEquals(listOf("https://example.com/original.gif"), PrivateChatImageContent.parse(raw, 2))
-        assertTrue(PrivateChatImageContent.parse(raw, 1).isEmpty())
+        val official = """[{"url":"https://example.com/original.gif","thumbnail":"https://example.com/small.gif","w":100,"h":80}]"""
+        assertEquals(listOf("https://example.com/original.gif"), PrivateChatImageContent.parse(official, 2))
+        val legacy = """[{"type":"3","src":"https://example.com/small.gif","big_src":"https://example.com/original.gif"}]"""
+        assertEquals(listOf("https://example.com/original.gif"), PrivateChatImageContent.parse(legacy, 2))
+        assertTrue(PrivateChatImageContent.parse(legacy, 1).isEmpty())
         assertTrue(PrivateChatImageContent.parse("not-json", 2).isEmpty())
     }
 
@@ -748,6 +745,14 @@ class ChatRoomStateTest {
     fun sendPayloadCarriesDeviceSecurityToken() {
         val safeExt = JSONObject(payload().getString("app_safe_ext"))
         assertEquals("test-device-security-token", safeExt.getJSONObject("haotianjing").getString("zid"))
+    }
+
+    @Test
+    fun textPayloadUsesOfficialTextContentType() {
+        val data = JSONObject(JSONObject(payload().getString("content")).getString("text"))
+        // 官方 ChatMsgFactory：文本 msgType 为 1，图片为 2。
+        assertEquals("1", data.getString("content_type"))
+        assertFalse(JSONObject(data.getString("content_body")).has("url"))
     }
 
     @Test
