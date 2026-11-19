@@ -59,12 +59,17 @@ class ChatWebSocketClient {
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<ByteArray>>()
 
     /**
-     * 收到服务端推送（新私信）时的回调。
+     * 收到服务端推送（新私信）时的监听器。
      *
-     * 推送帧只带 groupId / msgId，不包含消息体，收到后需要主动拉一次增量。
+     * 连接在进程内共享，主界面常驻循环与私信页面会同时订阅，
+     * 因此这里保存一组监听器，返回的函数用于取消订阅。
      */
-    @Volatile
-    var onPushNotify: ((groupId: Long) -> Unit)? = null
+    private val pushListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+
+    fun addPushNotifyListener(listener: (groupId: Long) -> Unit): () -> Unit {
+        pushListeners.add(listener)
+        return { pushListeners.remove(listener) }
+    }
 
     /** 消息组游标：groupId -> lastMsgId。 */
     private val groupMsgIds = ConcurrentHashMap<Long, Long>()
@@ -524,7 +529,7 @@ class ChatWebSocketClient {
             if (groupId != 0L) {
                 val notifiedMsgId = data.msgId ?: 0L
                 groupMsgIds.compute(groupId) { _, current -> maxOf(current ?: 0L, notifiedMsgId) }
-                onPushNotify?.invoke(groupId)
+                pushListeners.forEach { listener -> listener(groupId) }
             }
         }
     }

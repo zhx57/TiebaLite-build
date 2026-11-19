@@ -70,7 +70,7 @@ import androidx.compose.material.navigation.ModalBottomSheetLayout
 import androidx.compose.material.navigation.bottomSheet
 import androidx.compose.material.navigation.rememberBottomSheetNavigator
 import com.stoyanvuchev.systemuibarstweaker.SystemUIBarsTweaker
-import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
+import com.huanchengfly.tieba.post.api.chat.ws.ChatSocketHub
 import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
 import com.huanchengfly.tieba.post.arch.BaseComposeActivity
 import com.huanchengfly.tieba.post.arch.GlobalEvent
@@ -171,7 +171,6 @@ class MainActivityV2 : BaseComposeActivity() {
 
     private val notificationCountFlow: MutableSharedFlow<Int> =
         MutableSharedFlow(replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-    private var foregroundChatSocket: ChatWebSocketClient? = null
     private var foregroundChatJob: Job? = null
     private var foregroundPrivateCount = 0
     private var regularNotificationCount = 0
@@ -342,8 +341,7 @@ class MainActivityV2 : BaseComposeActivity() {
         runCatching { unregisterReceiver(newMessageReceiver) }
         foregroundChatJob?.cancel()
         foregroundChatJob = null
-        foregroundChatSocket?.close()
-        foregroundChatSocket = null
+        ChatSocketHub.close()
         super.onStop()
     }
 
@@ -351,11 +349,11 @@ class MainActivityV2 : BaseComposeActivity() {
         if (!AccountUtil.isLoggedIn() || foregroundChatJob != null) return
         foregroundChatJob = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive && AccountUtil.isLoggedIn()) {
-                val socket = ChatWebSocketClient()
-                val pushes = Channel<Unit>(Channel.CONFLATED)
                 val cookie = AccountUtil.getCookie().orEmpty()
-                foregroundChatSocket = socket
-                socket.onPushNotify = { pushes.trySend(Unit) }
+                // 与私信页面共用同一条连接，避免同账号多连接互相干扰。
+                val socket = ChatSocketHub.get(cookie)
+                val pushes = Channel<Unit>(Channel.CONFLATED)
+                val unregisterPush = socket.addPushNotifyListener { pushes.trySend(Unit) }
                 try {
                     socket.connect(cookie)
                     while (isActive && cookie == AccountUtil.getCookie().orEmpty()) {
@@ -367,8 +365,8 @@ class MainActivityV2 : BaseComposeActivity() {
                 } catch (error: Exception) {
                     android.util.Log.w("ForegroundChat", "私信连接中断，稍后重连", error)
                 } finally {
-                    socket.onPushNotify = null
-                    socket.close()
+                    // 连接是共享的，页面可能仍在使用，这里只解除本循环的推送订阅。
+                    unregisterPush()
                     pushes.close()
                 }
                 delay(5_000L)

@@ -12,6 +12,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
+import com.huanchengfly.tieba.post.api.chat.ws.ChatSocketHub
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import com.huanchengfly.tieba.post.arch.BaseViewModel
@@ -44,8 +45,8 @@ import javax.inject.Inject
 class PrivateChatListViewModel @Inject constructor() :
     BaseViewModel<PrivateChatListUiIntent, PrivateChatListPartialChange, PrivateChatListUiState, PrivateChatListUiEvent>() {
 
-    private var socket: ChatWebSocketClient? = null
     private val pushRefresh by lazy { Channel<PrivateChatListUiIntent.Poll>(Channel.CONFLATED) }
+    private var unregisterPush: (() -> Unit)? = null
     private var privateCursor = 0L
     private var cursorAccountUid = 0L
     private val cacheAccountUid by lazy { MutableStateFlow(AccountUtil.getUid()?.toLongOrNull() ?: 0L) }
@@ -61,7 +62,7 @@ class PrivateChatListViewModel @Inject constructor() :
     override fun createInitialState(): PrivateChatListUiState = PrivateChatListUiState()
 
     override fun createPartialChangeProducer(): PartialChangeProducer<PrivateChatListUiIntent, PrivateChatListPartialChange, PrivateChatListUiState> =
-        PrivateChatListPartialChangeProducer { socket }
+        PrivateChatListPartialChangeProducer { obtainSocket() }
 
     override fun dispatchEvent(partialChange: PrivateChatListPartialChange): UiEvent? =
         when (partialChange) {
@@ -71,16 +72,17 @@ class PrivateChatListViewModel @Inject constructor() :
         }
 
     override fun onCleared() {
-        socket?.close()
-        socket = null
+        // 连接在进程内共享，页面退出只解除推送订阅。
+        unregisterPush?.invoke()
+        unregisterPush = null
         super.onCleared()
     }
 
     /**
-     * 复用同一个连接，避免每次刷新都重新握手。
+     * 取当前账号的共享连接，沿用主界面常驻连接，避免重复握手。
      */
     private fun obtainSocket(): ChatWebSocketClient =
-        socket ?: ChatWebSocketClient().also { socket = it }
+        ChatSocketHub.get(AccountUtil.getCookie().orEmpty())
 
     /** 页面存活期间收到服务端推送就立即刷新，轮询只作为兜底。 */
     private var pollCookie: String = ""
@@ -89,7 +91,8 @@ class PrivateChatListViewModel @Inject constructor() :
         pollCookie = cookie
         useAccount(AccountUtil.getUid()?.toLongOrNull() ?: 0L)
         val client = obtainSocket()
-        client.onPushNotify = { groupId ->
+        unregisterPush?.invoke()
+        unregisterPush = client.addPushNotifyListener { groupId ->
             if (pollCookie.isNotEmpty() && groupId == client.privateGroupId) {
                 pushRefresh.trySend(PrivateChatListUiIntent.Poll(pollCookie))
             }

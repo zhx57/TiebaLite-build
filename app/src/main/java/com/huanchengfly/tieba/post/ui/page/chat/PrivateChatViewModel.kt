@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import com.huanchengfly.tieba.post.components.uploadChatPhoto
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
+import com.huanchengfly.tieba.post.api.chat.ws.ChatSocketHub
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
@@ -53,13 +54,12 @@ import javax.inject.Inject
 class PrivateChatViewModel @Inject constructor() :
     BaseViewModel<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState, PrivateChatUiEvent>() {
 
-    private var socket: ChatWebSocketClient? = null
     private val pushRefresh by lazy { Channel<PrivateChatUiIntent.Poll>(Channel.CONFLATED) }
 
     override fun createInitialState(): PrivateChatUiState = PrivateChatUiState()
 
     override fun createPartialChangeProducer(): PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> =
-        PrivateChatPartialChangeProducer({ socket }, flow { emitAll(pushRefresh.receiveAsFlow()) })
+        PrivateChatPartialChangeProducer({ obtainSocket() }, flow { emitAll(pushRefresh.receiveAsFlow()) })
 
     override fun dispatchEvent(partialChange: PrivateChatPartialChange): UiEvent? =
         when (partialChange) {
@@ -71,13 +71,17 @@ class PrivateChatViewModel @Inject constructor() :
         }
 
     override fun onCleared() {
-        socket?.close()
-        socket = null
+        // 连接在进程内共享，页面退出只解除推送订阅。
+        unregisterPush?.invoke()
+        unregisterPush = null
         super.onCleared()
     }
 
+    /** 取当前账号的共享连接，账号切换时由 ChatSocketHub 负责重建。 */
     private fun obtainSocket(): ChatWebSocketClient =
-        socket ?: ChatWebSocketClient().also { socket = it }
+        ChatSocketHub.get(AccountUtil.getCookie().orEmpty())
+
+    private var unregisterPush: (() -> Unit)? = null
 
     /** 当前会话的对端 uid，收到推送时用来触发对应会话的增量拉取。 */
     @Volatile
@@ -92,7 +96,8 @@ class PrivateChatViewModel @Inject constructor() :
     fun bindPeer(peerUid: Long) {
         activePeerUid = peerUid
         val client = obtainSocket()
-        client.onPushNotify = { groupId ->
+        unregisterPush?.invoke()
+        unregisterPush = client.addPushNotifyListener { groupId ->
             val uid = activePeerUid
             if (uid != 0L && groupId == client.privateGroupId) {
                 pushRefresh.trySend(PrivateChatUiIntent.Poll(uid))
@@ -103,7 +108,8 @@ class PrivateChatViewModel @Inject constructor() :
     fun unbindPeer(peerUid: Long) {
         if (activePeerUid == peerUid) {
             activePeerUid = 0L
-            socket?.onPushNotify = null
+            unregisterPush?.invoke()
+            unregisterPush = null
         }
     }
 
