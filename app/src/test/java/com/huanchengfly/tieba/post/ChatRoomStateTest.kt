@@ -932,7 +932,8 @@ class ChatRoomStateTest {
     @Test
     fun imageUrlInTextRendersAsImageWithoutDuplicatingCdnAddress() {
         val url = "https://example.com/photo.jpg"
-        val parsed = received(imagePayload(1, JSONObject().put("text", url).toString()))
+        // 官方图片消息：content_type=2，content_body 直接是 ImageMsg 的 url 字段。
+        val parsed = received(imagePayload(2, JSONObject().put("url", url).toString()))
         assertEquals(listOf(url), parsed.images)
         assertEquals("", parsed.text)
     }
@@ -948,8 +949,9 @@ class ChatRoomStateTest {
     @Test
     fun imageCaptionKeepsLineBreaksAndSpacing() {
         val url = "https://example.com/photo.jpg"
-        val parsed = received(imagePayload(1,
-            JSONObject().put("text", "第一行  说明\n第二行\n$url").toString()))
+        // 官方图片消息：图片地址在 content_body.url，说明文字与图片分开保存。
+        val parsed = received(imagePayload(2,
+            JSONObject().put("url", url).put("text", "第一行  说明\n第二行").toString()))
         assertEquals(listOf(url), parsed.images)
         assertEquals("第一行  说明\n第二行", parsed.text)
     }
