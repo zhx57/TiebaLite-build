@@ -290,14 +290,14 @@ object ChatApi {
         val images = if (messageKind in NON_IMAGE_MESSAGE_KINDS) {
             emptyList()
         } else {
-            // 图片消息：图片地址在 content_body 的 src 上，多图时可能是数组或逗号拼接。
+            // 图片消息：官方 content_body 为 {url, thumbnail, w, h}，多图时可能是数组。
+            // 正文里的链接只有落在贴吧图片域名时才可能是图片，普通分享链接必须保留为文字。
             val bodyImages = extractImages(textObj?.opt("content_body"))
             val sourceImages = extractImageSources(textObj?.opt("src"))
-            val textImages = if (transportType == 1 || businessType == 1) extractImageSources(rawText) else
-                extractImageSources(rawText).filter { url ->
-                    val host = runCatching { url.toHttpUrl().host }.getOrDefault("")
-                    host in setOf("imgsa.baidu.com", "imgsrc.baidu.com", "tiebapic.baidu.com")
-                }
+            val textImages = extractImageSources(rawText).filter { url ->
+                val host = runCatching { url.toHttpUrl().host }.getOrDefault("")
+                host in setOf("imgsa.baidu.com", "imgsrc.baidu.com", "tiebapic.baidu.com")
+            }
             (bodyImages + sourceImages + textImages).distinct()
         }
 
