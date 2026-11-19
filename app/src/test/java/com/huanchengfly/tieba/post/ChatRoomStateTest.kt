@@ -823,7 +823,7 @@ class ChatRoomStateTest {
         val parsed = received(payload)
         assertEquals(42L, parsed.senderUid)
         assertTrue(parsed.isSelf)
-        assertEquals(0, parsed.contentType)
+        assertEquals(1, parsed.contentType)
         assertEquals("@机器人 @成员 测试消息", parsed.text)
         assertEquals(targets, parsed.mentions)
         assertEquals(7, parsed.robotSkill)
@@ -1203,6 +1203,9 @@ class ChatRoomStateTest {
         )
         val textJson = JSONObject(JSONObject(payload.getString("content")).getString("text"))
         val contentBody = JSONObject(textJson.getString("content_body"))
-        assertEquals("640,480", contentBody.getString("bsize"))
+        assertEquals(640, contentBody.getInt("w"))
+        assertEquals(480, contentBody.getInt("h"))
+        assertEquals(memeWithSize.sendImageUrl, contentBody.getString("url"))
+        assertEquals("2", textJson.getString("content_type"))
     }
 }

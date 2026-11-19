@@ -251,7 +251,8 @@ object ChatApi {
             // content 本身不是 JSON 时按纯文本处理，但仍要排除 JSON 原文
             rawContent?.takeUnless { it.startsWith("{") || it.startsWith("[") }.orEmpty()
         }
-        val businessType = textObj?.takeIf { it.has("content_type") }?.optInt("content_type")
+        // 官方 content_type 是数字枚举，但历史数据与部分接口会返回字符串，这里统一兼容。
+        val businessType = textObj?.takeIf { it.has("content_type") }?.let { readFlexibleInt(it, "content_type") }
             ?: transportType.takeIf { isSystem && it in SYSTEM_BUSINESS_TYPES }
         // 语音消息可能是完整音频链接，也可能只有 voice_md5；
         // 命中后交给 VoicePlayer 渲染成气泡，而不是把链接当普通文本。
@@ -582,6 +583,16 @@ object ChatApi {
     private val AUDIO_EXTENSIONS = setOf(".amr", ".mp3", ".aac", ".wav", ".m4a", ".ogg", ".spx", ".opus")
     private val VOICE_DURATION_KEYS = listOf("during_time", "voice_time", "audio_time", "voice_len", "duration")
     private val URL_PATTERN = Regex("https?://[^\\s\"'<>\\\\]+", RegexOption.IGNORE_CASE)
+
+    /** 兼容数字与字符串两种 JSON 表示，非法值返回 null 而不是 0。 */
+    private fun readFlexibleInt(json: JSONObject, key: String): Int? {
+        val value = json.opt(key) ?: return null
+        return when (value) {
+            is Number -> value.toInt()
+            is String -> value.trim().toIntOrNull()
+            else -> null
+        }
+    }
 
     /**
      * 解析正文，与 aiotieba 的 ChatroomMsg.from_json 保持一致。
