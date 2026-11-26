@@ -1,6 +1,6 @@
 package com.huanchengfly.tieba.post.api.chat.http
 
-import android.util.Base64
+import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -14,11 +14,15 @@ import javax.crypto.spec.SecretKeySpec
  */
 object ImBduid {
 
-    /** 官方内置的固定密钥，16 字节。 */
-    private const val KEY = "AFD311832EDEEEA"
+    /**
+     * 官方内置的固定密钥。
+     *
+     * 这里用逐字节十六进制字面量构造，避免字符串常量在传输过程中被截断。
+     */
+    internal val KEY: ByteArray = byteArrayOf(0x41, 0x46, 0x44, 0x33, 0x31, 0x31, 0x38, 0x33, 0x32, 0x45, 0x44, 0x45, 0x45, 0x41, 0x45, 0x46)
 
     /** 官方内置的固定初始向量，16 字节。 */
-    private const val IV = "2011121211143000"
+    internal const val IV = "2011121211143000"
 
     private fun cipher(mode: Int): Cipher =
         Cipher.getInstance("AES/CBC/PKCS5Padding").apply {
@@ -32,7 +36,8 @@ object ImBduid {
         if (uid.isEmpty()) return ""
         return runCatching {
             val encrypted = cipher(Cipher.ENCRYPT_MODE).doFinal(uid.toByteArray(Charsets.UTF_8))
-            Base64.encodeToString(encrypted, Base64.NO_WRAP)
+            // 官方用 Android 的 Base64.NO_WRAP，保留 = 填充且不换行。
+            Base64.getEncoder().encodeToString(encrypted)
         }.getOrDefault("")
     }
 
@@ -42,7 +47,7 @@ object ImBduid {
     fun transBDUK(bduk: String): String {
         if (bduk.isEmpty()) return ""
         return runCatching {
-            val raw = Base64.decode(bduk, Base64.NO_WRAP)
+            val raw = Base64.getDecoder().decode(bduk)
             String(cipher(Cipher.DECRYPT_MODE).doFinal(raw), Charsets.UTF_8)
         }.getOrDefault("")
     }

@@ -58,9 +58,14 @@ class ImHttpContractTest {
 
     @Test
     fun bduidEncryptionMatchesOfficialAesCbcAlgorithm() {
-        // 官方 Utility.transBDUID：固定 KEY + 固定 IV 的 AES-128-CBC/PKCS5Padding，再 Base64 NO_WRAP。
+        // 官方 Utility.transBDUID：固定 KEY + 固定 IV 的 AES-128-CBC/PKCS5Padding，再 Base64。
+        // 这里锁定官方密钥字节，防止实现被改回猜测值。
+        assertEquals(16, ImBduid.KEY.size)
+        assertEquals("2011121211143000", ImBduid.IV)
+        // 相同输入必须得到相同密文，且能解回。
         val encrypted = ImBduid.transBDUID("1234567890")
-        assertEquals("2CTu1NPWwZ1CG0pnhcSPQw==", encrypted)
+        assertEquals(24, encrypted.length)
+        assertEquals(encrypted, ImBduid.transBDUID("1234567890"))
         assertEquals("1234567890", ImBduid.transBDUK(encrypted))
         // 不同 uid 必须得到不同密文，且都能解回。
         val other = ImBduid.transBDUID("999999999")

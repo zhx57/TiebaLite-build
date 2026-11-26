@@ -1,7 +1,6 @@
 package com.huanchengfly.tieba.post.api.chat.http
 
 import com.huanchengfly.tieba.post.utils.AccountUtil
-import com.huanchengfly.tieba.post.utils.CuidUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -62,7 +61,6 @@ object ImHttpClient {
         "cuid" to ImHttpConstants.cuid(),
         "origin_id" to 0L,
     )
-
     /**
      * 计算官方签名。
      *
@@ -159,7 +157,17 @@ object ImHttpConstants {
     /**
      * 设备标识。
      *
-     * 官方用 cuid，格式为 "<设备号>|<包名><版本>"，这里复用项目已有的 CuidUtils。
+     * 官方用 cuid，格式为 "<设备号>|<包名><版本>"。
+     * 这里用进程内固定的随机串充当设备号，避免依赖 Android 上下文，
+     * 也保证同一进程内多次请求的 cuid 保持一致。
      */
-    fun cuid(): String = "${CuidUtils.getNewCuid()}|com.baidu.tieba$CHAT_VERSION"
+    fun cuid(): String {
+        val device = deviceId
+        return "$device|com.baidu.tieba$CHAT_VERSION"
+    }
+
+    /** 进程内固定设备号，首次访问时生成。 */
+    private val deviceId: String by lazy {
+        java.util.UUID.randomUUID().toString().replace("-", "")
+    }
 }
