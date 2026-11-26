@@ -203,7 +203,7 @@ class PrivateChatCacheTest {
         assertEquals(before, observed.value)
         val state = PrivateChatListUiState(sessions = before.toSessions(selfUid))
         val reduced = PrivateChatListPartialChange.Load.Success(
-            PrivateChatCache.loadAll(selfUid).toSessions(selfUid), replace = true,
+            PrivateChatCache.loadAll(selfUid).toSessions(selfUid),
         ).reduce(state)
         assertEquals(state, reduced)
         val detail = PrivateChatUiState(isLoading = false, messages = persistentListOf(message(1)))

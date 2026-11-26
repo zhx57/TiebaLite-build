@@ -14,7 +14,6 @@ import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import android.content.Intent
@@ -36,11 +35,9 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoad
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyLazyColumn
 import com.huanchengfly.tieba.post.ui.widgets.compose.Sizes
 import com.huanchengfly.tieba.post.ui.widgets.compose.debounceClickable
-import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.DateTimeUtils
 import com.huanchengfly.tieba.post.utils.StringUtil
 import kotlinx.collections.immutable.persistentListOf
-import kotlinx.coroutines.delay
 
 /**
  * 私信会话列表页。
@@ -49,7 +46,6 @@ import kotlinx.coroutines.delay
 fun PrivateChatListPage(
     viewModel: PrivateChatListViewModel = pageViewModel(),
 ) {
-    val cookie = remember { AccountUtil.getCookie().orEmpty() }
     val context = LocalContext.current
     val navigator = LocalNavigator.current
     val sessions by viewModel.uiState.collectPartialAsState(
@@ -66,17 +62,8 @@ fun PrivateChatListPage(
     }
 
     LazyLoad(loaded = viewModel.initialized) {
-        viewModel.bindPushNotify(cookie)
-        viewModel.send(PrivateChatListUiIntent.Load(cookie))
+        viewModel.send(PrivateChatListUiIntent.Load)
         viewModel.initialized = true
-    }
-
-    // 页面存活期间定时静默刷新会话列表，收到新私信时也会即时刷新
-    LaunchedEffect(cookie) {
-        while (true) {
-            delay(5_000)
-            viewModel.send(PrivateChatListUiIntent.Poll(cookie))
-        }
     }
 
     MyLazyColumn(

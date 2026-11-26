@@ -2,7 +2,7 @@ package com.huanchengfly.tieba.post.ui.page.chat
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
-import com.huanchengfly.tieba.post.api.chat.ChatApi
+import com.huanchengfly.tieba.post.api.chat.http.ChatRoomListApi
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoom
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
 import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
@@ -51,7 +51,8 @@ class ChatRoomListViewModel @Inject constructor() :
         private fun ChatRoomListUiIntent.Load.producePartialChange(): Flow<ChatRoomListPartialChange.Load> =
             flow {
                 emit(ChatRoomListPartialChange.Load.Start)
-                val rooms = ChatApi.getRoomListByFid(fid)
+                // 官方按贴吧拉群走 c/f/chat/getRoomListByFid，参数是 forum_id。
+                val rooms = ChatRoomListApi.fetchRoomsByFid(fid)
                 emit(ChatRoomListPartialChange.Load.Success(rooms.toImmutableList()))
             }.catch { emit(ChatRoomListPartialChange.Load.Failure(it)) }
     }

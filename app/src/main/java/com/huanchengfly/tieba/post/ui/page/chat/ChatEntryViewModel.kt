@@ -2,9 +2,8 @@ package com.huanchengfly.tieba.post.ui.page.chat
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
-import com.huanchengfly.tieba.post.api.TiebaApi
-import com.huanchengfly.tieba.post.api.models.GetForumListBean
-import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
+import com.huanchengfly.tieba.post.api.chat.http.ChatRoomListApi
+import com.huanchengfly.tieba.post.api.models.chat.ChatRoom
 import com.huanchengfly.tieba.post.arch.BaseViewModel
 import com.huanchengfly.tieba.post.arch.CommonUiEvent
 import com.huanchengfly.tieba.post.arch.PartialChange
@@ -22,11 +21,13 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flatMapConcat
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.first
 import javax.inject.Inject
 
 /**
- * 群聊入口页的 ViewModel：拉取当前账号关注的贴吧列表，作为进入吧群的入口。
+ * 群聊列表 ViewModel。
+ *
+ * 官方消息中心的聊天 Tab 用 c/u/chat/getChatSubscriptionList 一次拿回用户加入的全部群，
+ * 不需要先选贴吧再按 fid 拉。这里对齐官方，直接拉全量群列表。
  */
 @Stable
 @HiltViewModel
@@ -40,7 +41,7 @@ class ChatEntryViewModel @Inject constructor() :
     override fun dispatchEvent(partialChange: ChatEntryPartialChange): UiEvent? =
         when (partialChange) {
             is ChatEntryPartialChange.Load.Failure ->
-                CommonUiEvent.Toast(partialChange.error.getErrorMessage())
+                CommonUiEvent.Toast(partialChange.error.message ?: "加载群聊列表失败")
             else -> null
         }
 
@@ -51,17 +52,17 @@ class ChatEntryViewModel @Inject constructor() :
             intentFlow: Flow<ChatEntryUiIntent>,
         ): Flow<ChatEntryPartialChange> =
             intentFlow.filterIsInstance<ChatEntryUiIntent.Load>()
-                .flatMapConcat {
-                    flow {
-                        emit(ChatEntryPartialChange.Load.Start)
-                        val bean = TiebaApi.getInstance().getForumListFlow().first()
-                        emit(
-                            ChatEntryPartialChange.Load.Success(
-                                bean.forumInfo.toImmutableList()
-                            )
-                        )
-                    }.catch { emit(ChatEntryPartialChange.Load.Failure(it)) }
-                }
+                .flatMapConcat { it.producePartialChange() }
+
+        private fun ChatEntryUiIntent.Load.producePartialChange(): Flow<ChatEntryPartialChange.Load> =
+            flow {
+                emit(ChatEntryPartialChange.Load.Start)
+                val rooms = ChatRoomListApi.fetchAllRooms()
+                emit(ChatEntryPartialChange.Load.Success(rooms.toImmutableList()))
+            }.catch {
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                emit(ChatEntryPartialChange.Load.Failure(it))
+            }
     }
 }
 
@@ -74,14 +75,14 @@ sealed interface ChatEntryPartialChange : PartialChange<ChatEntryUiState> {
         override fun reduce(oldState: ChatEntryUiState): ChatEntryUiState =
             when (this) {
                 is Start -> oldState.copy(isLoading = true)
-                is Success -> oldState.copy(isLoading = false, forums = forums)
+                is Success -> oldState.copy(isLoading = false, rooms = rooms)
                 is Failure -> oldState.copy(isLoading = false)
             }
 
         data object Start : Load()
 
         data class Success(
-            val forums: ImmutableList<GetForumListBean.ForumInfo>,
+            val rooms: ImmutableList<ChatRoom>,
         ) : Load()
 
         data class Failure(val error: Throwable) : Load()
@@ -91,7 +92,7 @@ sealed interface ChatEntryPartialChange : PartialChange<ChatEntryUiState> {
 @Immutable
 data class ChatEntryUiState(
     val isLoading: Boolean = false,
-    val forums: ImmutableList<GetForumListBean.ForumInfo> = persistentListOf(),
+    val rooms: ImmutableList<ChatRoom> = persistentListOf(),
 ) : UiState
 
 sealed interface ChatEntryUiEvent : UiEvent

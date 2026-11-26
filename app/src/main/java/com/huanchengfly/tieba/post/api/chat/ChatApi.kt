@@ -1,6 +1,7 @@
 package com.huanchengfly.tieba.post.api.chat
 
 import com.huanchengfly.tieba.post.api.chat.blcp.BlcpCrypto
+import com.huanchengfly.tieba.post.api.chat.http.ImHttpConstants
 import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
 import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
@@ -39,7 +40,7 @@ object ChatApi {
     private const val CHAT_SDK_VERSION = "11250036"
 
     /** 普通业务表单接口的签名盐。 */
-    private const val APP_SALT = "tiebaclient!!!"
+    internal const val APP_SALT = "tiebaclient!!!"
 
     /**
      * 聊天接口上报的客户端版本。
@@ -47,7 +48,7 @@ object ChatApi {
      * 服务端会校验该版本号，过旧时 pim 接口直接返回 110001 未知错误，
      * 因此需要与最新官方客户端保持一致。
      */
-    private const val CHAT_VERSION = "22.13.1.1"
+    internal const val CHAT_VERSION = ImHttpConstants.CHAT_VERSION
     private const val LONG_MAX = "9223372036854775807"
 
     private val client = OkHttpClient.Builder()
