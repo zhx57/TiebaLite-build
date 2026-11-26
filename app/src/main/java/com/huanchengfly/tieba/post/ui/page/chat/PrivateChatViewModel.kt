@@ -8,8 +8,6 @@ import androidx.compose.runtime.Stable
 import com.huanchengfly.tieba.post.api.chat.http.ImHttpConstants
 import com.huanchengfly.tieba.post.api.chat.http.ImMessageApi
 import com.huanchengfly.tieba.post.api.chat.http.ImSessionApi
-import com.huanchengfly.tieba.post.api.chat.ws.ChatSocketHub
-import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
@@ -30,10 +28,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.conflate
@@ -57,12 +52,10 @@ import javax.inject.Inject
 class PrivateChatViewModel @Inject constructor() :
     BaseViewModel<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState, PrivateChatUiEvent>() {
 
-    private val pushRefresh by lazy { Channel<PrivateChatUiIntent.Poll>(Channel.CONFLATED) }
-
     override fun createInitialState(): PrivateChatUiState = PrivateChatUiState()
 
     override fun createPartialChangeProducer(): PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> =
-        PrivateChatPartialChangeProducer(flow { emitAll(pushRefresh.receiveAsFlow()) })
+        PrivateChatPartialChangeProducer()
 
     override fun dispatchEvent(partialChange: PrivateChatPartialChange): UiEvent? =
         when (partialChange) {
@@ -73,79 +66,36 @@ class PrivateChatViewModel @Inject constructor() :
             else -> null
         }
 
-    override fun onCleared() {
-        // 连接在进程内共享，页面退出只解除推送订阅。
-        unregisterPush?.invoke()
-        unregisterPush = null
-        super.onCleared()
-    }
-
-    /** 取当前账号的共享连接，账号切换时由 ChatSocketHub 负责重建。 */
-    private fun obtainSocket(): ChatWebSocketClient =
-        ChatSocketHub.get(AccountUtil.getCookie().orEmpty())
-
-    private var unregisterPush: (() -> Unit)? = null
-
-    /** 当前会话的对端 uid，收到推送时用来触发对应会话的增量拉取。 */
-    @Volatile
-    private var activePeerUid: Long = 0L
-
-    /**
-     * 绑定当前会话并注册推送回调。
-     *
-     * 服务端推送只通知哪个消息组有新消息，不携带消息体，
-     * 因此收到后立即触发一次 Poll，做到近实时刷新（轮询只作为兜底）。
-     */
-    fun bindPeer(peerUid: Long) {
-        activePeerUid = peerUid
-        val client = obtainSocket()
-        unregisterPush?.invoke()
-        unregisterPush = client.addPushNotifyListener { groupId ->
-            val uid = activePeerUid
-            if (uid != 0L && groupId == client.privateGroupId) {
-                pushRefresh.trySend(PrivateChatUiIntent.Poll(uid))
-            }
-        }
-    }
-
-    fun unbindPeer(peerUid: Long) {
-        if (activePeerUid == peerUid) {
-            activePeerUid = 0L
-            unregisterPush?.invoke()
-            unregisterPush = null
-        }
-    }
-
-    init {
-        obtainSocket()
-    }
-
-    private class PrivateChatPartialChangeProducer(
-        private val pushFlow: Flow<PrivateChatUiIntent.Poll>,
-    ) : PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> {
+    private class PrivateChatPartialChangeProducer :
+        PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> {
 
         private val pendingSeq = AtomicLong(0)
         private fun newPendingId(): Long = pendingSeq.decrementAndGet()
-        private var privateCursor: Long = 0L
+        private var httpCursorTimeMillis: Long = 0L
         private var historyLoaded = false
         private var cursorAccountUid = 0L
         private var cursorPeerUid = 0L
 
-        private fun resetCursor(selfUid: Long, peerUid: Long) {
+        private fun updateHttpCursor(selfUid: Long, peerUid: Long, cached: List<ChatWsMessage>) {
             if (cursorAccountUid != selfUid || cursorPeerUid != peerUid) {
-                privateCursor = PrivateChatCache.syncCursor(selfUid)
+                httpCursorTimeMillis = 0L
                 historyLoaded = false
                 cursorAccountUid = selfUid
                 cursorPeerUid = peerUid
             }
+            // HTTP 按会话的服务端毫秒时间同步，与旧 WS 的账号级 msgId 游标无关。
+            httpCursorTimeMillis = maxOf(httpCursorTimeMillis, cached.privateHttpCursorTimeMillis())
         }
+
+        // 重叠拉取边界毫秒，避免漏掉同一毫秒的消息；缓存按 msgId 去重。
+        private fun httpBeginTimeMillis(): Long = (httpCursorTimeMillis - 1L).coerceAtLeast(0L)
 
         @OptIn(ExperimentalCoroutinesApi::class)
         override fun toPartialChangeFlow(
             intentFlow: Flow<PrivateChatUiIntent>,
         ): Flow<PrivateChatPartialChange> =
             merge(
-                merge(intentFlow, pushFlow)
+                intentFlow
                     .filter {
                         it is PrivateChatUiIntent.Load ||
                             it is PrivateChatUiIntent.Poll
@@ -177,20 +127,22 @@ class PrivateChatViewModel @Inject constructor() :
                 emit(PrivateChatPartialChange.Load.Start(selfUid, peerUid))
 
                 // 先展示本地缓存，避免等待网络时页面空白。
-                resetCursor(selfUid, peerUid)
                 val initialCached = PrivateChatCache.load(selfUid, peerUid)
+                updateHttpCursor(selfUid, peerUid, initialCached)
                 if (initialCached.isNotEmpty()) {
                     emit(PrivateChatPartialChange.Load.Cached(initialCached.toImmutableList(), selfUid, peerUid))
                 }
 
                 // 官方消息拉取走 rest/3.0/im/fetch_msg，对方 uid 需要加密后放在 contacter。
-                val incoming = ImMessageApi.fetchMessages(peerUid)
+                val incoming = ImMessageApi.fetchMessages(peerUid, beginTime = httpBeginTimeMillis())
                     .map { it.toChatWsMessage(selfUid) }
+                if (AccountUtil.getUid()?.toLongOrNull() != selfUid) return@flow
                 PrivateChatCache.saveIncoming(selfUid, incoming, incoming.maxOfOrNull { it.msgId } ?: 0L)
-                privateCursor = maxOf(privateCursor, incoming.maxOfOrNull { it.msgId } ?: 0L)
+                val cached = PrivateChatCache.load(selfUid, peerUid)
+                updateHttpCursor(selfUid, peerUid, cached)
                 historyLoaded = true
                 emit(PrivateChatPartialChange.Load.Success(
-                    PrivateChatCache.load(selfUid, peerUid).toImmutableList(), selfUid, peerUid,
+                    cached.toImmutableList(), selfUid, peerUid,
                 ))
             }.catch<PrivateChatPartialChange.Load> {
                 if (it is CancellationException) throw it
@@ -200,15 +152,15 @@ class PrivateChatViewModel @Inject constructor() :
         private fun PrivateChatUiIntent.Poll.producePartialChange(): Flow<PrivateChatPartialChange.Poll> =
             flow<PrivateChatPartialChange.Poll> {
                 val selfUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
-                resetCursor(selfUid, peerUid)
-                // 增量拉取：从上次消费到的位置往后取。
-                val beginTime = if (privateCursor > 0L) privateCursor else 0L
-                val incoming = ImMessageApi.fetchMessages(peerUid, beginTime = beginTime)
+                updateHttpCursor(selfUid, peerUid, PrivateChatCache.load(selfUid, peerUid))
+                val incoming = ImMessageApi.fetchMessages(peerUid, beginTime = httpBeginTimeMillis())
                     .map { it.toChatWsMessage(selfUid) }
+                if (AccountUtil.getUid()?.toLongOrNull() != selfUid) return@flow
                 PrivateChatCache.saveIncoming(selfUid, incoming, incoming.maxOfOrNull { it.msgId } ?: 0L)
-                privateCursor = maxOf(privateCursor, incoming.maxOfOrNull { it.msgId } ?: 0L)
+                val cached = PrivateChatCache.load(selfUid, peerUid)
+                updateHttpCursor(selfUid, peerUid, cached)
                 emit(PrivateChatPartialChange.Poll.Success(
-                    PrivateChatCache.load(selfUid, peerUid).toImmutableList(), selfUid, peerUid,
+                    cached.toImmutableList(), selfUid, peerUid,
                 ))
             }.catch<PrivateChatPartialChange.Poll> {
                 if (it is CancellationException) throw it
@@ -362,6 +314,12 @@ sealed interface PrivateChatUiIntent : UiIntent {
         val photoUri: Uri? = null,
     ) : PrivateChatUiIntent
 }
+
+// 仅使用已由服务端确认的有效时间，本地发送时间即使已有正数 msgId 也不能推进 HTTP 游标。
+internal fun List<ChatWsMessage>.privateHttpCursorTimeMillis(): Long =
+    asSequence()
+        .filter { it.serverMsgId != null && it.deliveryConfirmed && it.msgTime > 0L }
+        .maxOfOrNull { it.msgTime } ?: 0L
 
 // 拉取响应只有发送者；self 消息仅在缓存已确认属于当前会话时保留。
 internal fun List<ChatWsMessage>.forPrivatePeer(

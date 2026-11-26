@@ -36,8 +36,8 @@ object ImBduid {
         if (uid.isEmpty()) return ""
         return runCatching {
             val encrypted = cipher(Cipher.ENCRYPT_MODE).doFinal(uid.toByteArray(Charsets.UTF_8))
-            // 官方用 Android 的 Base64.NO_WRAP，保留 = 填充且不换行。
-            Base64.getEncoder().encodeToString(encrypted)
+            // 线上 IM HTTP 接口拒绝尾部 = 填充，必须使用不换行、无填充的编码。
+            Base64.getEncoder().withoutPadding().encodeToString(encrypted)
         }.getOrDefault("")
     }
 
@@ -47,7 +47,7 @@ object ImBduid {
     fun transBDUK(bduk: String): String {
         if (bduk.isEmpty()) return ""
         return runCatching {
-            val raw = Base64.getDecoder().decode(bduk)
+            val raw = Base64.getDecoder().decode(bduk.replace('-', '+').replace('_', '/'))
             String(cipher(Cipher.DECRYPT_MODE).doFinal(raw), Charsets.UTF_8)
         }.getOrDefault("")
     }

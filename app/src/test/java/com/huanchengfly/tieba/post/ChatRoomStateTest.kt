@@ -29,7 +29,117 @@ import org.junit.Test
 
 class ChatRoomStateTest {
     @Test
+    fun groupHistoryRequestUsesLatestPageAndSignsExactlyItsJsonFields() {
+        for (cursor in listOf(0L, 1795694596873979L)) {
+            val request = ChatApi.buildChatRoomHistoryRequest(
+                roomId = 123L, lastMsgId = cursor, deviceId = "test-cuid", timestamp = 1795694596L,
+            )
+            val expected = mapOf(
+                "appid" to "10773430",
+                "mcast_id" to "123",
+                "msgid_end" to (if (cursor == 0L) Long.MAX_VALUE else cursor).toString(),
+                "count" to "-60",
+                "category" to "4",
+                "app_version" to ChatApi.CHAT_VERSION,
+                "sdk_version" to "11250036",
+                "device_id" to "test-cuid",
+                "timestamp" to "1795694596",
+            )
+            assertEquals(expected.keys + "sign", request.keys().asSequence().toSet())
+            assertEquals(expected, expected.keys.associateWith { request.get(it).toString() })
+            assertEquals(-60, request.getInt("count"))
+            assertEquals(if (cursor == 0L) Long.MAX_VALUE else cursor, request.getLong("msgid_end"))
+            assertFalse(request.has("msgid_begin"))
+            assertFalse(request.has("device_type"))
+            // 独立计算 MD5，锁定无额外盐且签名字段与 JSON 完全一致。
+            val raw = expected.toSortedMap().entries.joinToString("") { "${it.key}=${it.value}" }
+            val signature = java.security.MessageDigest.getInstance("MD5")
+                .digest(raw.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            assertEquals(signature, request.getString("sign"))
+        }
+        val latest = ChatApi.buildChatRoomHistoryRequest(
+            roomId = 123L, deviceId = "test-cuid", timestamp = 1795694596L,
+        )
+        assertEquals(Long.MAX_VALUE, latest.getLong("msgid_end"))
+    }
+
+    @Test
+    fun onlineGroupTextAndImageShapesUseZeroAndOneInsteadOfSdkTypes() {
+        for (encoded in listOf(false, true)) {
+            for (type in listOf(0, 1)) {
+                val body = if (type == 0) JSONObject().put("text", "你好") else JSONObject()
+                    .put("url", "https://example.com/original.jpg")
+                    .put("thumbnail", "https://example.com/preview.jpg").put("w", 640).put("h", 480)
+                val inner = JSONObject().put("content_type", if (encoded) type.toString() else type)
+                    .put("content_body", if (encoded) body.toString() else body)
+                    .put("baidu_uk", BlcpCrypto.userId2Bduk(42L))
+                val envelope = JSONObject().put("text", if (encoded) inner.toString() else inner)
+                val parsed = ChatApi.parseMessage(JSONObject()
+                    .put("msgid", 1795694596873979L).put("from_user", 123L)
+                    .put("type", 81).put("category", 4).put("create_time", 1795694596L)
+                    .put("content", if (encoded) envelope.toString() else envelope), 42L)!!
+                assertEquals(type, parsed.contentType)
+                assertEquals(type, parsed.semantics.businessType)
+                assertEquals(81, parsed.semantics.transportType)
+                assertEquals(if (type == 0) ChatMessageKind.TEXT else ChatMessageKind.IMAGE, parsed.semantics.kind)
+                assertEquals(if (type == 0) "你好" else "", parsed.text)
+                assertEquals(if (type == 0) emptyList<String>() else listOf("https://example.com/original.jpg"), parsed.images)
+                assertEquals(42L, parsed.senderUid)
+                assertTrue(parsed.isSelf)
+            }
+        }
+    }
+
+    @Test
+    fun parsedTextAndImageEchoesReplaceTheirLocalPlaceholdersWithoutChangingTypes() {
+        for (meme in listOf(null, ChatCloudMeme("image", "https://example.com/image.jpg"))) {
+            val type = if (meme == null) 0 else 1
+            val text = if (meme == null) "你好" else ""
+            val started = ChatRoomPartialChange.Send.Start(-1L, text, 42L, "测试用户", "portrait",
+                cloudMeme = meme).reduce(ChatRoomUiState())
+            val transmitting = ChatRoomPartialChange.Send.Transmitting(-1L).reduce(started)
+            val local = transmitting.messages.single()
+            assertEquals(type, local.contentType)
+            assertEquals(type, local.semantics.businessType)
+            val request = ChatSendApi.buildMessagePayload(
+                1L, text, 2L, 0, 123L, BlcpCrypto.userId2Bduk(42L), 1L,
+                "测试用户", "portrait", "test-only", emptyList(), null, "", cloudMeme = meme,
+            )
+            val echo = received(request).copy(msgTime = local.msgTime)
+            val delivered = ChatRoomPartialChange.Poll.Success(persistentListOf(echo)).reduce(transmitting)
+            val confirmed = delivered.messages.single()
+            assertFalse(confirmed.isLocal)
+            assertEquals(-1L, confirmed.echoForPendingId)
+            assertEquals(type, confirmed.contentType)
+            assertEquals(type, confirmed.semantics.businessType)
+            assertEquals(local.semantics.kind, confirmed.semantics.kind)
+            assertEquals(local.images, confirmed.images)
+            assertEquals(local.text, confirmed.text)
+            assertEquals(delivered, ChatRoomPartialChange.Send.Unconfirmed(-1L).reduce(delivered))
+        }
+    }
+
+    @Test
+    fun unknownGroupBusinessTypeDoesNotFallThroughToSdkImageOrVoice() {
+        for (type in listOf(2, 3, 9999)) {
+            val parsed = received(imagePayload(type, JSONObject().put("future", "value").toString()))
+            assertEquals(ChatMessageKind.UNKNOWN, parsed.semantics.kind)
+            assertEquals(type, parsed.semantics.businessType)
+            assertEquals(type, parsed.contentType)
+            assertTrue(parsed.text.contains(type.toString()))
+            assertTrue(parsed.images.isEmpty())
+            assertEquals(null, parsed.voiceUrl)
+            assertTrue(parsed.semantics.rawPayload!!.contains("future"))
+        }
+    }
+
+    @Test
     fun protocolNamespacesRemainSeparateAndKnownBusinessTypesAreClassified() {
+        assertEquals(ChatMessageKind.TEXT, ChatMessageSemantics.classify(81, 0))
+        assertEquals(ChatMessageKind.IMAGE, ChatMessageSemantics.classify(81, 1))
+        assertEquals(ChatMessageKind.UNKNOWN, ChatMessageSemantics.classify(81, 2))
+        assertEquals(ChatMessageKind.UNKNOWN, ChatMessageSemantics.classify(81, 3))
         assertEquals(ChatMessageKind.TEXT, ChatMessageSemantics.classify(99, 1))
         assertEquals(ChatMessageKind.IMAGE, ChatMessageSemantics.classify(1, 2))
         assertEquals(ChatMessageKind.VOICE, ChatMessageSemantics.classify(1, 3))
@@ -312,6 +422,7 @@ class ChatRoomStateTest {
         assertEquals("content://photos/8", pending.localPhotoUri)
         assertEquals(listOf("content://photos/8"), pending.images)
         assertEquals(1, pending.contentType)
+        assertEquals(1, pending.semantics.businessType)
         assertEquals(ChatMessageKind.IMAGE, pending.semantics.kind)
     }
 
@@ -411,7 +522,7 @@ class ChatRoomStateTest {
         val body = JSONObject(data.getString("content_body"))
         assertEquals(meme.sendImageUrl, body.getString("url"))
         assertEquals(meme.sendThumbnailUrl, body.getString("thumbnail"))
-        assertEquals("2", data.getString("content_type"))
+        assertEquals("1", data.getString("content_type"))
         assertEquals("https://cloud.example/original.gif", meme.imageUrl)
     }
 
@@ -423,13 +534,13 @@ class ChatRoomStateTest {
             "测试用户", "portrait", "test-only", emptyList(), null, "test-zid", cloudMeme = meme,
         )
         val data = JSONObject(JSONObject(request.getString("content")).getString("text"))
-        assertEquals("2", data.getString("content_type"))
+        assertEquals("1", data.getString("content_type"))
         val body = JSONObject(data.getString("content_body"))
         assertEquals(meme.imageUrl, body.getString("url"))
         assertEquals(meme.imageUrl, body.getString("thumbnail"))
         assertFalse(body.has("text"))
         val parsed = received(request)
-        assertEquals(2, parsed.contentType)
+        assertEquals(1, parsed.contentType)
         assertEquals(listOf(meme.imageUrl), parsed.images)
         assertEquals("", parsed.text)
     }
@@ -440,7 +551,7 @@ class ChatRoomStateTest {
         val request = payload()
         val envelope = JSONObject(request.getString("content"))
         val body = JSONObject(envelope.getString("text"))
-            .put("content_type", "2")
+            .put("content_type", "1")
             .put("content_body", JSONObject().put("url", original)
                 .put("thumbnail", "https://example.com/preview.jpg").toString())
         envelope.put("text", body.toString())
@@ -750,20 +861,23 @@ class ChatRoomStateTest {
     @Test
     fun textPayloadUsesOfficialTextContentType() {
         val data = JSONObject(JSONObject(payload().getString("content")).getString("text"))
-        // 官方 ChatMsgFactory：文本 msgType 为 1，图片为 2。
-        assertEquals("1", data.getString("content_type"))
+        // 群 type=81 内层与 SDK msgType 不同：文本为 0，图片为 1。
+        assertEquals("0", data.getString("content_type"))
         assertFalse(JSONObject(data.getString("content_body")).has("url"))
     }
 
     @Test
-    fun blankSecurityTokenIsRejectedBeforeSending() {
-        val error = runCatching {
-            ChatSendApi.buildMessagePayload(
-                1L, "测试", 2L, 0, 123L, BlcpCrypto.userId2Bduk(42L), 1L,
-                "测试用户", "portrait", "test-only", emptyList(), null, "",
+    fun blankSecurityTokenCanConstructTextAndImagePayloads() {
+        for (meme in listOf(null, ChatCloudMeme("image", "https://example.com/image.jpg"))) {
+            val request = ChatSendApi.buildMessagePayload(
+                1L, if (meme == null) "测试" else "", 2L, 0, 123L, BlcpCrypto.userId2Bduk(42L), 1L,
+                "测试用户", "portrait", "test-only", emptyList(), null, "", cloudMeme = meme,
             )
-        }.exceptionOrNull()
-        assertTrue(error is IllegalArgumentException)
+            val safeExt = JSONObject(request.getString("app_safe_ext"))
+            assertEquals("", safeExt.getJSONObject("haotianjing").getString("zid"))
+            assertEquals(if (meme == null) ChatMessageKind.TEXT else ChatMessageKind.IMAGE,
+                received(request).semantics.kind)
+        }
     }
 
     @Test
@@ -811,7 +925,7 @@ class ChatRoomStateTest {
         val parsed = received(payload)
         assertEquals(42L, parsed.senderUid)
         assertTrue(parsed.isSelf)
-        assertEquals(1, parsed.contentType)
+        assertEquals(0, parsed.contentType)
         assertEquals("@机器人 @成员 测试消息", parsed.text)
         assertEquals(targets, parsed.mentions)
         assertEquals(7, parsed.robotSkill)
@@ -920,8 +1034,8 @@ class ChatRoomStateTest {
     @Test
     fun imageUrlInTextRendersAsImageWithoutDuplicatingCdnAddress() {
         val url = "https://example.com/photo.jpg"
-        // 官方图片消息：content_type=2，content_body 直接是 ImageMsg 的 url 字段。
-        val parsed = received(imagePayload(2, JSONObject().put("url", url).toString()))
+        // 线上群图片消息：content_type=1，content_body 使用 url/thumbnail。
+        val parsed = received(imagePayload(1, JSONObject().put("url", url).toString()))
         assertEquals(listOf(url), parsed.images)
         assertEquals("", parsed.text)
     }
@@ -938,7 +1052,7 @@ class ChatRoomStateTest {
     fun imageCaptionKeepsLineBreaksAndSpacing() {
         val url = "https://example.com/photo.jpg"
         // 官方图片消息：图片地址在 content_body.url，说明文字与图片分开保存。
-        val parsed = received(imagePayload(2,
+        val parsed = received(imagePayload(1,
             JSONObject().put("url", url).put("text", "第一行  说明\n第二行").toString()))
         assertEquals(listOf(url), parsed.images)
         assertEquals("第一行  说明\n第二行", parsed.text)
@@ -1149,7 +1263,10 @@ class ChatRoomStateTest {
             .put("voice_md5", "abc123")
             .put("during_time", 8000)
             .put("src", voiceUrl)
+        // 未验证的群类型不套用 SDK 枚举；语音由 voice_md5/音频地址识别，原始类型仍保留。
         val voiceWithUrl = received(imagePayload(2, voiceBody.toString(), voiceUrl))
+        assertEquals(2, voiceWithUrl.contentType)
+        assertEquals(2, voiceWithUrl.semantics.businessType)
         assertEquals(ChatMessageKind.VOICE, voiceWithUrl.semantics.kind)
         assertTrue(voiceWithUrl.images.isEmpty())
         assertEquals(voiceUrl, voiceWithUrl.voiceUrl)
@@ -1166,6 +1283,13 @@ class ChatRoomStateTest {
             md5Only.voiceUrl,
         )
         assertEquals(8000, md5Only.voiceDurationMs)
+
+        // 即使类型值与群图片重叠，明确语音证据仍优先，不能渲染为图片。
+        val voiceWithImageType = received(imagePayload(1, voiceBody.toString(), voiceUrl))
+        assertEquals(ChatMessageKind.VOICE, voiceWithImageType.semantics.kind)
+        assertEquals(1, voiceWithImageType.semantics.businessType)
+        assertEquals(voiceUrl, voiceWithImageType.voiceUrl)
+        assertTrue(voiceWithImageType.images.isEmpty())
 
         val audioUrlOnly = received(imagePayload(2, JSONObject().put("src", "https://example.com/clip.amr").toString()))
         assertEquals(ChatMessageKind.VOICE, audioUrlOnly.semantics.kind)
@@ -1193,6 +1317,6 @@ class ChatRoomStateTest {
         assertEquals(640, contentBody.getInt("w"))
         assertEquals(480, contentBody.getInt("h"))
         assertEquals(memeWithSize.sendImageUrl, contentBody.getString("url"))
-        assertEquals("2", textJson.getString("content_type"))
+        assertEquals("1", textJson.getString("content_type"))
     }
 }

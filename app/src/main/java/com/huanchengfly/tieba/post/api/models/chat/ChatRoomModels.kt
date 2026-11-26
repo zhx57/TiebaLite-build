@@ -73,6 +73,12 @@ data class ChatMessageSemantics(
             system && businessType == 20000 -> ChatMessageKind.EMOTION_REACTION
             system && businessType == 7010 -> ChatMessageKind.POST_SHARE
             system -> ChatMessageKind.SYSTEM_EVENT
+            // type=81 的群内层枚举独立于 SDK：0 文本、1 图片，其余不可套用 SDK 类型。
+            transportType == 81 -> when (businessType) {
+                null, 0 -> ChatMessageKind.TEXT
+                1 -> ChatMessageKind.IMAGE
+                else -> ChatMessageKind.UNKNOWN
+            }
             businessType == 1 -> ChatMessageKind.TEXT
             businessType == 2 -> ChatMessageKind.IMAGE
             businessType == 3 -> ChatMessageKind.VOICE
@@ -83,7 +89,6 @@ data class ChatMessageSemantics(
             businessType == 104 -> ChatMessageKind.AI_INTRODUCTION
             businessType == 1001 || businessType == 1002 -> ChatMessageKind.WEB_CHAT
             transportType == 1 && businessType == null -> ChatMessageKind.TEXT
-            transportType == 81 && (businessType == null || businessType == 0) -> ChatMessageKind.TEXT
             else -> ChatMessageKind.UNKNOWN
         }
 

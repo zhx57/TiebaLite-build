@@ -485,7 +485,7 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                                 kind = if (cloudMeme == null && localPhotoUri == null) ChatMessageKind.TEXT else ChatMessageKind.IMAGE,
                                 protocolSource = "local_outgoing",
                                 transportType = if (cloudMeme == null && localPhotoUri == null) 0 else 1,
-                                businessType = if (cloudMeme == null && localPhotoUri == null) 1 else 2,
+                                businessType = if (cloudMeme == null && localPhotoUri == null) 0 else 1,
                                 summary = if (cloudMeme == null && localPhotoUri == null) text else "图片消息",
                             ),
                         )).toImmutableList(),

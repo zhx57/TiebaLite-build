@@ -80,6 +80,8 @@ object ImHttpClient {
             .joinToString(separator = "") { "%02x".format(it.toInt() and 0xFF) }
     }
 
+    internal fun encodeJson(params: Map<String, Any>): JSONObject = JSONObject(params)
+
     /**
      * 发起一次 IM HTTP 请求。
      *
@@ -93,7 +95,7 @@ object ImHttpClient {
             body.put("sign", sign(body))
             val request = Request.Builder()
                 .url((HOST + path).toHttpUrl())
-                .post(body.toString().toRequestBody(jsonMediaType))
+                .post(encodeJson(body).toString().toRequestBody(jsonMediaType))
                 .header("Cookie", "BDUSS=$bduss")
                 .build()
             client.newCall(request).execute().use { response ->
@@ -117,15 +119,21 @@ object ImHttpClient {
     /**
      * 检查登录态。
      *
-     * 官方错误码表里 BDUSS 过期是 8，参数校验失败是 430（param bduss error）；
-     * error_code=1 只是通用的参数错误，不能当作登录失效，否则会把网络或参数问题
-     * 误报成登录态问题，让用户反复重新登录。
+     * 官方错误码表里 BDUSS 过期是 8，参数校验失败是 430；430 只有明确指向
+     * BDUSS 的错误消息才表示登录态失效，像 timestamp empty 这样的参数错误不能误判。
+     * 成功响应的 error_code=0 也不能仅因为提示文本包含未登录就被判为登录失效。
      */
     fun isLoginError(response: JSONObject): Boolean {
         val code = errorCode(response)
-        if (code == 8 || code == 430) return true
-        return errorMessage(response).contains("bduss", ignoreCase = true) ||
-            errorMessage(response).contains("未登录")
+        if (code == 8) return true
+        if (code == 0) return false
+
+        val message = errorMessage(response)
+        if (code == 430) {
+            return message.contains("bduss", ignoreCase = true)
+        }
+        return message.contains("BDUSS 过期", ignoreCase = true) ||
+            message.contains("未登录")
     }
 }
 

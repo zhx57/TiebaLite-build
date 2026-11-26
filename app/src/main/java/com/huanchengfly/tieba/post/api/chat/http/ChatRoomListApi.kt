@@ -9,6 +9,7 @@ import com.huanchengfly.tieba.post.api.models.chat.ChatRoom
 import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.utils.ClientUtils
 import com.huanchengfly.tieba.post.utils.CuidUtils
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -48,9 +49,6 @@ object ChatRoomListApi {
     /** 关注贴吧列表最多翻页数，防止异常 has_more 导致死循环。 */
     private const val MAX_FORUM_PAGES = 50
 
-    /** 兜底路径最多拉取的关注贴吧数量。 */
-    private const val MAX_FALLBACK_FORUMS = 40
-
     /** 拉群的并发上限，避免同时打太多请求。 */
     private const val MAX_FALLBACK_CONCURRENCY = 4
 
@@ -61,13 +59,11 @@ object ChatRoomListApi {
         .build()
 
     /**
-     * 拉取用户已订阅的全部群。
+     * 合并用户订阅群与全部关注贴吧的公开群，重复 roomId 优先保留订阅结果。
      *
      * 官方消息中心的主路径是 c/u/chat/getChatSubscriptionList：
      * 新装客户端本地没有群缓存时 chatroom_new_msg 传空串，服务端返回全量订阅群。
-     *
-     * 订阅接口为空或失败时，再退回关注贴吧逐个拉群，
-     * 避免任何单一路径异常都导致聊天 Tab 空白。
+     * 两路每次都加载，成功空结果与失败分开处理。
      */
     suspend fun fetchAllRooms(): List<ChatRoom> = withContext(Dispatchers.IO) {
         val subscribed = runCatching {
@@ -78,44 +74,57 @@ object ChatRoomListApi {
                     "chatroom_new_msg" to "",
                 )
             ).let(::parseSubscriptionRooms)
-        }.getOrNull()
-        if (!subscribed.isNullOrEmpty()) return@withContext subscribed
-        fetchRoomsFromFollowedForums()
+        }.onFailure { if (it is CancellationException) throw it }
+        val followed = runCatching { fetchRoomsFromFollowedForums() }
+            .onFailure { if (it is CancellationException) throw it }
+        if (subscribed.isFailure && followed.isFailure) {
+            throw subscribed.exceptionOrNull()!!
+        }
+        if (subscribed.isFailure) {
+            Log.w(TAG, "订阅群加载失败，保留关注吧群结果")
+        }
+        if (followed.isFailure) {
+            Log.w(TAG, "关注吧群加载失败，保留订阅群结果")
+        }
+        (subscribed.getOrDefault(emptyList()) + followed.getOrDefault(emptyList()))
+            .distinctBy { it.roomId }
     }
 
-    /**
-     * 用关注贴吧逐个拉群作为兜底。
-     *
-     * 关注吧可能很多，限制数量与并发，避免首屏过慢或被限流。
-     */
+    /** 拉取全部关注贴吧的群，仅限制并发；单吧失败在批次内汇总。 */
     private suspend fun fetchRoomsFromFollowedForums(): List<ChatRoom> {
         val forumIds = fetchAllFollowedForumIds()
         if (forumIds.isEmpty()) return emptyList()
         val semaphore = Semaphore(MAX_FALLBACK_CONCURRENCY)
-        return coroutineScope {
-            forumIds.take(MAX_FALLBACK_FORUMS).map { fid ->
+        val results = coroutineScope {
+            forumIds.map { fid ->
                 async {
-                    semaphore.withPermit { fetchRoomsByFidWithRetry(fid) }
+                    semaphore.withPermit {
+                        runCatching { fetchRoomsByFidWithRetry(fid) }
+                            .onFailure { if (it is CancellationException) throw it }
+                    }
                 }
-            }.awaitAll().flatten().distinctBy { it.roomId }
+            }.awaitAll()
         }
+        val failedCount = results.count { it.isFailure }
+        if (failedCount == results.size) {
+            throw results.first().exceptionOrNull()!!
+        }
+        if (failedCount > 0) {
+            Log.w(TAG, "关注吧群部分加载失败：$failedCount/${results.size}，保留成功结果")
+        }
+        return results.flatMap { it.getOrDefault(emptyList()) }.distinctBy { it.roomId }
     }
 
-    /**
-     * 拉单个吧的群，失败重试一次。
-     *
-     * 并发较高时服务端会偶发限流或超时，直接丢弃会让某些吧看起来没有群。
-     * 这里保留重试并区分空结果与失败，避免把失败当成没有群。
-     */
+    /** 拉单个吧的群，失败最多重试一次；两次均失败时抛出首次异常。 */
     private suspend fun fetchRoomsByFidWithRetry(fid: Long): List<ChatRoom> {
-        repeat(2) { attempt ->
+        var firstError: Throwable? = null
+        repeat(2) {
             val result = runCatching { fetchRoomsByFid(fid) }
-            if (result.isSuccess) return result.getOrDefault(emptyList())
-            if (attempt == 1) {
-                Log.w(TAG, "拉取吧群失败 fid=$fid: ${result.exceptionOrNull()?.message}")
-            }
+                .onFailure { if (it is CancellationException) throw it }
+            if (result.isSuccess) return result.getOrThrow()
+            if (firstError == null) firstError = result.exceptionOrNull()
         }
-        return emptyList()
+        throw firstError!!
     }
 
     /**
@@ -131,10 +140,19 @@ object ChatRoomListApi {
         while (page <= MAX_FORUM_PAGES) {
             val bean = runCatching {
                 TiebaApi.getInstance().userLikeForumFlow(uid, page).first()
-            }.getOrNull() ?: break
+            }.getOrElse {
+                if (it is CancellationException) throw it
+                if (page == 1) throw it
+                Log.w(TAG, "关注吧第 $page 页加载失败，保留此前已获取的贴吧")
+                return result.toList()
+            }
             val forums = bean.forumList.forumList + bean.forumList.gconForumList
             forums.mapNotNullTo(result) { it.id.toLongOrNull()?.takeIf { fid -> fid > 0L } }
-            if (bean.hasMore != "1" || forums.isEmpty()) break
+            if (bean.hasMore != "1") break
+            if (forums.isEmpty() || page == MAX_FORUM_PAGES) {
+                Log.w(TAG, "关注吧分页在第 $page 页提前停止，服务端仍标记有更多数据")
+                break
+            }
             page++
         }
         return result.toList()
@@ -202,6 +220,7 @@ object ChatRoomListApi {
                 throw ChatApiException(response.code, "HTTP ${response.code}")
             }
             val root = runCatching { JSONObject(text) }.getOrElse {
+                if (it is CancellationException) throw it
                 throw ChatApiException(response.code, "响应不是合法 JSON")
             }
             val errCode = root.optInt("error_code", 0)
@@ -231,7 +250,9 @@ object ChatRoomListApi {
         optJSONObject("data")?.let { return it }
         val raw = optString("data").trim()
         if (raw.isEmpty() || raw == "null") return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        return runCatching { JSONObject(raw) }
+            .onFailure { if (it is CancellationException) throw it }
+            .getOrNull()
     }
 
     /**

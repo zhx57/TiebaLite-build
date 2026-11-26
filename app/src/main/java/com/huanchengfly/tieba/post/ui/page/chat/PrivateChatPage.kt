@@ -104,23 +104,18 @@ fun PrivateChatPage(
     )
     FollowLatestChatMessage(listState, peerUid, sendRequestId)
 
-    // 可见时接收推送，回到页面立即补拉，5 秒轮询只作兜底。
+    // 可见时通过 HTTP 每 5 秒轮询，回到页面立即补拉。
     LaunchedEffect(peerUid, viewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            viewModel.bindPeer(peerUid)
-            try {
-                if (!viewModel.initialized) {
-                    viewModel.send(PrivateChatUiIntent.Load(peerUid))
-                    viewModel.initialized = true
-                } else {
-                    viewModel.send(PrivateChatUiIntent.Poll(peerUid))
-                }
-                while (true) {
-                    delay(5_000)
-                    viewModel.send(PrivateChatUiIntent.Poll(peerUid))
-                }
-            } finally {
-                viewModel.unbindPeer(peerUid)
+            if (!viewModel.initialized) {
+                viewModel.send(PrivateChatUiIntent.Load(peerUid))
+                viewModel.initialized = true
+            } else {
+                viewModel.send(PrivateChatUiIntent.Poll(peerUid))
+            }
+            while (true) {
+                delay(5_000)
+                viewModel.send(PrivateChatUiIntent.Poll(peerUid))
             }
         }
     }

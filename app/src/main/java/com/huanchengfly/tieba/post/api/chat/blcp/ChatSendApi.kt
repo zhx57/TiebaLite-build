@@ -179,7 +179,8 @@ object ChatSendApi {
                                 ?.takeIf { it.isNotBlank() }
                                 ?: withTimeoutOrNull(15_000) { SofireUtils.fetchZid().firstOrNull() }
                                     ?.takeIf { it.isNotBlank() }
-                                ?: error("未取得设备安全令牌，请刷新账号登录信息后重试")
+                                // 线上已验证空 zid 可发送，Sofire 超时或无值不应在本地拒发。
+                                ?: ""
                             stage = "连接"
                             connection.connect()
                             stage = "获取登录令牌"
@@ -239,7 +240,7 @@ object ChatSendApi {
                             chatroomId, text, forumId, forumLevel, authenticated.uk,
                             BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
                             selfName, selfPortrait, accountBduss, mentions, robotSkill,
-                            checkNotNull(synchronized(lifecycleLock) { securityToken }), cloudMeme,
+                            synchronized(lifecycleLock) { securityToken }.orEmpty(), cloudMeme,
                         )
                         onTransmitting()
                         connection.sendMcastMsg(chatroomId, payload)
@@ -281,7 +282,6 @@ object ChatSendApi {
         zid: String,
         cloudMeme: ChatCloudMeme? = null,
     ): JSONObject {
-        require(zid.isNotBlank()) { "群聊设备安全令牌不能为空" }
         if (cloudMeme != null) {
             require(text.isBlank() && mentions.isEmpty() && robotSkill == null) {
                 "云表情消息不能包含文本、@或机器人技能"
@@ -372,8 +372,8 @@ object ChatSendApi {
             put("vip", "0")
             put("name", selfName)
             put("portrait", portraitWithTime)
-            // 官方 content_type：文本为 1，图片为 2（ImageMsg）。
-            put("content_type", if (cloudMeme == null) "1" else "2")
+            // type=81/category=4 群消息内层：文本为 0，图片为 1，不是 SDK 的 1/2。
+            put("content_type", if (cloudMeme == null) "0" else "1")
             put(
                 "content_body",
                 if (cloudMeme == null) JSONObject().put("text", text).toString()

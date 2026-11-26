@@ -163,44 +163,18 @@ object ChatApi {
     /**
      * 拉取群最近消息。接口一次返回最多 60 条（count 为负表示取最新）。
      *
-     * @param lastMsgId 增量游标，0 表示从最新开始拉
+     * @param lastMsgId msgid_end 历史翻页游标，不是增量游标；0 表示取最新一页
      */
     suspend fun getChatRoomMessages(
         roomId: Long,
         lastMsgId: Long = 0L,
     ): List<ChatRoomMessage> = withContext(Dispatchers.IO) {
-        val timestamp = System.currentTimeMillis() / 1000L
-        val deviceId = CuidUtils.getNewCuid()
-        // 字段严格对齐官方 IMNewFetchMsgRequest.getRequestParameter：
-        // appid / mcast_id / msgid_begin / msgid_end / count / category /
-        // app_version / sdk_version / device_id / device_type / timestamp / sign
-        val signParams = linkedMapOf(
-            "appid" to CHAT_APP_ID,
-            "mcast_id" to roomId.toString(),
-            "msgid_begin" to "0",
-            "msgid_end" to if (lastMsgId == 0L) Long.MAX_VALUE.toString() else lastMsgId.toString(),
-            "count" to "60",
-            "category" to "4",
-            "app_version" to CHAT_VERSION,
-            "sdk_version" to CHAT_SDK_VERSION,
-            "device_id" to deviceId,
-            "device_type" to "2",
-            "timestamp" to timestamp.toString(),
+        val bodyJson = buildChatRoomHistoryRequest(
+            roomId = roomId,
+            lastMsgId = lastMsgId,
+            deviceId = CuidUtils.getNewCuid(),
+            timestamp = System.currentTimeMillis() / 1000L,
         )
-        val bodyJson = JSONObject().apply {
-            put("appid", CHAT_APP_ID.toLong())
-            put("mcast_id", roomId)
-            put("msgid_begin", 0L)
-            put("msgid_end", if (lastMsgId == 0L) Long.MAX_VALUE else lastMsgId)
-            put("count", 60)
-            put("category", 4)
-            put("app_version", CHAT_VERSION)
-            put("sdk_version", CHAT_SDK_VERSION.toInt())
-            put("device_id", deviceId)
-            put("device_type", 2)
-            put("timestamp", timestamp)
-            put("sign", ChatSignUtil.sign(signParams))
-        }
 
         val request = Request.Builder()
             .url("https://pim.baidu.com/rest/3.0/im/fetch_mcast_msg_client")
@@ -220,6 +194,28 @@ object ChatApi {
         (0 until messages.length()).mapNotNull { index ->
             parseMessage(messages.optJSONObject(index) ?: return@mapNotNull null, myUid)
         }
+    }
+
+    /** 构造群历史请求；msgid_end 是向前翻页的历史上界，不是增量游标。 */
+    internal fun buildChatRoomHistoryRequest(
+        roomId: Long,
+        lastMsgId: Long = 0L,
+        deviceId: String,
+        timestamp: Long,
+    ): JSONObject = JSONObject().apply {
+        put("appid", CHAT_APP_ID.toLong())
+        put("mcast_id", roomId)
+        put("msgid_end", if (lastMsgId == 0L) Long.MAX_VALUE else lastMsgId)
+        // 线上同参数 count=60 返回最旧消息，-60 才从历史上界取最新一页。
+        put("count", -60)
+        put("category", 4)
+        put("app_version", CHAT_VERSION)
+        put("sdk_version", CHAT_SDK_VERSION.toInt())
+        put("device_id", deviceId)
+        put("timestamp", timestamp)
+        // 直接签名请求体中的全部业务字段，聊天接口盐为空。
+        val signParams = keys().asSequence().associateWith { get(it).toString() }
+        put("sign", ChatSignUtil.sign(signParams, salt = ""))
     }
 
     /**

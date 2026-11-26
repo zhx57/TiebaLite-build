@@ -70,7 +70,6 @@ import androidx.compose.material.navigation.ModalBottomSheetLayout
 import androidx.compose.material.navigation.bottomSheet
 import androidx.compose.material.navigation.rememberBottomSheetNavigator
 import com.stoyanvuchev.systemuibarstweaker.SystemUIBarsTweaker
-import com.huanchengfly.tieba.post.api.chat.ws.ChatSocketHub
 import com.huanchengfly.tieba.post.api.retrofit.exception.getErrorMessage
 import com.huanchengfly.tieba.post.arch.BaseComposeActivity
 import com.huanchengfly.tieba.post.arch.GlobalEvent
@@ -125,8 +124,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -323,7 +320,7 @@ class MainActivityV2 : BaseComposeActivity() {
                 ),
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
-            startForegroundChatSocket()
+            startForegroundPrivatePolling()
             startService(Intent(this, NotifyJobService::class.java))
             val builder = JobInfo.Builder(
                 JobServiceUtil.getJobId(this),
@@ -341,34 +338,24 @@ class MainActivityV2 : BaseComposeActivity() {
         runCatching { unregisterReceiver(newMessageReceiver) }
         foregroundChatJob?.cancel()
         foregroundChatJob = null
-        ChatSocketHub.close()
         super.onStop()
     }
 
-    private fun startForegroundChatSocket() {
+    private fun startForegroundPrivatePolling() {
         if (!AccountUtil.isLoggedIn() || foregroundChatJob != null) return
         foregroundChatJob = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive && AccountUtil.isLoggedIn()) {
                 val cookie = AccountUtil.getCookie().orEmpty()
-                // 与私信页面共用同一条连接，避免同账号多连接互相干扰。
-                val socket = ChatSocketHub.get(cookie)
-                val pushes = Channel<Unit>(Channel.CONFLATED)
-                val unregisterPush = socket.addPushNotifyListener { pushes.trySend(Unit) }
                 try {
-                    // 长连接只用来接收推送，握手失败不影响 HTTP 侧的消息与通知。
-                    runCatching { socket.connect(cookie) }
+                    // 私信通知直接通过 HTTP 轮询，不依赖旧长连接。
                     while (isActive && cookie == AccountUtil.getCookie().orEmpty()) {
                         NotifyJobService.consumePrivateMessages(this@MainActivityV2)
-                        withTimeoutOrNull(5_000L) { pushes.receive() }
+                        delay(5_000L)
                     }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
                     android.util.Log.w("ForegroundChat", "私信检查中断，稍后重试", error)
-                } finally {
-                    // 连接是共享的，页面可能仍在使用，这里只解除本循环的推送订阅。
-                    unregisterPush()
-                    pushes.close()
                 }
                 delay(5_000L)
             }

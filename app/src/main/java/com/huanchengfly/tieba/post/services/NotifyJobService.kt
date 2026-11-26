@@ -124,8 +124,8 @@ class NotifyJobService : JobService() {
     /**
      * 拉取私信未读并通知，完成后结束任务。
      *
-     * 群聊通知接口不返回私信数量，只能走 IM 协议：握手后以上次记录的游标为基准
-     * 拉取增量，把对方发来的新消息计入总数与角标。首次运行只建立基线，不把历史消息当新消息。
+     * 常规通知接口不返回私信数量，通过 HTTP fetch_session 获取会话未读数，
+     * 更新私信通知与角标，不依赖长连接握手或消息游标。
      */
     private fun checkPrivateMessages(params: JobParameters, baseTotal: Int) {
         serviceScope.launch {

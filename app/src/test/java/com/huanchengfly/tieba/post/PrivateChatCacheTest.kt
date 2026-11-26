@@ -7,6 +7,7 @@ import com.huanchengfly.tieba.post.ui.page.chat.PrivateChatListUiState
 import com.huanchengfly.tieba.post.ui.page.chat.PrivateChatPartialChange
 import com.huanchengfly.tieba.post.ui.page.chat.PrivateChatUiState
 import com.huanchengfly.tieba.post.ui.page.chat.toSessions
+import com.huanchengfly.tieba.post.ui.page.chat.privateHttpCursorTimeMillis
 import java.lang.reflect.Proxy
 import kotlinx.collections.immutable.persistentListOf
 import org.json.JSONArray
@@ -305,6 +306,63 @@ class PrivateChatCacheTest {
         assertEquals(storedMessages, disk["${selfUid}_$peerUid"])
         assertEquals(before, PrivateChatCache.loadAll(selfUid))
         assertEquals(before, observed.value)
+    }
+
+    @Test
+    fun httpCursorUsesServerMillisInsteadOfMessageIdsOrLocalSendTime() {
+        val serverTime = 1700000000123L
+        val server = message(9000000000000L).copy(msgTime = serverTime)
+        val local = message(9000000000001L, self = true).copy(
+            conversationUid = peerUid, senderUid = selfUid, msgTime = serverTime + 100000L,
+            deliveryConfirmed = false,
+            semantics = ChatMessageSemantics(protocolSource = "local_outgoing"),
+        )
+        PrivateChatCache.save(selfUid, peerUid, listOf(server, local))
+        PrivateChatCache.saveIncoming(selfUid, emptyList(), consumedCursor = Long.MAX_VALUE)
+        val cached = PrivateChatCache.load(selfUid, peerUid)
+        assertEquals(serverTime, cached.privateHttpCursorTimeMillis())
+        assertEquals(0L, listOf(
+            server.copy(msgId = -1L), server.copy(msgId = 0L),
+            server.copy(isLocal = true), server.copy(msgTime = 0L),
+            server.copy(msgTime = -1L), local,
+        ).privateHttpCursorTimeMillis())
+        assertEquals(0L, emptyList<ChatWsMessage>().privateHttpCursorTimeMillis())
+
+        // A server echo replaces the client time even though local semantics are retained.
+        PrivateChatCache.saveIncoming(selfUid, listOf(local.copy(
+            msgTime = serverTime + 1L, deliveryConfirmed = true,
+            semantics = ChatMessageSemantics(protocolSource = "private_http"),
+        )))
+        assertEquals(serverTime + 1L, PrivateChatCache.load(selfUid, peerUid).privateHttpCursorTimeMillis())
+        assertEquals(Long.MAX_VALUE, PrivateChatCache.syncCursor(selfUid))
+    }
+
+    @Test
+    fun httpCursorIsDerivedFromOnlyTheLoadedAccountAndPeer() {
+        val otherUid = selfUid + 10000L
+        val otherPeer = peerUid + 1L
+        PrivateChatCache.save(selfUid, peerUid, listOf(message(1).copy(msgTime = 1700000000001L)))
+        PrivateChatCache.save(selfUid, otherPeer, listOf(message(2).copy(
+            peerUid = otherPeer, conversationUid = otherPeer, msgTime = 1700000000002L,
+        )))
+        PrivateChatCache.save(otherUid, peerUid, listOf(message(3).copy(msgTime = 1700000000003L)))
+        assertEquals(1700000000001L, PrivateChatCache.load(selfUid, peerUid).privateHttpCursorTimeMillis())
+        assertEquals(1700000000002L, PrivateChatCache.load(selfUid, otherPeer).privateHttpCursorTimeMillis())
+        assertEquals(1700000000003L, PrivateChatCache.load(otherUid, peerUid).privateHttpCursorTimeMillis())
+        assertEquals(0L, PrivateChatCache.load(otherUid, otherPeer).privateHttpCursorTimeMillis())
+    }
+
+    @Test
+    fun overlappingHttpBoundaryKeepsDistinctMessageIdsAtTheSameMillisecond() {
+        val time = 1700000000123L
+        val first = message(100).copy(msgTime = time)
+        val second = message(101).copy(msgTime = time)
+        PrivateChatCache.saveIncoming(selfUid, listOf(first), consumedCursor = first.msgId)
+        PrivateChatCache.saveIncoming(selfUid, listOf(first, second), consumedCursor = second.msgId)
+        val cached = PrivateChatCache.load(selfUid, peerUid)
+        assertEquals(listOf(100L, 101L), cached.map { it.msgId })
+        assertEquals(time, cached.privateHttpCursorTimeMillis())
+        assertEquals(101L, PrivateChatCache.syncCursor(selfUid))
     }
 
     private fun message(id: Long, self: Boolean = false) = ChatWsMessage(

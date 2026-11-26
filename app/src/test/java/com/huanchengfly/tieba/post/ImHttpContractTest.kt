@@ -57,6 +57,43 @@ class ImHttpContractTest {
     }
 
     @Test
+    fun parameterMapSerializesAsJsonInsteadOfKotlinMapSyntax() {
+        val params = linkedMapOf<String, Any>(
+            "appid" to 10773430L,
+            "timestamp" to 1795690650L,
+            "cuid" to "device-id",
+        )
+
+        val body = ImHttpClient.encodeJson(params)
+        assertEquals(10773430L, body.getLong("appid"))
+        assertEquals(1795690650L, body.getLong("timestamp"))
+        assertEquals("device-id", body.getString("cuid"))
+        assertFalse(body.toString().contains("appid="))
+        assertFalse(body.toString().contains("{appid="))
+    }
+
+    @Test
+    fun parameterValidationErrorIsNotReportedAsExpiredLogin() {
+        val emptyTimestamp = JSONObject()
+            .put("error_code", 430)
+            .put("error_msg", "param invalid: timestamp empty")
+        val invalidBduss = JSONObject()
+            .put("error_code", 430)
+            .put("error_msg", "param bduss error")
+        val expiredLogin = JSONObject()
+            .put("error_code", 8)
+            .put("error_msg", "BDUSS expired")
+        val successfulResponseWithLoginText = JSONObject()
+            .put("error_code", 0)
+            .put("error_msg", "未登录提示不是错误")
+
+        assertFalse(ImHttpClient.isLoginError(emptyTimestamp))
+        assertTrue(ImHttpClient.isLoginError(invalidBduss))
+        assertTrue(ImHttpClient.isLoginError(expiredLogin))
+        assertFalse(ImHttpClient.isLoginError(successfulResponseWithLoginText))
+    }
+
+    @Test
     fun bduidEncryptionMatchesOfficialAesCbcAlgorithm() {
         // 官方 Utility.transBDUID：固定 KEY + 固定 IV 的 AES-128-CBC/PKCS5Padding，再 Base64。
         // 这里锁定官方密钥字节，防止实现被改回猜测值。
@@ -64,9 +101,17 @@ class ImHttpContractTest {
         assertEquals("2011121211143000", ImBduid.IV)
         // 相同输入必须得到相同密文，且能解回。
         val encrypted = ImBduid.transBDUID("1234567890")
-        assertEquals(24, encrypted.length)
+        assertEquals(22, encrypted.length)
+        assertFalse(encrypted.contains("="))
         assertEquals(encrypted, ImBduid.transBDUID("1234567890"))
         assertEquals("1234567890", ImBduid.transBDUK(encrypted))
+        assertEquals("1234567890", ImBduid.transBDUK("$encrypted=="))
+        val urlSafeUid = (1L..1000L).first { uid ->
+            ImBduid.transBDUID(uid.toString()).any { it == '+' || it == '/' }
+        }.toString()
+        val urlSafe = ImBduid.transBDUID(urlSafeUid).replace('+', '-').replace('/', '_')
+        assertEquals(urlSafeUid, ImBduid.transBDUK(urlSafe))
+        assertEquals(urlSafeUid, ImBduid.transBDUK("$urlSafe=="))
         // 不同 uid 必须得到不同密文，且都能解回。
         val other = ImBduid.transBDUID("999999999")
         assertNotEquals(encrypted, other)
