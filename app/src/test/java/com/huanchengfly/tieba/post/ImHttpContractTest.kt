@@ -207,4 +207,63 @@ class ImHttpContractTest {
         assertEquals("100", item.optString("msg_id"))
         assertEquals(1795599000000L, item.optLong("time"))
     }
+
+    @Test
+    fun messagesAreParsedFromOfficialFetchMsgShape() {
+        val response = JSONObject()
+            .put("error_code", 0)
+            .put("has_more", 0)
+            .put(
+                "msgs",
+                org.json.JSONArray()
+                    .put(
+                        JSONObject()
+                            .put("msgid", 1001L)
+                            .put("from_user", 987654321L)
+                            .put("from_im_uk", 987654321012345678L)
+                            .put("from_pass_uk", ImBduid.transBDUID("987654321"))
+                            .put("to_pass_uk", ImBduid.transBDUID("111111111"))
+                            .put("create_time", 1795599000000L)
+                            .put("category", 0)
+                            .put("type", 0)
+                            .put("content", "{\"text\":\"你好\"}")
+                            .put("msg_key", "0a1b2c3d4e")
+                    )
+                    .put(
+                        JSONObject()
+                            .put("msgid", 1002L)
+                            .put("from_im_uk", 555L)
+                            .put("create_time", 1795599000001L)
+                            .put("category", 1)
+                            .put("type", 1)
+                            .put(
+                                "content",
+                                "{\"url\":\"https://imgsa.baidu.com/a.jpg\",\"thumbnail\":\"https://imgsa.baidu.com/s.jpg\",\"w\":100,\"h\":80}"
+                            )
+                    ),
+            )
+
+        val messages = ImMessageApi.parseMessages(response)
+        assertEquals(2, messages.size)
+
+        val text = messages.first { it.msgId == 1001L }
+        assertEquals("你好", text.text)
+        assertEquals(987654321L, text.fromUid)
+        assertEquals("", text.imageUrl)
+        assertEquals(10, text.msgKey.length)
+
+        val image = messages.first { it.msgId == 1002L }
+        assertEquals("https://imgsa.baidu.com/a.jpg", image.imageUrl)
+        assertEquals("https://imgsa.baidu.com/s.jpg", image.thumbnailUrl)
+        assertEquals("", image.text)
+    }
+
+    @Test
+    fun msgKeyIsTenHexCharsLikeOfficial() {
+        val key = ImMessageApi.createMsgKey()
+        assertEquals(10, key.length)
+        assertTrue(key.all { it in "0123456789abcdef" })
+        // 两次生成不应完全相同，因为含随机位。
+        assertNotEquals(key, ImMessageApi.createMsgKey())
+    }
 }

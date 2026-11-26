@@ -5,6 +5,9 @@ import kotlinx.coroutines.CancellationException
 import com.huanchengfly.tieba.post.components.uploadChatPhoto
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
+import com.huanchengfly.tieba.post.api.chat.http.ImHttpConstants
+import com.huanchengfly.tieba.post.api.chat.http.ImMessageApi
+import com.huanchengfly.tieba.post.api.chat.http.ImSessionApi
 import com.huanchengfly.tieba.post.api.chat.ws.ChatSocketHub
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
@@ -59,7 +62,7 @@ class PrivateChatViewModel @Inject constructor() :
     override fun createInitialState(): PrivateChatUiState = PrivateChatUiState()
 
     override fun createPartialChangeProducer(): PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> =
-        PrivateChatPartialChangeProducer({ obtainSocket() }, flow { emitAll(pushRefresh.receiveAsFlow()) })
+        PrivateChatPartialChangeProducer(flow { emitAll(pushRefresh.receiveAsFlow()) })
 
     override fun dispatchEvent(partialChange: PrivateChatPartialChange): UiEvent? =
         when (partialChange) {
@@ -118,7 +121,6 @@ class PrivateChatViewModel @Inject constructor() :
     }
 
     private class PrivateChatPartialChangeProducer(
-        private val socketProvider: () -> ChatWebSocketClient?,
         private val pushFlow: Flow<PrivateChatUiIntent.Poll>,
     ) : PartialChangeProducer<PrivateChatUiIntent, PrivateChatPartialChange, PrivateChatUiState> {
 
@@ -169,37 +171,27 @@ class PrivateChatViewModel @Inject constructor() :
                     .flatMapMerge { it.producePartialChange() },
             )
 
-        private fun matchesAccount(client: ChatWebSocketClient, accountUid: Long, cookie: String): Boolean =
-            AccountUtil.getUid()?.toLongOrNull() == accountUid &&
-                AccountUtil.getCookie().orEmpty() == cookie && client.selfUid == accountUid
-
         private fun PrivateChatUiIntent.Load.producePartialChange(): Flow<PrivateChatPartialChange.Load> =
             flow<PrivateChatPartialChange.Load> {
                 val selfUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
-                val cookie = AccountUtil.getCookie().orEmpty()
                 emit(PrivateChatPartialChange.Load.Start(selfUid, peerUid))
-                val client = socketProvider() ?: error("chat socket unavailable")
 
-                // 先展示本地缓存
+                // 先展示本地缓存，避免等待网络时页面空白。
                 resetCursor(selfUid, peerUid)
                 val initialCached = PrivateChatCache.load(selfUid, peerUid)
                 if (initialCached.isNotEmpty()) {
                     emit(PrivateChatPartialChange.Load.Cached(initialCached.toImmutableList(), selfUid, peerUid))
                 }
 
-                client.connect(cookie)
-                if (!matchesAccount(client, selfUid, cookie)) return@flow
-                // 握手游标已是最新一条，单次请求拿不到历史；
-                // 从头按批拉取才能补齐整个会话，避免进入会话看到空白。
-                resetCursor(selfUid, peerUid)
-                val incoming = if (privateCursor == 0L) client.fetchPrivateHistory()
-                    else client.fetchPrivateMessagesSince(privateCursor)
-                if (!matchesAccount(client, selfUid, cookie)) return@flow
-                PrivateChatCache.saveIncoming(selfUid, incoming, client.privateFetchedMsgId)
-                val merged = PrivateChatCache.load(selfUid, peerUid)
-                privateCursor = maxOf(privateCursor, client.privateFetchedMsgId)
+                // 官方消息拉取走 rest/3.0/im/fetch_msg，对方 uid 需要加密后放在 contacter。
+                val incoming = ImMessageApi.fetchMessages(peerUid)
+                    .map { it.toChatWsMessage(selfUid) }
+                PrivateChatCache.saveIncoming(selfUid, incoming, incoming.maxOfOrNull { it.msgId } ?: 0L)
+                privateCursor = maxOf(privateCursor, incoming.maxOfOrNull { it.msgId } ?: 0L)
                 historyLoaded = true
-                emit(PrivateChatPartialChange.Load.Success(merged.toImmutableList(), selfUid, peerUid))
+                emit(PrivateChatPartialChange.Load.Success(
+                    PrivateChatCache.load(selfUid, peerUid).toImmutableList(), selfUid, peerUid,
+                ))
             }.catch<PrivateChatPartialChange.Load> {
                 if (it is CancellationException) throw it
                 emit(PrivateChatPartialChange.Load.Failure(it))
@@ -208,23 +200,16 @@ class PrivateChatViewModel @Inject constructor() :
         private fun PrivateChatUiIntent.Poll.producePartialChange(): Flow<PrivateChatPartialChange.Poll> =
             flow<PrivateChatPartialChange.Poll> {
                 val selfUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
-                val cookie = AccountUtil.getCookie().orEmpty()
-                val client = socketProvider() ?: error("chat socket unavailable")
-                client.connect(cookie)
-                if (!matchesAccount(client, selfUid, cookie)) return@flow
                 resetCursor(selfUid, peerUid)
-                // 推送只唤醒拉取，不能把服务器最新位置当作已经消费的位置。
-                for (page in 0 until 20) {
-                    val previousCursor = privateCursor
-                    val incoming = client.fetchPrivateMessagesSince(previousCursor)
-                    if (!matchesAccount(client, selfUid, cookie)) return@flow
-                    PrivateChatCache.saveIncoming(selfUid, incoming, client.privateFetchedMsgId)
-                    emit(PrivateChatPartialChange.Poll.Success(
-                        PrivateChatCache.load(selfUid, peerUid).toImmutableList(), selfUid, peerUid,
-                    ))
-                    privateCursor = maxOf(previousCursor, client.privateFetchedMsgId)
-                    if (privateCursor <= previousCursor || privateCursor >= client.privateLastMsgId) break
-                }
+                // 增量拉取：从上次消费到的位置往后取。
+                val beginTime = if (privateCursor > 0L) privateCursor else 0L
+                val incoming = ImMessageApi.fetchMessages(peerUid, beginTime = beginTime)
+                    .map { it.toChatWsMessage(selfUid) }
+                PrivateChatCache.saveIncoming(selfUid, incoming, incoming.maxOfOrNull { it.msgId } ?: 0L)
+                privateCursor = maxOf(privateCursor, incoming.maxOfOrNull { it.msgId } ?: 0L)
+                emit(PrivateChatPartialChange.Poll.Success(
+                    PrivateChatCache.load(selfUid, peerUid).toImmutableList(), selfUid, peerUid,
+                ))
             }.catch<PrivateChatPartialChange.Poll> {
                 if (it is CancellationException) throw it
                 emit(PrivateChatPartialChange.Poll.Failure)
@@ -282,30 +267,22 @@ class PrivateChatViewModel @Inject constructor() :
             photoUri: Uri?,
             onPrepared: suspend (ChatCloudMeme?) -> Unit,
         ): ChatWsMessage {
-            val client = socketProvider() ?: error("chat socket unavailable")
             val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: error("请先登录")
-            val cookie = AccountUtil.getCookie().orEmpty()
-            client.connect(cookie)
-            check(client.selfUid == accountUid) { "账号已切换，请重新进入会话" }
             val preparedCloudMeme = photoUri?.let { uploadChatPhoto(it) } ?: cloudMeme
-            check(AccountUtil.getUid()?.toLongOrNull() == accountUid && client.selfUid == accountUid) {
+            check(AccountUtil.getUid()?.toLongOrNull() == accountUid) {
                 "账号已切换，已取消发送"
             }
             onPrepared(preparedCloudMeme)
             val sentAt = System.currentTimeMillis()
-            // 长连接可能已被服务端静默断开。仅在连接类失败时重建连接重试一次，
-            // 业务错误（被拉黑、参数错误等）直接抛给用户，避免重复发送。
-            val msgId = try {
-                client.sendMessage(peerUid, content, preparedCloudMeme)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                if (!error.isRetryableConnectionFailure()) throw error
-                client.close()
-                client.connect(cookie)
-                check(client.selfUid == accountUid) { "账号已切换，请重新进入会话" }
-                client.sendMessage(peerUid, content, preparedCloudMeme)
-            }
+            // 官方发送私信走 rest/3.0/im/send_msg，content 是裸 JSON。
+            val msgId = ImMessageApi.sendMessage(
+                peerUid = peerUid,
+                text = content,
+                imageUrl = preparedCloudMeme?.sendImageUrl,
+                thumbnailUrl = preparedCloudMeme?.sendThumbnailUrl,
+                width = preparedCloudMeme?.width ?: 0,
+                height = preparedCloudMeme?.height ?: 0,
+            )
             val message = ChatWsMessage(
                 msgId = msgId,
                 peerUid = peerUid,
@@ -331,6 +308,41 @@ class PrivateChatViewModel @Inject constructor() :
             return message
         }
     }
+}
+
+/**
+ * 把官方 fetch_msg 的消息转成本地使用的消息模型。
+ *
+ * 官方消息里 from_pass_uk 解密后是发送者贴吧 uid，from_im_uk 是 IM 唯一键。
+ */
+private fun ImMessageApi.Message.toChatWsMessage(selfUid: Long): ChatWsMessage {
+    val isImage = imageUrl.isNotBlank()
+    val kind = when {
+        isImage -> ChatMessageKind.IMAGE
+        type == ImHttpConstants.TYPE_VOICE -> ChatMessageKind.VOICE
+        else -> ChatMessageKind.TEXT
+    }
+    return ChatWsMessage(
+        msgId = msgId,
+        msgType = if (isImage) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+        peerUid = if (fromUid == selfUid) 0L else fromUid,
+        conversationUid = if (fromUid == selfUid) 0L else fromUid,
+        peerName = "",
+        peerPortrait = "",
+        content = text,
+        images = if (isImage) listOf(imageUrl) else emptyList(),
+        msgTime = msgTime,
+        isSelf = fromUid == selfUid,
+        senderUid = fromUid,
+        semantics = ChatMessageSemantics(
+            kind = kind,
+            protocolSource = "private_http",
+            transportType = if (isImage) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+            businessType = if (isImage) 2 else 1,
+            summary = text.ifBlank { if (isImage) "图片消息" else "聊天消息" },
+            rawPayload = ChatMessageSemantics.limitedRawPayload(rawContent),
+        ),
+    )
 }
 
 sealed interface PrivateChatUiIntent : UiIntent {
@@ -392,22 +404,6 @@ private fun mergeIntoState(
     current: List<ChatWsMessage>,
     incoming: List<ChatWsMessage>,
 ): ImmutableList<ChatWsMessage> = mergePrivateMessages(current, incoming).toImmutableList()
-
-/**
- * 仅连接层异常可以安全重连重试。
- * 服务端返回的业务错误码表示请求已被处理，重试可能导致重复发送。
- */
-internal fun Throwable.isRetryableConnectionFailure(): Boolean = when (this) {
-    is java.net.SocketTimeoutException,
-    is java.net.SocketException,
-    is java.io.EOFException,
-    is java.io.IOException -> true
-    else -> message?.let {
-        it.contains("websocket is not connected", ignoreCase = true) ||
-            it.contains("websocket closed", ignoreCase = true) ||
-            it.contains("connection reset", ignoreCase = true)
-    } == true
-}
 
 sealed interface PrivateChatPartialChange : PartialChange<PrivateChatUiState> {
     sealed class Load : PrivateChatPartialChange {

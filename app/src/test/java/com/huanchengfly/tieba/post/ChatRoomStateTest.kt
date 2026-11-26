@@ -13,7 +13,6 @@ import com.huanchengfly.tieba.post.api.chat.ws.awaitPrivateChatResponse
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
 import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatImageContent
 import com.huanchengfly.tieba.post.api.chat.ws.buildPrivateMessageRequest
-import com.huanchengfly.tieba.post.ui.page.chat.isRetryableConnectionFailure
 import org.json.JSONObject
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
 import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
@@ -690,17 +689,6 @@ class ChatRoomStateTest {
         assertEquals("普通文字", text.content)
         assertTrue(PrivateChatImageContent.parse("https://example.com/a.gif", 1).isEmpty())
         assertTrue(runCatching { buildPrivateMessageRequest(42L, "不能丢掉的草稿", 102L, meme) }.isFailure)
-    }
-
-    @Test
-    fun onlyConnectionFailuresAreRetriedForPrivateSend() {
-        // 连接层异常可以重建连接重试。
-        assertTrue(java.net.SocketTimeoutException("timeout").isRetryableConnectionFailure())
-        assertTrue(java.io.IOException("connection reset").isRetryableConnectionFailure())
-        assertTrue(IllegalStateException("websocket is not connected").isRetryableConnectionFailure())
-        // 业务错误不重试，避免重复发送。
-        assertFalse(IllegalStateException("send message failed: 110001").isRetryableConnectionFailure())
-        assertFalse(IllegalStateException("send message blocked: 7").isRetryableConnectionFailure())
     }
 
     @Test

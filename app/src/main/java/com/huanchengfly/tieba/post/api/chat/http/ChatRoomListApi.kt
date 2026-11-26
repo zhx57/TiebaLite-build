@@ -1,6 +1,7 @@
 package com.huanchengfly.tieba.post.api.chat.http
 
 import com.huanchengfly.tieba.post.api.chat.ChatApi
+import com.huanchengfly.tieba.post.api.chat.ChatApiException
 import com.huanchengfly.tieba.post.api.chat.ChatSignUtil
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoom
 import com.huanchengfly.tieba.post.utils.AccountUtil
