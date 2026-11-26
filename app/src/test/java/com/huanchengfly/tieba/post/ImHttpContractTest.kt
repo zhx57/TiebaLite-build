@@ -10,7 +10,8 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertTrueimport org.junit.Test
+import org.junit.Assert.assertTrue
+import org.junit.Test
 
 /**
  * 官方 IM HTTP 协议契约测试。
