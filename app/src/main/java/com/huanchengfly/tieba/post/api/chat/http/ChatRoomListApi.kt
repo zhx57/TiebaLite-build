@@ -1,5 +1,6 @@
 package com.huanchengfly.tieba.post.api.chat.http
 
+import android.util.Log
 import com.huanchengfly.tieba.post.api.TiebaApi
 import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.chat.ChatApiException
@@ -42,10 +43,15 @@ object ChatRoomListApi {
     private const val SUBSCRIPTION_PATH = "c/u/chat/getChatSubscriptionList"
     private const val ROOM_LIST_PATH = "c/f/chat/getRoomListByFid"
 
-    /** 兜底路径最多拉取的关注贴吧数量。 */
-    private const val MAX_FALLBACK_FORUMS = 20
+    private const val TAG = "ChatRoomListApi"
 
-    /** 兜底路径的并发上限，避免首屏同时打太多请求。 */
+    /** 关注贴吧列表最多翻页数，防止异常 has_more 导致死循环。 */
+    private const val MAX_FORUM_PAGES = 50
+
+    /** 兜底路径最多拉取的关注贴吧数量。 */
+    private const val MAX_FALLBACK_FORUMS = 40
+
+    /** 拉群的并发上限，避免同时打太多请求。 */
     private const val MAX_FALLBACK_CONCURRENCY = 4
 
     private val client = OkHttpClient.Builder()
@@ -57,12 +63,11 @@ object ChatRoomListApi {
     /**
      * 拉取用户已订阅的全部群。
      *
-     * 官方首次请求时本地没有缓存群清单，nvb.U 返回空串，
-     * nvb.Q 仍会把它作为 chatroom_new_msg 参数发出去（FastRequest.v 无条件写入 body），
-     * 所以这里必须传空串而不是省略，也不是传 "[]"。
+     * 官方消息中心的主路径是 c/u/chat/getChatSubscriptionList：
+     * 新装客户端本地没有群缓存时 chatroom_new_msg 传空串，服务端返回全量订阅群。
      *
-     * 服务端对空清单可能只返回本地已有群的状态，第三方没有本地库时拿不到任何群，
-     * 因此订阅接口为空或失败时回退到关注贴吧逐个拉群，避免聊天 Tab 长期空白。
+     * 订阅接口为空或失败时，再退回关注贴吧逐个拉群，
+     * 避免任何单一路径异常都导致聊天 Tab 空白。
      */
     suspend fun fetchAllRooms(): List<ChatRoom> = withContext(Dispatchers.IO) {
         val subscribed = runCatching {
@@ -81,27 +86,58 @@ object ChatRoomListApi {
     /**
      * 用关注贴吧逐个拉群作为兜底。
      *
-     * getRoomListByFid 未登录也能返回公共群，是最稳定的取群路径。
-     * 关注吧可能很多，这里限制并发数并只取前若干个，避免首屏过慢或被限流。
+     * 关注吧可能很多，限制数量与并发，避免首屏过慢或被限流。
      */
     private suspend fun fetchRoomsFromFollowedForums(): List<ChatRoom> {
-        val forumIds = runCatching {
-            TiebaApi.getInstance().getForumListFlow().first()
-                .forumInfo
-                .mapNotNull { it.forumId.toLongOrNull() }
-                .take(MAX_FALLBACK_FORUMS)
-        }.getOrDefault(emptyList())
+        val forumIds = fetchAllFollowedForumIds()
         if (forumIds.isEmpty()) return emptyList()
         val semaphore = Semaphore(MAX_FALLBACK_CONCURRENCY)
         return coroutineScope {
-            forumIds.map { fid ->
+            forumIds.take(MAX_FALLBACK_FORUMS).map { fid ->
                 async {
-                    semaphore.withPermit {
-                        runCatching { fetchRoomsByFid(fid) }.getOrDefault(emptyList())
-                    }
+                    semaphore.withPermit { fetchRoomsByFidWithRetry(fid) }
                 }
             }.awaitAll().flatten().distinctBy { it.roomId }
         }
+    }
+
+    /**
+     * 拉单个吧的群，失败重试一次。
+     *
+     * 并发较高时服务端会偶发限流或超时，直接丢弃会让某些吧看起来没有群。
+     * 这里保留重试并区分空结果与失败，避免把失败当成没有群。
+     */
+    private suspend fun fetchRoomsByFidWithRetry(fid: Long): List<ChatRoom> {
+        repeat(2) { attempt ->
+            val result = runCatching { fetchRoomsByFid(fid) }
+            if (result.isSuccess) return result.getOrDefault(emptyList())
+            if (attempt == 1) {
+                Log.w(TAG, "拉取吧群失败 fid=$fid: ${result.exceptionOrNull()?.message}")
+            }
+        }
+        return emptyList()
+    }
+
+    /**
+     * 分页拉取当前账号关注的全部贴吧 id。
+     *
+     * 官方的关注吧列表分页返回，has_more == "1" 时继续翻下一页；
+     * 单次只取第一页会漏掉大量吧，导致群列表只显示少部分群。
+     */
+    private suspend fun fetchAllFollowedForumIds(): List<Long> {
+        val uid = AccountUtil.getUid()?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val result = linkedSetOf<Long>()
+        var page = 1
+        while (page <= MAX_FORUM_PAGES) {
+            val bean = runCatching {
+                TiebaApi.getInstance().userLikeForumFlow(uid, page).first()
+            }.getOrNull() ?: break
+            val forums = bean.forumList.forumList + bean.forumList.gconForumList
+            forums.mapNotNullTo(result) { it.id.toLongOrNull()?.takeIf { fid -> fid > 0L } }
+            if (bean.hasMore != "1" || forums.isEmpty()) break
+            page++
+        }
+        return result.toList()
     }
 
     /**
@@ -179,13 +215,23 @@ object ChatRoomListApi {
     /**
      * 解析 getChatSubscriptionList 的响应。
      *
-     * 官方 nvb$d.b 把整个 data 字符串交给 ChatGroupInfo.parse，
-     * 而 ChatGroupInfo.parse 只读 group_name / group_id / room_list，
-     * 说明 data 顶层就是群对象，而不是 getRoomListByFid 的 data.list[] 两层结构。
+     * 官方 nvb$d 的取值路径是 optString("data") 后再 new JSONObject(json)，
+     * 说明 data 在这里常常是**JSON 字符串**而不是对象，直接用 optJSONObject 会拿到 null。
+     * 同时 ChatGroupInfo.parse 只读 group_name / group_id / room_list，
+     * 说明 data 顶层就是群对象，没有 getRoomListByFid 的 list[] 那一层。
+     * 这里两种形态都兼容。
      */
     internal fun parseSubscriptionRooms(root: JSONObject): List<ChatRoom> {
-        val data = root.optJSONObject("data") ?: return emptyList()
+        val data = root.readDataObject() ?: return emptyList()
         return parseRoomList(data.optJSONArray("room_list"))
+    }
+
+    /** 读取 data 字段，兼容 JSONObject 与 JSON 字符串两种形态。 */
+    internal fun JSONObject.readDataObject(): JSONObject? {
+        optJSONObject("data")?.let { return it }
+        val raw = optString("data").trim()
+        if (raw.isEmpty() || raw == "null") return null
+        return runCatching { JSONObject(raw) }.getOrNull()
     }
 
     /**
@@ -194,7 +240,7 @@ object ChatRoomListApi {
      * 官方结构是 data.list[]（群）-> room_list[]（房间）两层。
      */
     internal fun parseRoomListResponse(root: JSONObject): List<ChatRoom> {
-        val data = root.optJSONObject("data") ?: return emptyList()
+        val data = root.readDataObject() ?: return emptyList()
         val list = data.optJSONArray("list") ?: return emptyList()
         val rooms = mutableListOf<ChatRoom>()
         for (i in 0 until list.length()) {

@@ -21,8 +21,8 @@ object BlcpConstants {
     /** LCP SDK 版本。 */
     const val LCP_SDK_VERSION = "3460016"
 
-    /** 聊天客户端版本，过旧会被服务端判定为 110001。 */
-    const val CHAT_VERSION = "22.13.1.1"
+    /** 聊天客户端版本，必须与本次逆向的官方包一致（22.14.1.0.64），过旧会被判 110001。 */
+    const val CHAT_VERSION = "22.14.1.0"
 
     /** 服务号。 */
     const val SERVICE_LCM = 1

@@ -49,7 +49,6 @@ object ChatApi {
      * 因此需要与最新官方客户端保持一致。
      */
     internal const val CHAT_VERSION = ImHttpConstants.CHAT_VERSION
-    private const val LONG_MAX = "9223372036854775807"
 
     private val client = OkHttpClient.Builder()
         .readTimeout(30, TimeUnit.SECONDS)
@@ -170,30 +169,36 @@ object ChatApi {
         roomId: Long,
         lastMsgId: Long = 0L,
     ): List<ChatRoomMessage> = withContext(Dispatchers.IO) {
-        val timestamp = (System.currentTimeMillis() / 1000).toString()
+        val timestamp = System.currentTimeMillis() / 1000L
         val deviceId = CuidUtils.getNewCuid()
-        // 签名使用的值与 JSON body 中的数值类型保持一致，均按字符串拼接
+        // 字段严格对齐官方 IMNewFetchMsgRequest.getRequestParameter：
+        // appid / mcast_id / msgid_begin / msgid_end / count / category /
+        // app_version / sdk_version / device_id / device_type / timestamp / sign
         val signParams = linkedMapOf(
             "appid" to CHAT_APP_ID,
             "mcast_id" to roomId.toString(),
-            "msgid_end" to if (lastMsgId == 0L) LONG_MAX else lastMsgId.toString(),
-            "count" to "-60",
+            "msgid_begin" to "0",
+            "msgid_end" to if (lastMsgId == 0L) Long.MAX_VALUE.toString() else lastMsgId.toString(),
+            "count" to "60",
             "category" to "4",
             "app_version" to CHAT_VERSION,
             "sdk_version" to CHAT_SDK_VERSION,
             "device_id" to deviceId,
-            "timestamp" to timestamp,
+            "device_type" to "2",
+            "timestamp" to timestamp.toString(),
         )
         val bodyJson = JSONObject().apply {
-            put("appid", CHAT_APP_ID.toInt())
+            put("appid", CHAT_APP_ID.toLong())
             put("mcast_id", roomId)
+            put("msgid_begin", 0L)
             put("msgid_end", if (lastMsgId == 0L) Long.MAX_VALUE else lastMsgId)
-            put("count", -60)
+            put("count", 60)
             put("category", 4)
             put("app_version", CHAT_VERSION)
             put("sdk_version", CHAT_SDK_VERSION.toInt())
             put("device_id", deviceId)
-            put("timestamp", timestamp.toLong())
+            put("device_type", 2)
+            put("timestamp", timestamp)
             put("sign", ChatSignUtil.sign(signParams))
         }
 

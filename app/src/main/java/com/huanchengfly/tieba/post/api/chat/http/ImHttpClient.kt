@@ -37,7 +37,11 @@ object ImHttpClient {
 
     private const val HOST = "https://pim.baidu.com/rest/3.0/im/"
 
-    private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+    /**
+     * 官方 Content-Type 取自 IMMediaGetChatSessionRequest.getContentType()，
+     * 值就是 application/json，不带 charset。服务端会按原值做校验。
+     */
+    private val jsonMediaType = "application/json".toMediaType()
 
     private val client = OkHttpClient.Builder()
         .readTimeout(30, TimeUnit.SECONDS)
@@ -158,17 +162,16 @@ object ImHttpConstants {
     /**
      * 设备标识。
      *
-     * 官方用 cuid，格式为 "<设备号>|<包名><版本>"。
-     * 这里用进程内固定的随机串充当设备号，避免依赖 Android 上下文，
-     * 也保证同一进程内多次请求的 cuid 保持一致。
+     * 官方 Utility.getDeviceId 读的是贴吧客户端同一份设备号（hfc.b -> getCuidGalaxy2），
+     * 必须与贴吧业务接口共用，否则服务端会认为设备不一致而拒绝鉴权。
+     * 这里优先复用项目里的 CuidUtils；纯 JVM 环境（单测）没有 Android 上下文时，
+     * 回落到进程内固定串，保证不崩且同一进程内稳定。
      */
-    fun cuid(): String {
-        val device = deviceId
-        return "$device|com.baidu.tieba$CHAT_VERSION"
-    }
+    fun cuid(): String = runCatching {
+        com.huanchengfly.tieba.post.utils.CuidUtils.getNewCuid()
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: fallbackCuid
 
-    /** 进程内固定设备号，首次访问时生成。 */
-    private val deviceId: String by lazy {
+    private val fallbackCuid: String by lazy {
         java.util.UUID.randomUUID().toString().replace("-", "")
     }
 }

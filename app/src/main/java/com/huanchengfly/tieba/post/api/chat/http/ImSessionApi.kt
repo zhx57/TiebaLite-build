@@ -69,12 +69,14 @@ object ImSessionApi {
         }
         val response = ImHttpClient.post("fetch_session", params)
         if (ImHttpClient.errorCode(response) != 0) {
+            val code = ImHttpClient.errorCode(response)
             val message = ImHttpClient.errorMessage(response)
-            // 登录态失效时明确提示，避免界面只显示空列表让人误以为没有会话。
+            // 只有官方确凿的登录错误码才提示重新登录；
+            // 其余错误原样透出，避免把参数或网络问题误报成登录失效。
             if (ImHttpClient.isLoginError(response)) {
-                throw ImHttpException(ImHttpClient.errorCode(response), "登录态已失效，请重新登录贴吧")
+                throw ImHttpException(code, "登录态已失效，请重新登录贴吧（$code $message）")
             }
-            throw ImHttpException(ImHttpClient.errorCode(response), message)
+            throw ImHttpException(code, "拉取私信失败（$code $message）")
         }
         return parseSessions(response)
     }

@@ -254,6 +254,36 @@ class ImHttpContractTest {
     }
 
     @Test
+    fun subscriptionListAcceptsDataAsJsonString() {
+        // 官方 nvb$d 是 optString("data") 后 new JSONObject(json)，
+        // 线上 data 可能是字符串，必须兼容，否则会误判为空列表。
+        val inner = JSONObject()
+            .put("group_name", "我的群")
+            .put(
+                "room_list",
+                org.json.JSONArray().put(
+                    JSONObject()
+                        .put("room_id", "8360438138")
+                        .put("is_show", 1)
+                        .put(
+                            "room_info",
+                            JSONObject()
+                                .put("forum_id", "1")
+                                .put("name", "某群")
+                                .put("forum_name", "某吧")
+                        )
+                ),
+            )
+        val root = JSONObject()
+            .put("error_code", 0)
+            .put("data", inner.toString())
+
+        val rooms = ChatRoomListApi.parseSubscriptionRooms(root)
+        assertEquals(1, rooms.size)
+        assertEquals(8360438138L, rooms.single().roomId)
+    }
+
+    @Test
     fun chatRoomNewMsgCarriesRoomStateLikeOfficial() {
         val json = ChatRoomListApi.buildChatRoomNewMsg(listOf(Triple(8360438138L, 100L, 1795599000000L)))
         val array = org.json.JSONArray(json)
@@ -321,5 +351,13 @@ class ImHttpContractTest {
         assertTrue(key.all { "0123456789abcdef".contains(it) })
         // 两次生成不应完全相同，因为含随机位。
         assertNotEquals(key, ImMessageApi.createMsgKey())
+    }
+
+    @Test
+    fun officialChatConstantsMatchReverseEngineering() {
+        // IM HTTP 与 BLCP 两个通道都必须上报 22.14.1.0，
+        // 版本不一致时服务端会以版本过旧或设备不一致为由拒发。
+        assertEquals("22.14.1.0", ImHttpConstants.CHAT_VERSION)
+        assertEquals("22.14.1.0", com.huanchengfly.tieba.post.api.chat.blcp.BlcpConstants.CHAT_VERSION)
     }
 }

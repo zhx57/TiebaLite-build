@@ -180,6 +180,10 @@ object ImMessageApi {
             "type" to if (isImage) ImHttpConstants.TYPE_IMAGE else ImHttpConstants.TYPE_TEXT,
             "content" to content,
             "msg_key" to createMsgKey(),
+            // 官方 send_msg 在 category != 4 且 != 9 时必须带 client_identifier，
+            // 内容是 {"zid":"...","version_code":"..."} 的 JSON 字符串。
+            // 缺了它服务端会拒绝发送，这是私信一直发不出去的根因之一。
+            "client_identifier" to buildClientIdentifier(),
         )
         val response = ImHttpClient.post("send_msg", params)
         if (ImHttpClient.errorCode(response) != 0) {
@@ -193,6 +197,22 @@ object ImMessageApi {
             throw ImHttpException(ImHttpClient.errorCode(response), "发送私信未返回消息 id")
         }
         return msgId
+    }
+
+    /**
+     * 构造官方 send_msg 的 client_identifier。
+     *
+     * 官方 AccountManagerImpl.getExtraSafeParams 返回
+     * {"zid":"<zid>","version_code":"<version_code>"}，两值都是字符串且可为空。
+     * 服务端用它做设备安全校验，缺失会被判为非法请求。
+     */
+    private fun buildClientIdentifier(): String {
+        val zid = com.huanchengfly.tieba.post.utils.AccountUtil
+            .getAccountInfo { zid }.orEmpty()
+        return JSONObject().apply {
+            put("zid", zid)
+            put("version_code", "")
+        }.toString()
     }
 
     /**
