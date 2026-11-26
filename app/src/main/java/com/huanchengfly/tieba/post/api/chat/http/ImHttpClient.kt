@@ -113,12 +113,13 @@ object ImHttpClient {
     /**
      * 检查登录态。
      *
-     * 官方接口在 BDUSS 失效时统一返回 error_code=430 且 error_msg 含 param bduss error，
-     * 或 tiebac 侧返回 error_code=1 与"用户未登录或登录失败"。
+     * 官方错误码表里 BDUSS 过期是 8，参数校验失败是 430（param bduss error）；
+     * error_code=1 只是通用的参数错误，不能当作登录失效，否则会把网络或参数问题
+     * 误报成登录态问题，让用户反复重新登录。
      */
     fun isLoginError(response: JSONObject): Boolean {
         val code = errorCode(response)
-        if (code == 1 || code == 430) return true
+        if (code == 8 || code == 430) return true
         return errorMessage(response).contains("bduss", ignoreCase = true) ||
             errorMessage(response).contains("未登录")
     }

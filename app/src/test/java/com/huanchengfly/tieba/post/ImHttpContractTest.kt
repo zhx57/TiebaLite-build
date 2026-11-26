@@ -192,7 +192,7 @@ class ImHttpContractTest {
                     ),
             )
 
-        val rooms = ChatRoomListApi.parseRooms(root)
+        val rooms = ChatRoomListApi.parseRoomListResponse(root)
         // 官方只展示 is_show == 1 的群。
         assertEquals(1, rooms.size)
         val room = rooms.single()
@@ -201,6 +201,56 @@ class ImHttpContractTest {
         assertEquals("某群", room.name)
         assertEquals("某吧", room.forumName)
         assertEquals(3, room.discussNum)
+    }
+
+    @Test
+    fun subscriptionListParsesGroupObjectAtDataTopLevel() {
+        // 官方 nvb$d 把整个 data 交给 ChatGroupInfo.parse，
+        // 而 ChatGroupInfo.parse 只读 group_name / group_id / room_list，
+        // 所以订阅接口的 data 顶层就是群对象，没有 list[] 这一层。
+        val root = JSONObject()
+            .put("error_code", 0)
+            .put(
+                "data",
+                JSONObject()
+                    .put("group_name", "我的群")
+                    .put("group_id", "42")
+                    .put(
+                        "room_list",
+                        org.json.JSONArray()
+                            .put(
+                                JSONObject()
+                                    .put("room_id", "8360438138")
+                                    .put("is_show", 1)
+                                    .put(
+                                        "room_info",
+                                        JSONObject()
+                                            .put("forum_id", "1")
+                                            .put("forum_name", "某吧")
+                                            .put("name", "某群")
+                                            .put("avatar", "https://tiebapic.baidu.com/a.jpg")
+                                            .put("unread_num", "5")
+                                    )
+                            )
+                            .put(
+                                JSONObject()
+                                    .put("room_id", "8360439999")
+                                    .put("is_show", 0)
+                                    .put(
+                                        "room_info",
+                                        JSONObject()
+                                            .put("forum_id", "1")
+                                            .put("name", "隐藏群")
+                                    )
+                            ),
+                    ),
+            )
+
+        val rooms = ChatRoomListApi.parseSubscriptionRooms(root)
+        assertEquals(1, rooms.size)
+        assertEquals(8360438138L, rooms.single().roomId)
+        assertEquals("某群", rooms.single().name)
+        assertEquals(5, rooms.single().discussNum)
     }
 
     @Test
