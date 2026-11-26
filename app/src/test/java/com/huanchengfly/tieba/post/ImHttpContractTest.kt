@@ -4,13 +4,13 @@ import com.huanchengfly.tieba.post.api.chat.http.ChatRoomListApi
 import com.huanchengfly.tieba.post.api.chat.http.ImBduid
 import com.huanchengfly.tieba.post.api.chat.http.ImHttpClient
 import com.huanchengfly.tieba.post.api.chat.http.ImHttpConstants
+import com.huanchengfly.tieba.post.api.chat.http.ImMessageApi
 import com.huanchengfly.tieba.post.api.chat.http.ImSessionApi
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.Assert.assertTrueimport org.junit.Test
 
 /**
  * 官方 IM HTTP 协议契约测试。
@@ -262,7 +262,7 @@ class ImHttpContractTest {
     fun msgKeyIsTenHexCharsLikeOfficial() {
         val key = ImMessageApi.createMsgKey()
         assertEquals(10, key.length)
-        assertTrue(key.all { it in "0123456789abcdef" })
+        assertTrue(key.all { "0123456789abcdef".contains(it) })
         // 两次生成不应完全相同，因为含随机位。
         assertNotEquals(key, ImMessageApi.createMsgKey())
     }

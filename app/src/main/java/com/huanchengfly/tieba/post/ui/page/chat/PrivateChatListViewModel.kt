@@ -76,7 +76,12 @@ sealed interface PrivateChatListPartialChange : PartialChange<PrivateChatListUiS
         override fun reduce(oldState: PrivateChatListUiState): PrivateChatListUiState =
             when (this) {
                 is Start -> oldState.copy(isLoading = true)
-                is Success -> oldState.copy(isLoading = false, sessions = sessions)
+                // 官方 fetch_session 每次返回全量会话，这里按 peerUid 合并并保留较新的一条，
+                // 避免网络抖动时旧会话被清掉。
+                is Success -> oldState.copy(
+                    isLoading = false,
+                    sessions = mergeSessions(oldState.sessions, sessions),
+                )
                 is Failure -> oldState.copy(isLoading = false)
             }
 
@@ -89,6 +94,21 @@ sealed interface PrivateChatListPartialChange : PartialChange<PrivateChatListUiS
         data class Failure(val error: Throwable) : Load()
     }
 }
+
+/**
+ * 合并会话列表。
+ *
+ * 同一个 peerUid 保留 lastTime 更新的那条，并按时间倒序排列。
+ */
+private fun mergeSessions(
+    current: ImmutableList<PrivateSession>,
+    incoming: ImmutableList<PrivateSession>,
+): ImmutableList<PrivateSession> =
+    (current + incoming)
+        .groupBy { it.peerUid }
+        .map { (_, sessions) -> sessions.maxBy { it.lastTime } }
+        .sortedByDescending { it.lastTime }
+        .toImmutableList()
 
 /**
  * 一个私信会话。

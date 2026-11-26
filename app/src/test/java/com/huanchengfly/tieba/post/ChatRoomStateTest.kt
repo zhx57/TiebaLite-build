@@ -997,7 +997,6 @@ class ChatRoomStateTest {
         )
         val reduced = PrivateChatListPartialChange.Load.Success(
             sessions = persistentListOf(),
-            replace = false,
         ).reduce(state)
         assertEquals(listOf(current), reduced.sessions)
     }
@@ -1014,7 +1013,6 @@ class ChatRoomStateTest {
         val older = current.copy(lastMessage = "旧消息", lastTime = 100L)
         val reduced = PrivateChatListPartialChange.Load.Success(
             sessions = persistentListOf(older),
-            replace = false,
         ).reduce(PrivateChatListUiState(sessions = persistentListOf(current)))
         assertEquals("新消息", reduced.sessions.single().lastMessage)
         assertEquals(200L, reduced.sessions.single().lastTime)
@@ -1038,7 +1036,6 @@ class ChatRoomStateTest {
         )
         val reduced = PrivateChatListPartialChange.Load.Success(
             sessions = persistentListOf(incoming),
-            replace = false,
         ).reduce(PrivateChatListUiState(sessions = persistentListOf(current)))
         assertEquals(listOf(2L, 1L), reduced.sessions.map { it.peerUid })
     }
