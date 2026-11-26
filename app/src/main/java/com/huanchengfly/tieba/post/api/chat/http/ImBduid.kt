@@ -26,7 +26,7 @@ object ImBduid {
 
     private fun cipher(mode: Int): Cipher =
         Cipher.getInstance("AES/CBC/PKCS5Padding").apply {
-            init(mode, SecretKeySpec(KEY.toByteArray(), "AES"), IvParameterSpec(IV.toByteArray()))
+            init(mode, SecretKeySpec(KEY, "AES"), IvParameterSpec(IV.toByteArray()))
         }
 
     /**
