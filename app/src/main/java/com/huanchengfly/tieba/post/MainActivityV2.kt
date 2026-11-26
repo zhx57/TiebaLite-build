@@ -355,15 +355,16 @@ class MainActivityV2 : BaseComposeActivity() {
                 val pushes = Channel<Unit>(Channel.CONFLATED)
                 val unregisterPush = socket.addPushNotifyListener { pushes.trySend(Unit) }
                 try {
-                    socket.connect(cookie)
+                    // 长连接只用来接收推送，握手失败不影响 HTTP 侧的消息与通知。
+                    runCatching { socket.connect(cookie) }
                     while (isActive && cookie == AccountUtil.getCookie().orEmpty()) {
-                        NotifyJobService.consumePrivateMessages(this@MainActivityV2, socket)
+                        NotifyJobService.consumePrivateMessages(this@MainActivityV2)
                         withTimeoutOrNull(5_000L) { pushes.receive() }
                     }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    android.util.Log.w("ForegroundChat", "私信连接中断，稍后重连", error)
+                    android.util.Log.w("ForegroundChat", "私信检查中断，稍后重试", error)
                 } finally {
                     // 连接是共享的，页面可能仍在使用，这里只解除本循环的推送订阅。
                     unregisterPush()

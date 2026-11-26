@@ -202,9 +202,10 @@ object ImMessageApi {
      * 拼成 40 位，再按小端写成 5 字节的十六进制字符串。
      */
     internal fun createMsgKey(triggerId: Long = 0L): String {
-        val millis = System.currentTimeMillis() and 0xFFFFF
-        val trigger = (triggerId and 0x3FF) shl 10
-        val random = (java.util.Random().nextInt(1024) and 0x3FF)
+        // 40 位拼接必须用 Long，Int 会溢出丢掉高位。
+        val millis = System.currentTimeMillis() and 0xFFFFFL
+        val trigger = (triggerId and 0x3FFL) shl 10
+        val random = (java.util.Random().nextInt(1024) and 0x3FF).toLong()
         val value = (millis shl 20) or trigger or random
         val bytes = byteArrayOf(
             (value and 0xFF).toByte(),

@@ -15,7 +15,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.TiebaApi
-import com.huanchengfly.tieba.post.api.chat.ws.ChatWebSocketClient
+import com.huanchengfly.tieba.post.api.chat.http.ImSessionApi
 import com.huanchengfly.tieba.post.api.models.MsgBean
 import com.huanchengfly.tieba.post.pendingIntentFlagImmutable
 import com.huanchengfly.tieba.post.ui.common.theme.utils.ThemeUtils
@@ -25,7 +25,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import com.huanchengfly.tieba.post.api.chat.ws.PrivateChatCache
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
@@ -130,18 +129,14 @@ class NotifyJobService : JobService() {
      */
     private fun checkPrivateMessages(params: JobParameters, baseTotal: Int) {
         serviceScope.launch {
-            val client = ChatWebSocketClient()
             try {
                 if (AccountUtil.isLoggedIn()) {
-                    client.connect(AccountUtil.getCookie().orEmpty())
-                    consumePrivateMessages(this@NotifyJobService, client)
+                    consumePrivateMessages(this@NotifyJobService)
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 Log.w(TAG, "私信通知检查失败", error)
-            } finally {
-                client.close()
             }
             // 常规通知总数不含私信，接收方分别维护，避免重复相加。
             sendBroadcast(
@@ -202,39 +197,15 @@ class NotifyJobService : JobService() {
         private const val CHANNEL_GROUP_NAME = "消息通知"
         private const val CHANNEL_REPLY = "2"
         private const val CHANNEL_REPLY_NAME = "回复我的"
-        private const val PREF_NAME = "notify_job_service"
-        private const val KEY_PRIVATE_LAST_MSG_ID = "private_last_msg_id"
         private val privateMessageMutex = kotlinx.coroutines.sync.Mutex()
 
-        suspend fun consumePrivateMessages(context: Context, client: ChatWebSocketClient) {
+        suspend fun consumePrivateMessages(context: Context) {
             privateMessageMutex.lock()
             try {
-                val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                val key = "${KEY_PRIVATE_LAST_MSG_ID}_${client.selfUid}"
-                var cursor = prefs.getLong(key, 0L)
-                if (cursor <= 0L) {
-                    prefs.edit().putLong(key, client.privateLastMsgId).apply()
-                    return
-                }
-                var incoming = 0
-                // 逐批推进到服务端最新位置，游标只取实际消费过的消息。
-                for (page in 0 until 20) {
-                    val messages = client.fetchPrivateMessagesSince(cursor)
-                    val received = messages.filter { !it.isSelf && it.peerUid != 0L }
-                    received.groupBy { it.peerUid }.forEach { (peerUid, batch) ->
-                        val cached = PrivateChatCache.load(client.selfUid, peerUid)
-                        PrivateChatCache.save(
-                            client.selfUid, peerUid,
-                            (cached + batch).distinctBy { it.msgId }.sortedBy { it.msgTime },
-                        )
-                    }
-                    incoming += received.size
-                    val next = client.privateFetchedMsgId
-                    if (next <= cursor) break
-                    cursor = next
-                    prefs.edit().putLong(key, cursor).apply()
-                    if (cursor >= client.privateLastMsgId) break
-                }
+                // 官方消息中心本身就是 fetch_session 驱动的，未读数直接取自会话列表，
+                // 不再依赖长连接逐条比对消息游标。
+                val sessions = ImSessionApi.fetchSessions()
+                val incoming = sessions.sumOf { it.unreadNum }
                 if (incoming <= 0) return
                 context.sendBroadcast(
                     Intent(ACTION_NEW_MESSAGE)
