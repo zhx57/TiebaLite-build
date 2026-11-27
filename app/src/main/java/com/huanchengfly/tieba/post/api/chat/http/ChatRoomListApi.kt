@@ -287,9 +287,8 @@ object ChatRoomListApi {
         val list = data.readOptionalArray("list") ?: return emptyList()
         val rooms = mutableListOf<ChatRoom>()
         for (i in 0 until list.length()) {
-            val group = list.optJSONObject(i)
-                ?: throw ChatApiException(-1, "群列表协议错误：list 元素不是对象")
-            rooms += parseRoomList(group.readOptionalArray("room_list"), fid)
+            val group = list.optJSONObject(i) ?: continue
+            rooms += parseRoomList(group.readOptionalArray("room_list"), fid, filterHidden = false)
         }
         return rooms
     }
@@ -306,21 +305,21 @@ object ChatRoomListApi {
      * 解析 room_list 数组。
      *
      * 群名与头像在 room_info 里，不在 room_list 元素顶层；
-     * 官方只保留 is_show == 1 的群。
+     * 订阅列表过滤隐藏项，按吧发现群沿用旧实现，不额外过滤服务端返回的房间。
      */
-    private fun parseRoomList(roomList: JSONArray?, fid: Long = 0L): List<ChatRoom> {
+    private fun parseRoomList(
+        roomList: JSONArray?,
+        fid: Long = 0L,
+        filterHidden: Boolean = true,
+    ): List<ChatRoom> {
         if (roomList == null) return emptyList()
         val rooms = mutableListOf<ChatRoom>()
         for (j in 0 until roomList.length()) {
-            val room = roomList.optJSONObject(j)
-                ?: throw ChatApiException(-1, "群列表协议错误：room_list 元素不是对象")
-            // 官方只展示 is_show == 1 的群。
-            if (room.optInt("is_show", 1) != 1) continue
-            val roomId = room.optString("room_id").toLongOrNull()
-                ?: room.optLong("room_id")
-            if (roomId <= 0L) throw ChatApiException(-1, "群列表协议错误：room_id 无效")
-            val info = room.optJSONObject("room_info")
-                ?: throw ChatApiException(-1, "群列表协议错误：room_info 不是对象")
+            val room = roomList.optJSONObject(j) ?: continue
+            if (filterHidden && room.optInt("is_show", 1) != 1) continue
+            val roomId = room.optString("room_id").toLongOrNull() ?: 0L
+            if (roomId <= 0L) continue
+            val info = room.optJSONObject("room_info") ?: JSONObject()
             rooms += ChatRoom(
                 roomId = roomId,
                 forumId = info.optString("forum_id").toLongOrNull()?.takeIf { it > 0 } ?: fid,

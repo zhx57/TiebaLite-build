@@ -76,14 +76,55 @@ class ChatEntryStateTest {
     }
 
     @Test
+    fun publicDiscoveryKeepsValidRoomsDespitePartialRecordsAndVisibilityFlags() {
+        val data = JSONObject("""{"list":[null,1,{"room_list":[null,1,{"room_id":"bad"},{"room_id":"0"},{"room_id":"1"},{"room_id":"2","is_show":0,"room_info":{"name":"群2"}},{"room_id":"3","room_info":{"name":"群3"}}]}]}""")
+        listOf(data, data.toString()).forEach { encoded ->
+            val rooms = ChatRoomListApi.parseRoomListResponse(JSONObject().put("data", encoded), 74075L)
+            assertEquals(listOf(1L, 2L, 3L), rooms.map { it.roomId })
+            assertTrue(rooms.all { it.forumId == 74075L })
+            assertEquals("", rooms.first().name)
+            assertEquals("群2", rooms[1].name)
+            assertEquals("群3", rooms.last().name)
+        }
+    }
+
+    @Test
+    fun subscriptionSkipsBrokenItemsWithoutDiscardingValidRooms() {
+        val data = JSONObject("""{"room_list":[null,{"room_id":"bad"},{"room_id":"1"},{"room_id":"2","is_show":0},{"room_id":"3","room_info":{"name":"已订阅"}}]}""")
+        val rooms = ChatRoomListApi.parseSubscriptionRooms(JSONObject().put("data", data))
+        assertEquals(listOf(1L, 3L), rooms.map { it.roomId })
+        assertEquals("已订阅", rooms.last().name)
+    }
+
+    /** 源码约束不替代详情页真机导航及渲染验证。 */
+    @Test
+    fun forumDetailUsesExistingManagersAndExactExperienceWithoutAnotherRequest() {
+        val app = sequenceOf(java.io.File("."), java.io.File("app"))
+            .first { java.io.File(it, "src/main/java").isDirectory }
+        val root = java.io.File(app, "src/main/java/com/huanchengfly/tieba/post/ui/page/forum")
+        val forum = java.io.File(root, "ForumPage.kt").readText()
+        val detail = java.io.File(root, "detail/ForumDetailPage.kt").readText()
+        assertTrue(forum.contains("memberInfo = holder.get { this }"))
+        assertTrue(detail.contains("memberInfo: ForumInfo? = null"))
+        assertTrue(detail.contains("memberInfo.managers.forEach"))
+        assertTrue(detail.contains("manager.show_name.ifBlank { manager.name }"))
+        assertTrue(detail.contains("onOpenUser(manager.id)"))
+        assertTrue(detail.contains("UserProfilePageDestination(it)"))
+        assertTrue(detail.contains("\${memberInfo.cur_score}"))
+        assertTrue(detail.contains("\${memberInfo.levelup_score}"))
+        assertTrue(detail.contains("LocalAccount.current == null"))
+        assertTrue(detail.contains("登录后查看"))
+        assertFalse(detail.contains("cur_score.getShortNumString"))
+        assertFalse(detail.contains("getFrsPage"))
+    }
+
+    @Test
     fun nonEmptyMalformedStructuresAreProtocolFailures() {
         listOf(
             """{"data":"not-json"}""",
             """{"data":[]}""",
             """{"data":{"list":{}}}""",
-            """{"data":{"list":[1]}}""",
             """{"data":{"list":[{"room_list":{}}]}}""",
-            """{"data":{"list":[{"room_list":[1]}]}}""",
         ).forEach { raw ->
             try {
                 ChatRoomListApi.parseRoomListResponse(JSONObject(raw))

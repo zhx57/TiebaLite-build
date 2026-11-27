@@ -2,6 +2,7 @@ package com.huanchengfly.tieba.post.ui.page.forum.detail
 
 import android.graphics.Typeface
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.LinearProgressIndicator
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
@@ -33,6 +35,7 @@ import androidx.compose.ui.unit.sp
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.protos.PbContent
 import com.huanchengfly.tieba.post.api.models.protos.RecommendForumInfo
+import com.huanchengfly.tieba.post.api.models.protos.frsPage.ForumInfo
 import com.huanchengfly.tieba.post.api.models.protos.plainText
 import com.huanchengfly.tieba.post.arch.ImmutableHolder
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
@@ -41,6 +44,7 @@ import com.huanchengfly.tieba.post.arch.pageViewModel
 import com.huanchengfly.tieba.post.arch.wrapImmutable
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.common.theme.compose.TiebaLiteTheme
+import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.Avatar
 import com.huanchengfly.tieba.post.ui.widgets.compose.BackNavigationIcon
 import com.huanchengfly.tieba.post.ui.widgets.compose.Chip
@@ -52,6 +56,8 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.MyScaffold
 import com.huanchengfly.tieba.post.ui.widgets.compose.Sizes
 import com.huanchengfly.tieba.post.ui.widgets.compose.TitleCentredToolbar
 import com.huanchengfly.tieba.post.ui.widgets.compose.states.StateScreen
+import com.huanchengfly.tieba.post.utils.AccountUtil.LocalAccount
+import com.huanchengfly.tieba.post.utils.StringUtil.getAvatarUrl
 import com.huanchengfly.tieba.post.utils.StringUtil.getShortNumString
 import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
@@ -62,6 +68,7 @@ fun ForumDetailPage(
     forumId: Long,
     navigator: DestinationsNavigator,
     viewModel: ForumDetailViewModel = pageViewModel(),
+    memberInfo: ForumInfo? = null,
 ) {
     LazyLoad(loaded = viewModel.initialized) {
         viewModel.send(ForumDetailUiIntent.Load(forumId))
@@ -118,7 +125,9 @@ fun ForumDetailPage(
                 forumInfo?.let {
                     ForumDetailContent(
                         forumInfo = it,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        memberInfo = memberInfo,
+                        onOpenUser = { navigator.navigate(UserProfilePageDestination(it)) }
                     )
                 }
             }
@@ -130,6 +139,8 @@ fun ForumDetailPage(
 private fun ForumDetailContent(
     forumInfo: ImmutableHolder<RecommendForumInfo>,
     modifier: Modifier = Modifier,
+    memberInfo: ForumInfo? = null,
+    onOpenUser: (Long) -> Unit = {},
 ) {
     val intro = remember(forumInfo) {
         forumInfo.get { content.plainText }
@@ -178,6 +189,65 @@ private fun ForumDetailContent(
             Column {
                 Text(text = forumInfo.get { slogan }, style = MaterialTheme.typography.body1)
                 Text(text = intro, style = MaterialTheme.typography.body1)
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip(text = "吧主")
+            if (memberInfo == null) {
+                Text(text = "暂无吧主信息", style = MaterialTheme.typography.body1)
+            } else if (memberInfo.managers.isEmpty()) {
+                Text(text = "暂无吧主", style = MaterialTheme.typography.body1)
+            } else {
+                memberInfo.managers.forEach { manager ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenUser(manager.id) },
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Avatar(
+                            data = getAvatarUrl(manager.portrait),
+                            size = Sizes.Medium,
+                            contentDescription = null,
+                        )
+                        Text(
+                            text = manager.show_name.ifBlank { manager.name },
+                            style = MaterialTheme.typography.body1
+                        )
+                    }
+                }
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip(text = "我的经验")
+            if (LocalAccount.current == null) {
+                Text(text = "登录后查看", style = MaterialTheme.typography.body1)
+            } else if (memberInfo != null) {
+                Text(
+                    text = stringResource(
+                        id = R.string.tip_forum_header_liked,
+                        memberInfo.user_level.toString(),
+                        memberInfo.level_name
+                    ),
+                    style = MaterialTheme.typography.body1
+                )
+                Text(
+                    text = "当前经验：${memberInfo.cur_score} / 升级所需：${memberInfo.levelup_score}",
+                    style = MaterialTheme.typography.body1
+                )
+                LinearProgressIndicator(
+                    progress = (memberInfo.cur_score.toFloat() /
+                        memberInfo.levelup_score.coerceAtLeast(1)).coerceIn(0f, 1f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(100))
+                        .height(8.dp),
+                    color = ExtendedTheme.colors.primary,
+                    backgroundColor = ExtendedTheme.colors.primary.copy(alpha = 0.25f)
+                )
+            } else {
+                Text(text = "暂无经验信息", style = MaterialTheme.typography.body1)
             }
         }
     }

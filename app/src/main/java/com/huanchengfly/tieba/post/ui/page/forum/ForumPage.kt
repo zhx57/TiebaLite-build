@@ -840,7 +840,9 @@ fun ForumPage(
                                             onOpenForumInfo = {
                                                 navigator.navigate(
                                                     ForumDetailPageDestination(
-                                                        forumId = holder.get { this.id })
+                                                        forumId = holder.get { this.id },
+                                                        memberInfo = holder.get { this }
+                                                    )
                                                 )
                                             },
                                             onBtnClick = {

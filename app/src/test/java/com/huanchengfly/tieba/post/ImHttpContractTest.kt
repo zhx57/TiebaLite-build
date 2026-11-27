@@ -204,7 +204,7 @@ class ImHttpContractTest {
     }
 
     @Test
-    fun roomListParsesOfficialNestedStructureAndSkipsHiddenRooms() {
+    fun publicRoomListParsesNestedStructureWithoutExtraVisibilityFilter() {
         val root = JSONObject()
             .put("error_code", 0)
             .put(
@@ -252,9 +252,8 @@ class ImHttpContractTest {
             )
 
         val rooms = ChatRoomListApi.parseRoomListResponse(root)
-        // 官方只展示 is_show == 1 的群。
-        assertEquals(1, rooms.size)
-        val room = rooms.single()
+        assertEquals(listOf(8360438138L, 8360439999L), rooms.map { it.roomId })
+        val room = rooms.first()
         assertEquals(8360438138L, room.roomId)
         assertEquals(1L, room.forumId)
         assertEquals("某群", room.name)
