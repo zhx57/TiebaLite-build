@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.CircularProgressIndicator
+import com.huanchengfly.tieba.post.ui.widgets.compose.TextButton
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
@@ -100,9 +102,18 @@ fun ChatRoomListPage(
                 .pullRefresh(pullRefreshState)
         ) {
             MyLazyColumn(
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(vertical = 4.dp),
                 state = lazyListState,
             ) {
+                if (error != null && rooms.isNotEmpty()) {
+                    item {
+                        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                            Text("刷新失败，已保留群列表。${error?.message.orEmpty()}", color = ExtendedTheme.colors.textSecondary)
+                            TextButton(onClick = { viewModel.send(ChatRoomListUiIntent.Load(fid)) }) { Text("重试") }
+                        }
+                    }
+                }
                 items(items = rooms, key = { it.roomId }) { room ->
                     Container {
                         Row(
@@ -168,14 +179,23 @@ fun ChatRoomListPage(
                 contentColor = ExtendedTheme.colors.primary,
             )
 
-            if (rooms.isEmpty() && !isLoading) {
-                Text(
-                    // 加载失败时直接展示错误信息，便于定位是哪个吧、什么错误码
-                    text = error?.message ?: stringResource(id = R.string.tip_chat_room_list_empty),
-                    modifier = Modifier.align(Alignment.Center),
-                    style = MaterialTheme.typography.body2,
-                    color = ExtendedTheme.colors.textSecondary,
-                )
+            if (rooms.isEmpty()) {
+                Column(
+                    modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    if (isLoading) CircularProgressIndicator(color = ExtendedTheme.colors.primary)
+                    Text(
+                        text = if (isLoading) "正在加载群聊…" else error?.message
+                            ?: "当前服务端未返回可展示群，不代表该吧一定没有群，可刷新重试",
+                        style = MaterialTheme.typography.body2,
+                        color = ExtendedTheme.colors.textSecondary,
+                    )
+                    if (!isLoading) {
+                        TextButton(onClick = { viewModel.send(ChatRoomListUiIntent.Load(fid)) }) { Text("重新加载") }
+                    }
+                }
             }
         }
     }

@@ -204,16 +204,26 @@ class NotifyJobService : JobService() {
             try {
                 // 官方消息中心本身就是 fetch_session 驱动的，未读数直接取自会话列表，
                 // 不再依赖长连接逐条比对消息游标。
+                val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: return
+                val accountToken = AccountUtil.getBduss()
                 val sessions = ImSessionApi.fetchSessions()
-                val incoming = sessions.sumOf { it.unreadNum }
-                if (incoming <= 0) return
+                if (AccountUtil.getUid()?.toLongOrNull() != accountUid ||
+                    AccountUtil.getBduss() != accountToken
+                ) return
+                val incoming = sessions.filter { it.isPrivateChat && it.peerUid > 0L }
+                    .sumOf { it.unreadNum }.coerceAtLeast(0)
                 context.sendBroadcast(
                     Intent(ACTION_NEW_MESSAGE)
                         .setPackage(context.packageName)
                         .putExtra("channel", CHANNEL_PRIVATE)
+                        .putExtra("account_uid", accountUid)
                         .putExtra("count", incoming)
                 )
                 val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if (incoming == 0) {
+                    manager.cancel(ID_PRIVATE)
+                    return
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     manager.createNotificationChannelGroup(
                         NotificationChannelGroup(CHANNEL_GROUP, CHANNEL_GROUP_NAME)

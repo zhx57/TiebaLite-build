@@ -135,7 +135,7 @@ class PrivateChatViewModel @Inject constructor() :
 
                 // 官方消息拉取走 rest/3.0/im/fetch_msg，对方 uid 需要加密后放在 contacter。
                 val incoming = ImMessageApi.fetchMessages(peerUid, beginTime = httpBeginTimeMillis())
-                    .map { it.toChatWsMessage(selfUid) }
+                    .mapNotNull { it.toChatWsMessage(selfUid, peerUid) }
                 if (AccountUtil.getUid()?.toLongOrNull() != selfUid) return@flow
                 PrivateChatCache.saveIncoming(selfUid, incoming, incoming.maxOfOrNull { it.msgId } ?: 0L)
                 val cached = PrivateChatCache.load(selfUid, peerUid)
@@ -154,7 +154,7 @@ class PrivateChatViewModel @Inject constructor() :
                 val selfUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
                 updateHttpCursor(selfUid, peerUid, PrivateChatCache.load(selfUid, peerUid))
                 val incoming = ImMessageApi.fetchMessages(peerUid, beginTime = httpBeginTimeMillis())
-                    .map { it.toChatWsMessage(selfUid) }
+                    .mapNotNull { it.toChatWsMessage(selfUid, peerUid) }
                 if (AccountUtil.getUid()?.toLongOrNull() != selfUid) return@flow
                 PrivateChatCache.saveIncoming(selfUid, incoming, incoming.maxOfOrNull { it.msgId } ?: 0L)
                 val cached = PrivateChatCache.load(selfUid, peerUid)
@@ -267,7 +267,11 @@ class PrivateChatViewModel @Inject constructor() :
  *
  * 官方消息里 from_pass_uk 解密后是发送者贴吧 uid，from_im_uk 是 IM 唯一键。
  */
-private fun ImMessageApi.Message.toChatWsMessage(selfUid: Long): ChatWsMessage {
+internal fun ImMessageApi.Message.toChatWsMessage(selfUid: Long, peerUid: Long): ChatWsMessage? {
+    // fetch_msg 已按 contacter 限定会话，但发送者仍必须是明确的会话参与者。
+    if (selfUid <= 0L || peerUid <= 0L || fromUid <= 0L ||
+        (fromUid != selfUid && fromUid != peerUid)
+    ) return null
     val isImage = imageUrl.isNotBlank()
     val kind = when {
         isImage -> ChatMessageKind.IMAGE
@@ -277,8 +281,8 @@ private fun ImMessageApi.Message.toChatWsMessage(selfUid: Long): ChatWsMessage {
     return ChatWsMessage(
         msgId = msgId,
         msgType = if (isImage) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
-        peerUid = if (fromUid == selfUid) 0L else fromUid,
-        conversationUid = if (fromUid == selfUid) 0L else fromUid,
+        peerUid = peerUid,
+        conversationUid = peerUid,
         peerName = "",
         peerPortrait = "",
         content = text,

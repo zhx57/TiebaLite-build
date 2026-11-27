@@ -2,6 +2,7 @@ package com.huanchengfly.tieba.post.ui.page.chat
 
 import android.widget.Toast
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.items
@@ -29,8 +30,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
-import com.huanchengfly.tieba.post.utils.PickMediasRequest
-import com.huanchengfly.tieba.post.utils.registerPickMediasLauncher
+import com.huanchengfly.tieba.post.utils.rememberChatImagePicker
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.pageViewModel
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
@@ -63,8 +63,8 @@ fun PrivateChatPage(
     viewModel: PrivateChatViewModel = pageViewModel(),
 ) {
     val context = LocalContext.current
-    val photoLauncher = registerPickMediasLauncher { result ->
-        result.uris.firstOrNull()?.let { uri ->
+    val pickPhoto = rememberChatImagePicker { result ->
+        result?.let { uri ->
             viewModel.send(PrivateChatUiIntent.Send(peerUid, "", photoUri = uri))
         }
     }
@@ -142,7 +142,12 @@ fun PrivateChatPage(
         confirmText = stringResource(id = R.string.btn_resend),
         cancelText = stringResource(id = R.string.button_cancel),
     ) {
-        Text(text = stringResource(id = R.string.tip_resend_message))
+        Column {
+            if (resendTarget?.localPhotoUri != null && resendTarget?.cloudMeme?.uploadedImageUrl == null) {
+                Text("若图片授权已失效，请取消重发并重新选图")
+            }
+            Text(text = stringResource(id = R.string.tip_resend_message))
+        }
     }
 
     ProvideNavigator(navigator = navigator) {
@@ -179,9 +184,7 @@ fun PrivateChatPage(
                         )
                     },
                     onDismissEmoticonPanel = { showEmoticonPanel = false },
-                    onPhotoClick = {
-                        photoLauncher.launch(PickMediasRequest(maxItems = 1, mediaType = PickMediasRequest.ImageOnly))
-                    },
+                    onPhotoClick = pickPhoto,
                     onCloudMemeClick = { meme ->
                         viewModel.send(PrivateChatUiIntent.Send(peerUid, "", cloudMeme = meme))
                     },

@@ -2,6 +2,17 @@ package com.huanchengfly.tieba.post.ui.page.chat
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material.CircularProgressIndicator
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
+import androidx.compose.runtime.collectAsState
+import com.huanchengfly.tieba.post.ui.common.theme.compose.pullRefreshIndicator
+import com.huanchengfly.tieba.post.ui.widgets.compose.TextButton
+import com.huanchengfly.tieba.post.utils.AccountUtil
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,7 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.pageViewModel
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.page.LocalNavigator
@@ -31,11 +41,9 @@ import com.huanchengfly.tieba.post.utils.StringUtil
 import kotlinx.collections.immutable.persistentListOf
 
 /**
- * 消息页的群聊 Tab：直接列出用户加入的全部吧群。
- *
- * 官方消息中心就是这个形态，用 c/u/chat/getChatSubscriptionList 一次拉全量，
- * 不需要先选贴吧再按 fid 拉一层。
+ * 消息页的群聊 Tab：优先展示订阅群，再渐进补充全部关注贴吧的公开群。
  */
+@OptIn(ExperimentalMaterialApi::class)
 @Composable
 fun ChatEntryPage(
     viewModel: ChatEntryViewModel = pageViewModel(),
@@ -45,16 +53,48 @@ fun ChatEntryPage(
         viewModel.initialized = true
     }
     val navigator = LocalNavigator.current
-    val rooms by viewModel.uiState.collectPartialAsState(
-        prop1 = ChatEntryUiState::rooms,
-        initial = persistentListOf(),
-    )
+    val state by viewModel.uiState.collectAsState()
+    // Compose 账号状态变化时立即隐藏旧列表，不等待旧请求返回。
+    val accountMatches = state.accountUid == AccountUtil.getUid()
+    val rooms = if (accountMatches) state.rooms else persistentListOf()
+    val loading = !accountMatches || state.isLoading || !state.hasLoaded
+    val refresh = { viewModel.send(ChatEntryUiIntent.Load) }
+    val pullRefreshState = rememberPullRefreshState(state.isLoading, refresh)
     val lazyListState = rememberLazyListState()
 
+    Box(Modifier.fillMaxSize().pullRefresh(pullRefreshState)) {
     MyLazyColumn(
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = 4.dp),
         state = lazyListState,
     ) {
+        if (rooms.isNotEmpty() && loading) {
+            item { Text("正在加载更多关注吧群…", Modifier.padding(16.dp), color = ExtendedTheme.colors.textSecondary) }
+        }
+        if (accountMatches && state.error != null) {
+            item {
+                Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                    Text(
+                        text = "部分群列表加载失败（${state.failedCount} 项）。" +
+                            (if (rooms.isNotEmpty()) "已保留可用群。" else "") + state.error?.message.orEmpty(),
+                        color = ExtendedTheme.colors.textSecondary,
+                    )
+                    TextButton(onClick = refresh) { Text("重试") }
+                }
+            }
+        }
+        if (rooms.isEmpty() && !loading) {
+            item {
+                Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = if (state.error != null) "加载群聊列表失败，请重试"
+                            else "当前服务端未返回可展示群，可下拉刷新重试",
+                        color = ExtendedTheme.colors.textSecondary,
+                    )
+                    TextButton(onClick = refresh) { Text("重新加载") }
+                }
+            }
+        }
         items(items = rooms, key = { it.roomId }) { room ->
             Container {
                 Row(
@@ -102,5 +142,19 @@ fun ChatEntryPage(
                 }
             }
         }
+    }
+    if (rooms.isEmpty() && loading) {
+        Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator(color = ExtendedTheme.colors.primary)
+            Text("正在加载群聊…", Modifier.padding(16.dp), color = ExtendedTheme.colors.textSecondary)
+        }
+    }
+    PullRefreshIndicator(
+        refreshing = state.isLoading && rooms.isNotEmpty(),
+        state = pullRefreshState,
+        modifier = Modifier.align(Alignment.TopCenter),
+        backgroundColor = ExtendedTheme.colors.pullRefreshIndicator,
+        contentColor = ExtendedTheme.colors.primary,
+    )
     }
 }

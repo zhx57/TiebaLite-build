@@ -1,6 +1,5 @@
 package com.huanchengfly.tieba.post.api.chat.http
 
-import android.util.Log
 import com.huanchengfly.tieba.post.api.TiebaApi
 import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.chat.ChatApiException
@@ -14,10 +13,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -44,7 +52,15 @@ object ChatRoomListApi {
     private const val SUBSCRIPTION_PATH = "c/u/chat/getChatSubscriptionList"
     private const val ROOM_LIST_PATH = "c/f/chat/getRoomListByFid"
 
-    private const val TAG = "ChatRoomListApi"
+    data class RoomListUpdate(
+        val rooms: List<ChatRoom>,
+        val isComplete: Boolean = false,
+        val error: Throwable? = null,
+        val failedCount: Int = 0,
+    )
+
+    internal fun mergeRooms(preferred: List<ChatRoom>, discovered: List<ChatRoom>): List<ChatRoom> =
+        (preferred + discovered).distinctBy { it.roomId }
 
     /** 关注贴吧列表最多翻页数，防止异常 has_more 导致死循环。 */
     private const val MAX_FORUM_PAGES = 50
@@ -56,6 +72,8 @@ object ChatRoomListApi {
         .readTimeout(30, TimeUnit.SECONDS)
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(false)
         .build()
 
     /**
@@ -65,98 +83,79 @@ object ChatRoomListApi {
      * 新装客户端本地没有群缓存时 chatroom_new_msg 传空串，服务端返回全量订阅群。
      * 两路每次都加载，成功空结果与失败分开处理。
      */
-    suspend fun fetchAllRooms(): List<ChatRoom> = withContext(Dispatchers.IO) {
-        val subscribed = runCatching {
-            postForm(
-                SUBSCRIPTION_PATH,
-                linkedMapOf(
-                    "call_from" to "message_tab",
-                    "chatroom_new_msg" to "",
-                )
-            ).let(::parseSubscriptionRooms)
-        }.onFailure { if (it is CancellationException) throw it }
-        val followed = runCatching { fetchRoomsFromFollowedForums() }
-            .onFailure { if (it is CancellationException) throw it }
-        if (subscribed.isFailure && followed.isFailure) {
-            throw subscribed.exceptionOrNull()!!
+    fun fetchAllRooms(): Flow<RoomListUpdate> = flow {
+        var rooms = emptyList<ChatRoom>()
+        var error: Throwable? = null
+        var failedCount = 0
+        suspend fun recordFailure(block: suspend () -> Unit) {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failedCount++
+                if (error == null) error = e
+            }
         }
-        if (subscribed.isFailure) {
-            Log.w(TAG, "订阅群加载失败，保留关注吧群结果")
-        }
-        if (followed.isFailure) {
-            Log.w(TAG, "关注吧群加载失败，保留订阅群结果")
-        }
-        (subscribed.getOrDefault(emptyList()) + followed.getOrDefault(emptyList()))
-            .distinctBy { it.roomId }
-    }
-
-    /** 拉取全部关注贴吧的群，仅限制并发；单吧失败在批次内汇总。 */
-    private suspend fun fetchRoomsFromFollowedForums(): List<ChatRoom> {
-        val forumIds = fetchAllFollowedForumIds()
-        if (forumIds.isEmpty()) return emptyList()
-        val semaphore = Semaphore(MAX_FALLBACK_CONCURRENCY)
-        val results = coroutineScope {
-            forumIds.map { fid ->
-                async {
-                    semaphore.withPermit {
-                        runCatching { fetchRoomsByFidWithRetry(fid) }
-                            .onFailure { if (it is CancellationException) throw it }
+        recordFailure { rooms = fetchSubscriptionRooms() }
+        emit(RoomListUpdate(rooms, error = error, failedCount = failedCount))
+        val seenForums = mutableSetOf<Long>()
+        val uid = AccountUtil.getUid()?.takeIf { it.isNotBlank() }
+        if (uid != null) {
+                var page = 1
+                while (page <= MAX_FORUM_PAGES) {
+                    val pageResult = runCatching {
+                        withTimeoutOrNull(30_000L) {
+                            TiebaApi.getInstance().userLikeForumFlow(uid, page).first()
+                        } ?: throw ChatApiException(-1, "关注吧请求超时")
+                    }.onFailure { if (it is CancellationException) throw it }
+                    if (pageResult.isFailure) {
+                        failedCount++
+                        if (error == null) error = pageResult.exceptionOrNull()
+                        break
                     }
+                    val bean = pageResult.getOrThrow()
+                    val forums = bean.forumList.forumList + bean.forumList.gconForumList
+                    val ids = forums.mapNotNull { it.id.toLongOrNull()?.takeIf { fid -> fid > 0 } }
+                        .filter { seenForums.add(it) }
+                    for (batch in ids.chunked(MAX_FALLBACK_CONCURRENCY)) {
+                        val results = coroutineScope {
+                            batch.map { fid ->
+                                async {
+                                    try {
+                                        Result.success(fetchPublicRoomsByFid(fid))
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        Result.failure<List<ChatRoom>>(e)
+                                    }
+                                }
+                            }.awaitAll()
+                        }
+                        results.forEach { result ->
+                            result.fold(
+                                onSuccess = { rooms = mergeRooms(rooms, it) },
+                                onFailure = { failedCount++; if (error == null) error = it },
+                            )
+                        }
+                        emit(RoomListUpdate(rooms, error = error, failedCount = failedCount))
+                    }
+                    if (bean.hasMore != "1") break
+                    if (forums.isEmpty() || page == MAX_FORUM_PAGES) {
+                        failedCount++
+                        if (error == null) error = ChatApiException(-1, "关注吧分页未完整返回，请重试")
+                        break
+                    }
+                    page++
                 }
-            }.awaitAll()
         }
-        val failedCount = results.count { it.isFailure }
-        if (failedCount == results.size) {
-            throw results.first().exceptionOrNull()!!
-        }
-        if (failedCount > 0) {
-            Log.w(TAG, "关注吧群部分加载失败：$failedCount/${results.size}，保留成功结果")
-        }
-        return results.flatMap { it.getOrDefault(emptyList()) }.distinctBy { it.roomId }
-    }
+        emit(RoomListUpdate(rooms, isComplete = true, error = error, failedCount = failedCount))
+    }.flowOn(Dispatchers.IO)
 
-    /** 拉单个吧的群，失败最多重试一次；两次均失败时抛出首次异常。 */
-    private suspend fun fetchRoomsByFidWithRetry(fid: Long): List<ChatRoom> {
-        var firstError: Throwable? = null
-        repeat(2) {
-            val result = runCatching { fetchRoomsByFid(fid) }
-                .onFailure { if (it is CancellationException) throw it }
-            if (result.isSuccess) return result.getOrThrow()
-            if (firstError == null) firstError = result.exceptionOrNull()
-        }
-        throw firstError!!
-    }
-
-    /**
-     * 分页拉取当前账号关注的全部贴吧 id。
-     *
-     * 官方的关注吧列表分页返回，has_more == "1" 时继续翻下一页；
-     * 单次只取第一页会漏掉大量吧，导致群列表只显示少部分群。
-     */
-    private suspend fun fetchAllFollowedForumIds(): List<Long> {
-        val uid = AccountUtil.getUid()?.takeIf { it.isNotBlank() } ?: return emptyList()
-        val result = linkedSetOf<Long>()
-        var page = 1
-        while (page <= MAX_FORUM_PAGES) {
-            val bean = runCatching {
-                TiebaApi.getInstance().userLikeForumFlow(uid, page).first()
-            }.getOrElse {
-                if (it is CancellationException) throw it
-                if (page == 1) throw it
-                Log.w(TAG, "关注吧第 $page 页加载失败，保留此前已获取的贴吧")
-                return result.toList()
-            }
-            val forums = bean.forumList.forumList + bean.forumList.gconForumList
-            forums.mapNotNullTo(result) { it.id.toLongOrNull()?.takeIf { fid -> fid > 0L } }
-            if (bean.hasMore != "1") break
-            if (forums.isEmpty() || page == MAX_FORUM_PAGES) {
-                Log.w(TAG, "关注吧分页在第 $page 页提前停止，服务端仍标记有更多数据")
-                break
-            }
-            page++
-        }
-        return result.toList()
-    }
+    private suspend fun fetchSubscriptionRooms(): List<ChatRoom> = postForm(
+        SUBSCRIPTION_PATH,
+        linkedMapOf("call_from" to "message_tab", "chatroom_new_msg" to ""),
+    ).let(::parseSubscriptionRooms)
 
     /**
      * 拉取指定贴吧的群列表。
@@ -164,12 +163,15 @@ object ChatRoomListApi {
      * @param fid 贴吧 forum_id，不是 room_id。
      */
     suspend fun fetchRoomsByFid(fid: Long): List<ChatRoom> = withContext(Dispatchers.IO) {
-        val params = linkedMapOf(
-            "call_from" to "frs",
-            "fid" to fid.toString(),
-        )
-        val body = postForm(ROOM_LIST_PATH, params)
-        parseRoomListResponse(body)
+        val publicRooms = fetchPublicRoomsByFid(fid)
+        if (publicRooms.isNotEmpty()) publicRooms
+        else fetchSubscriptionRooms().filter { it.forumId == fid }.distinctBy { it.roomId }
+    }
+
+    /** 全关注吧扫描只读公开接口，空吧不会重复触发订阅请求。 */
+    private suspend fun fetchPublicRoomsByFid(fid: Long): List<ChatRoom> {
+        val body = postForm(ROOM_LIST_PATH, linkedMapOf("call_from" to "frs", "fid" to fid.toString()))
+        return parseRoomListResponse(body, fid).distinctBy { it.roomId }
     }
 
     /**
@@ -182,7 +184,7 @@ object ChatRoomListApi {
      * @param needTbs 对应 FastRequest 创建任务时的 isNeedTbs 开关，
      *   getChatSubscriptionList 为 true，getRoomListByFid 为 false。
      */
-    private fun postForm(
+    private suspend fun postForm(
         path: String,
         params: Map<String, String>,
         needTbs: Boolean = path == SUBSCRIPTION_PATH,
@@ -214,21 +216,35 @@ object ChatRoomListApi {
             .header("User-Agent", "bdtb for Android ${ImHttpConstants.CHAT_VERSION}")
             .header("Cookie", "BDUSS=$bduss")
             .build()
-        client.newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                throw ChatApiException(response.code, "HTTP ${response.code}")
-            }
-            val root = runCatching { JSONObject(text) }.getOrElse {
-                if (it is CancellationException) throw it
-                throw ChatApiException(response.code, "响应不是合法 JSON")
-            }
-            val errCode = root.optInt("error_code", 0)
-            if (errCode != 0) {
-                throw ChatApiException(errCode, root.optString("error_msg"))
-            }
-            return root
+        val text = suspendCancellableCoroutine<String> { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    continuation.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val body = response.use {
+                            if (!it.isSuccessful) throw ChatApiException(it.code, "HTTP ${it.code}")
+                            it.body?.string().orEmpty()
+                        }
+                        continuation.resume(body)
+                    } catch (e: Exception) {
+                        continuation.resumeWithException(e)
+                    }
+                }
+            })
         }
+        val root = try {
+            JSONObject(text)
+        } catch (e: org.json.JSONException) {
+            throw ChatApiException(-1, "响应不是合法 JSON")
+        }
+        val errCode = root.optInt("error_code", 0)
+        if (errCode != 0) throw ChatApiException(errCode, root.optString("error_msg"))
+        return root
     }
 
     /**
@@ -242,17 +258,23 @@ object ChatRoomListApi {
      */
     internal fun parseSubscriptionRooms(root: JSONObject): List<ChatRoom> {
         val data = root.readDataObject() ?: return emptyList()
-        return parseRoomList(data.optJSONArray("room_list"))
+        return parseRoomList(data.readOptionalArray("room_list"))
     }
 
     /** 读取 data 字段，兼容 JSONObject 与 JSON 字符串两种形态。 */
     internal fun JSONObject.readDataObject(): JSONObject? {
-        optJSONObject("data")?.let { return it }
-        val raw = optString("data").trim()
-        if (raw.isEmpty() || raw == "null") return null
-        return runCatching { JSONObject(raw) }
-            .onFailure { if (it is CancellationException) throw it }
-            .getOrNull()
+        val raw = opt("data")
+        if (raw == null || raw == JSONObject.NULL) return null
+        if (raw is JSONObject) return raw
+        if (raw is String) {
+            if (raw.isBlank() || raw.trim() == "null") return null
+            try {
+                return JSONObject(raw)
+            } catch (e: org.json.JSONException) {
+                throw ChatApiException(-1, "群列表协议错误：data 不是 JSON 对象")
+            }
+        }
+        throw ChatApiException(-1, "群列表协议错误：data 类型错误")
     }
 
     /**
@@ -260,15 +282,24 @@ object ChatRoomListApi {
      *
      * 官方结构是 data.list[]（群）-> room_list[]（房间）两层。
      */
-    internal fun parseRoomListResponse(root: JSONObject): List<ChatRoom> {
+    internal fun parseRoomListResponse(root: JSONObject, fid: Long = 0L): List<ChatRoom> {
         val data = root.readDataObject() ?: return emptyList()
-        val list = data.optJSONArray("list") ?: return emptyList()
+        val list = data.readOptionalArray("list") ?: return emptyList()
         val rooms = mutableListOf<ChatRoom>()
         for (i in 0 until list.length()) {
-            val group = list.optJSONObject(i) ?: continue
-            rooms += parseRoomList(group.optJSONArray("room_list"))
+            val group = list.optJSONObject(i)
+                ?: throw ChatApiException(-1, "群列表协议错误：list 元素不是对象")
+            rooms += parseRoomList(group.readOptionalArray("room_list"), fid)
         }
         return rooms
+    }
+
+    // 官方使用 optJSONArray，缺失或 null 按无群处理；非空错误类型不能伪装成空列表。
+    private fun JSONObject.readOptionalArray(key: String): JSONArray? {
+        val value = opt(key)
+        if (value == null || value == JSONObject.NULL) return null
+        return value as? JSONArray
+            ?: throw ChatApiException(-1, "群列表协议错误：$key 不是数组")
     }
 
     /**
@@ -277,24 +308,27 @@ object ChatRoomListApi {
      * 群名与头像在 room_info 里，不在 room_list 元素顶层；
      * 官方只保留 is_show == 1 的群。
      */
-    private fun parseRoomList(roomList: JSONArray?): List<ChatRoom> {
+    private fun parseRoomList(roomList: JSONArray?, fid: Long = 0L): List<ChatRoom> {
         if (roomList == null) return emptyList()
         val rooms = mutableListOf<ChatRoom>()
         for (j in 0 until roomList.length()) {
-            val room = roomList.optJSONObject(j) ?: continue
+            val room = roomList.optJSONObject(j)
+                ?: throw ChatApiException(-1, "群列表协议错误：room_list 元素不是对象")
             // 官方只展示 is_show == 1 的群。
             if (room.optInt("is_show", 1) != 1) continue
             val roomId = room.optString("room_id").toLongOrNull()
                 ?: room.optLong("room_id")
-            if (roomId <= 0L) continue
-            val info = room.optJSONObject("room_info") ?: JSONObject()
+            if (roomId <= 0L) throw ChatApiException(-1, "群列表协议错误：room_id 无效")
+            val info = room.optJSONObject("room_info")
+                ?: throw ChatApiException(-1, "群列表协议错误：room_info 不是对象")
             rooms += ChatRoom(
                 roomId = roomId,
-                forumId = info.optString("forum_id").toLongOrNull() ?: 0L,
+                forumId = info.optString("forum_id").toLongOrNull()?.takeIf { it > 0 } ?: fid,
                 forumName = info.optString("forum_name"),
                 name = info.optString("name"),
                 avatar = info.optString("avatar"),
-                discussNum = info.optString("unread_num").toIntOrNull() ?: 0,
+                discussNum = info.optString("discuss_num").toIntOrNull() ?: 0,
+                unreadNum = info.optString("unread_num").toIntOrNull() ?: 0,
                 announce = room.optJSONObject("msg_info")
                     ?.optString("content").orEmpty(),
             )

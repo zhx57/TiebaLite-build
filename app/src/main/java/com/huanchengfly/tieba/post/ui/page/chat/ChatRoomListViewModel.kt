@@ -21,7 +21,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.flatMapConcat
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 
@@ -46,15 +46,18 @@ class ChatRoomListViewModel @Inject constructor() :
         @OptIn(ExperimentalCoroutinesApi::class)
         override fun toPartialChangeFlow(intentFlow: Flow<ChatRoomListUiIntent>): Flow<ChatRoomListPartialChange> =
             intentFlow.filterIsInstance<ChatRoomListUiIntent.Load>()
-                .flatMapConcat { it.producePartialChange() }
+                .flatMapLatest { it.producePartialChange() }
 
         private fun ChatRoomListUiIntent.Load.producePartialChange(): Flow<ChatRoomListPartialChange.Load> =
             flow {
                 emit(ChatRoomListPartialChange.Load.Start)
-                // 官方按贴吧拉群走 c/f/chat/getRoomListByFid，参数是 forum_id。
+                // 按贴吧请求必须传入 fid，而非 room_id。
                 val rooms = ChatRoomListApi.fetchRoomsByFid(fid)
                 emit(ChatRoomListPartialChange.Load.Success(rooms.toImmutableList()))
-            }.catch { emit(ChatRoomListPartialChange.Load.Failure(it)) }
+            }.catch {
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                emit(ChatRoomListPartialChange.Load.Failure(it))
+            }
     }
 }
 

@@ -106,12 +106,26 @@ class ImHttpContractTest {
         assertEquals(encrypted, ImBduid.transBDUID("1234567890"))
         assertEquals("1234567890", ImBduid.transBDUK(encrypted))
         assertEquals("1234567890", ImBduid.transBDUK("$encrypted=="))
-        val urlSafeUid = (1L..1000L).first { uid ->
-            ImBduid.transBDUID(uid.toString()).any { it == '+' || it == '/' }
-        }.toString()
-        val urlSafe = ImBduid.transBDUID(urlSafeUid).replace('+', '-').replace('/', '_')
-        assertEquals(urlSafeUid, ImBduid.transBDUK(urlSafe))
-        assertEquals(urlSafeUid, ImBduid.transBDUK("$urlSafe=="))
+        // 使用独立 AES 计算输出，覆盖线上曾被拒绝的两个标准 Base64 字符。
+        val standardVectors = (1L..1000L).associate { uid ->
+            val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding").apply {
+                init(javax.crypto.Cipher.ENCRYPT_MODE,
+                    javax.crypto.spec.SecretKeySpec(ImBduid.KEY, "AES"),
+                    javax.crypto.spec.IvParameterSpec(ImBduid.IV.toByteArray(Charsets.UTF_8)))
+            }
+            uid.toString() to java.util.Base64.getEncoder().withoutPadding()
+                .encodeToString(cipher.doFinal(uid.toString().toByteArray(Charsets.UTF_8)))
+        }
+        for (character in listOf('+', '/')) {
+            val (uid, standard) = standardVectors.entries.first { character in it.value }
+            val urlSafe = standard.replace('+', '-').replace('/', '_')
+            assertEquals(urlSafe, ImBduid.transBDUID(uid))
+            assertFalse(ImBduid.transBDUID(uid).any { it == '+' || it == '/' || it == '=' })
+            assertEquals(uid, ImBduid.transBDUK(urlSafe))
+            assertEquals(uid, ImBduid.transBDUK("$urlSafe=="))
+            assertEquals(uid, ImBduid.transBDUK(standard))
+            assertEquals(uid, ImBduid.transBDUK("$standard=="))
+        }
         // 不同 uid 必须得到不同密文，且都能解回。
         val other = ImBduid.transBDUID("999999999")
         assertNotEquals(encrypted, other)
@@ -245,7 +259,8 @@ class ImHttpContractTest {
         assertEquals(1L, room.forumId)
         assertEquals("某群", room.name)
         assertEquals("某吧", room.forumName)
-        assertEquals(3, room.discussNum)
+        assertEquals(0, room.discussNum)
+        assertEquals(3, room.unreadNum)
     }
 
     @Test
@@ -295,7 +310,8 @@ class ImHttpContractTest {
         assertEquals(1, rooms.size)
         assertEquals(8360438138L, rooms.single().roomId)
         assertEquals("某群", rooms.single().name)
-        assertEquals(5, rooms.single().discussNum)
+        assertEquals(0, rooms.single().discussNum)
+        assertEquals(5, rooms.single().unreadNum)
     }
 
     @Test
@@ -394,8 +410,8 @@ class ImHttpContractTest {
         val key = ImMessageApi.createMsgKey()
         assertEquals(10, key.length)
         assertTrue(key.all { "0123456789abcdef".contains(it) })
-        // 两次生成不应完全相同，因为含随机位。
-        assertNotEquals(key, ImMessageApi.createMsgKey())
+        // 不同 trigger 的位段必然不同，避免把随机碰撞当成协议回归。
+        assertNotEquals(ImMessageApi.createMsgKey(1L), ImMessageApi.createMsgKey(2L))
     }
 
     @Test

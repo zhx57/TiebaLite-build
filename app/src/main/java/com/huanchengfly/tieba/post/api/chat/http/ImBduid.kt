@@ -36,8 +36,8 @@ object ImBduid {
         if (uid.isEmpty()) return ""
         return runCatching {
             val encrypted = cipher(Cipher.ENCRYPT_MODE).doFinal(uid.toByteArray(Charsets.UTF_8))
-            // 线上 IM HTTP 接口拒绝尾部 = 填充，必须使用不换行、无填充的编码。
-            Base64.getEncoder().withoutPadding().encodeToString(encrypted)
+            // 线上接口使用 RawURLEncoding：拒绝 +、/ 与尾部 =。
+            Base64.getUrlEncoder().withoutPadding().encodeToString(encrypted)
         }.getOrDefault("")
     }
 

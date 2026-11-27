@@ -45,8 +45,7 @@ import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.models.chat.ChatMention
 import com.huanchengfly.tieba.post.api.models.chat.ChatRobot
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoomMessage
-import com.huanchengfly.tieba.post.utils.PickMediasRequest
-import com.huanchengfly.tieba.post.utils.registerPickMediasLauncher
+import com.huanchengfly.tieba.post.utils.rememberChatImagePicker
 import com.huanchengfly.tieba.post.arch.collectPartialAsState
 import com.huanchengfly.tieba.post.arch.pageViewModel
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
@@ -131,8 +130,7 @@ fun ChatRoomPage(
         prop1 = ChatRoomUiState::sendRequestId, initial = 0L,
     )
     val account = LocalAccount.current
-    val photoLauncher = registerPickMediasLauncher { result ->
-        val uri = result.uris.firstOrNull()
+    val pickPhoto = rememberChatImagePicker { uri ->
         val acc = account
         if (uri != null && acc != null) {
             viewModel.send(ChatRoomUiIntent.Send(
@@ -283,6 +281,9 @@ fun ChatRoomPage(
     ) {
         Column {
             resendTarget?.sendError?.let { Text(it, color = MaterialTheme.colors.error) }
+            if (resendTarget?.localPhotoUri != null && resendTarget?.cloudMeme?.uploadedImageUrl == null) {
+                Text("若图片授权已失效，请取消重发并重新选图")
+            }
             Text(text = stringResource(id = R.string.tip_resend_message))
         }
     }
@@ -363,9 +364,7 @@ fun ChatRoomPage(
                             showEmoticonPanel = showEmoticonPanel,
                             onToggleEmoticonPanel = { showEmoticonPanel = !showEmoticonPanel },
                             onDismissEmoticonPanel = { showEmoticonPanel = false },
-                            onPhotoClick = {
-                                photoLauncher.launch(PickMediasRequest(maxItems = 1, mediaType = PickMediasRequest.ImageOnly))
-                            },
+                            onPhotoClick = pickPhoto,
                             onMentionClick = { picker = "mention" },
                             onRobotClick = { picker = "robot" },
                             onCloudMemeClick = { meme ->

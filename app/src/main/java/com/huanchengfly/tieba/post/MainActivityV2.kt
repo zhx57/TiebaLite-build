@@ -622,7 +622,10 @@ class MainActivityV2 : BaseComposeActivity() {
                 val channel = intent.getStringExtra("channel")
                 val count = intent.getIntExtra("count", 0)
                 if (channel == NotifyJobService.CHANNEL_PRIVATE) {
-                    foregroundPrivateCount += count
+                    if (intent.getLongExtra("account_uid", 0L) !=
+                        (AccountUtil.getUid()?.toLongOrNull() ?: 0L)
+                    ) return
+                    foregroundPrivateCount = count.coerceAtLeast(0)
                     notificationCountFlow.tryEmit(regularNotificationCount + foregroundPrivateCount)
                 } else if (channel == NotifyJobService.CHANNEL_TOTAL) {
                     regularNotificationCount = count

@@ -44,8 +44,7 @@ import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.utils.AccountUtil.LocalAccount
 import com.huanchengfly.tieba.post.utils.Emoticon
 import com.huanchengfly.tieba.post.utils.EmoticonManager
-import com.huanchengfly.tieba.post.utils.PickMediasRequest
-import com.huanchengfly.tieba.post.utils.registerPickMediasLauncher
+import com.huanchengfly.tieba.post.utils.rememberChatImagePicker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
@@ -95,11 +94,11 @@ private fun EmoticonPickerContent(
             uploadJob = null
         }
     }
-    val uploadLauncher = if (chatMode) registerPickMediasLauncher { result ->
+    val pickUpload = if (chatMode) rememberChatImagePicker { result ->
         pickingUpload = false
         val selectedAccount = pickerAccount
         pickerAccount = null
-        result.uris.firstOrNull()?.takeIf {
+        result?.takeIf {
             selectedAccount == currentAccount && uid.isNotBlank() && bduss.isNotBlank() && uploadJob == null
         }?.let { uri ->
             uploadJob = scope.launch {
@@ -118,7 +117,12 @@ private fun EmoticonPickerContent(
                     throw error
                 } catch (error: Throwable) {
                     if (currentAccount == selectedAccount) {
-                        Toast.makeText(context, error.message ?: "上传收藏失败", Toast.LENGTH_SHORT).show()
+                        val message = if (error is SecurityException || error is java.io.FileNotFoundException) {
+                            "无法读取图片，授权可能已失效，请重新选图"
+                        } else {
+                            error.message ?: "上传收藏失败"
+                        }
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                     }
                 } finally {
                     if (uploadJob === kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]) {
@@ -202,7 +206,7 @@ private fun EmoticonPickerContent(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    if (uploadLauncher != null && category == 1) {
+                    if (pickUpload != null && category == 1) {
                         TextButton(
                             onClick = {
                                 if (uploadJob != null) {
@@ -210,7 +214,7 @@ private fun EmoticonPickerContent(
                                 } else {
                                     pickerAccount = currentAccount
                                     pickingUpload = true
-                                    uploadLauncher.launch(PickMediasRequest(maxItems = 1, mediaType = PickMediasRequest.ImageOnly))
+                                    pickUpload()
                                 }
                             },
                             enabled = !pickingUpload,

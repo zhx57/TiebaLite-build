@@ -10,6 +10,7 @@ import com.huanchengfly.tieba.post.arch.PartialChangeProducer
 import com.huanchengfly.tieba.post.arch.UiEvent
 import com.huanchengfly.tieba.post.arch.UiIntent
 import com.huanchengfly.tieba.post.arch.UiState
+import com.huanchengfly.tieba.post.utils.AccountUtil
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
@@ -17,7 +18,9 @@ import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flatMapConcat
 import kotlinx.coroutines.flow.flow
@@ -52,46 +55,68 @@ class PrivateChatListViewModel @Inject constructor() :
         override fun toPartialChangeFlow(
             intentFlow: Flow<PrivateChatListUiIntent>,
         ): Flow<PrivateChatListPartialChange> =
-            intentFlow.filterIsInstance<PrivateChatListUiIntent.Load>()
-                .flatMapConcat { it.producePartialChange() }
+            merge(
+                intentFlow.filterIsInstance<PrivateChatListUiIntent.AccountChanged>()
+                    .map { PrivateChatListPartialChange.AccountChanged(it.accountUid) },
+                intentFlow.filterIsInstance<PrivateChatListUiIntent.Load>()
+                    .conflate()
+                    .flatMapConcat { produceLoad() },
+            )
 
-        private fun PrivateChatListUiIntent.Load.producePartialChange(): Flow<PrivateChatListPartialChange.Load> =
-            flow {
-                emit(PrivateChatListPartialChange.Load.Start)
+        private fun produceLoad(): Flow<PrivateChatListPartialChange.Load> {
+            val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: 0L
+            return flow {
+                emit(PrivateChatListPartialChange.Load.Start(accountUid))
+                check(accountUid > 0L) { "请先登录" }
                 val sessions = ImSessionApi.fetchSessions()
-                emit(PrivateChatListPartialChange.Load.Success(sessions.toSessionModels()))
+                if ((AccountUtil.getUid()?.toLongOrNull() ?: 0L) != accountUid) return@flow
+                emit(PrivateChatListPartialChange.Load.Success(sessions.toSessionModels(), accountUid))
             }.catch {
                 if (it is kotlinx.coroutines.CancellationException) throw it
-                emit(PrivateChatListPartialChange.Load.Failure(it))
+                if ((AccountUtil.getUid()?.toLongOrNull() ?: 0L) == accountUid) {
+                    emit(PrivateChatListPartialChange.Load.Failure(it, accountUid))
+                }
             }
+        }
     }
 }
 
 sealed interface PrivateChatListUiIntent : UiIntent {
     data object Load : PrivateChatListUiIntent
+    data class AccountChanged(val accountUid: Long) : PrivateChatListUiIntent
 }
 
 sealed interface PrivateChatListPartialChange : PartialChange<PrivateChatListUiState> {
+    data class AccountChanged(val accountUid: Long) : PrivateChatListPartialChange {
+        override fun reduce(oldState: PrivateChatListUiState): PrivateChatListUiState =
+            if (oldState.accountUid == accountUid) oldState
+            else PrivateChatListUiState(accountUid = accountUid)
+    }
+
     sealed class Load : PrivateChatListPartialChange {
         override fun reduce(oldState: PrivateChatListUiState): PrivateChatListUiState =
             when (this) {
-                is Start -> oldState.copy(isLoading = true)
-                // 官方 fetch_session 每次返回全量会话，这里按 peerUid 合并并保留较新的一条，
-                // 避免网络抖动时旧会话被清掉。
-                is Success -> oldState.copy(
+                is Start -> if (oldState.accountUid != accountUid)
+                    PrivateChatListUiState(isLoading = true, accountUid = accountUid)
+                else oldState.copy(isLoading = true, error = null)
+                // 按 peerUid 合并保留较新会话；同一时间的新响应更新未读数等元数据。
+                is Success -> if (oldState.accountUid != accountUid) oldState else oldState.copy(
                     isLoading = false,
                     sessions = mergeSessions(oldState.sessions, sessions),
+                    error = null,
                 )
-                is Failure -> oldState.copy(isLoading = false)
+                is Failure -> if (oldState.accountUid != accountUid) oldState
+                else oldState.copy(isLoading = false, error = error.message ?: "加载私信失败")
             }
 
-        data object Start : Load()
+        data class Start(val accountUid: Long = 0L) : Load()
 
         data class Success(
             val sessions: ImmutableList<PrivateSession>,
+            val accountUid: Long = 0L,
         ) : Load()
 
-        data class Failure(val error: Throwable) : Load()
+        data class Failure(val error: Throwable, val accountUid: Long = 0L) : Load()
     }
 }
 
@@ -106,7 +131,11 @@ private fun mergeSessions(
 ): ImmutableList<PrivateSession> =
     (current + incoming)
         .groupBy { it.peerUid }
-        .map { (_, sessions) -> sessions.maxBy { it.lastTime } }
+        .map { (_, sessions) ->
+            sessions.reduce { current, incoming ->
+                if (incoming.lastTime >= current.lastTime) incoming else current
+            }
+        }
         .sortedByDescending { it.lastTime }
         .toImmutableList()
 
@@ -127,6 +156,8 @@ data class PrivateSession(
 data class PrivateChatListUiState(
     val isLoading: Boolean = false,
     val sessions: ImmutableList<PrivateSession> = persistentListOf(),
+    val accountUid: Long = 0L,
+    val error: String? = null,
 ) : UiState
 
 sealed interface PrivateChatListUiEvent : UiEvent

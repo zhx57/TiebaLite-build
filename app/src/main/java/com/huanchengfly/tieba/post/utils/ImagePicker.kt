@@ -8,11 +8,19 @@ import android.net.Uri
 import android.os.Build
 import android.os.ext.SdkExtensions.getExtensionVersion
 import android.provider.MediaStore
-import androidx.activity.result.ActivityResultLauncher
-import androidx.activity.result.contract.ActivityResultContract
-import androidx.appcompat.app.AppCompatActivity
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import com.huanchengfly.tieba.post.App
 import com.huanchengfly.tieba.post.R
 import com.zhihu.matisse.Matisse
@@ -31,6 +39,77 @@ fun AppCompatActivity.registerPickMediasLauncher(callback: (PickMediasResult) ->
 @Composable
 fun registerPickMediasLauncher(callback: (PickMediasResult) -> Unit): ActivityResultLauncher<PickMediasRequest> =
     rememberLauncherForActivityResult(PickMediasContract, callback)
+
+// 聊天单图入口不使用旧图库，也不申请全库媒体权限。
+internal data class ChatImageResult(val uri: Uri?, val flags: Int = 0)
+
+internal object ChatImageContract : ActivityResultContract<Unit, ChatImageResult>() {
+    override fun createIntent(context: Context, input: Unit): Intent {
+        return if (!App.INSTANCE.appPreferences.doNotUsePhotoPicker &&
+            ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)
+        ) {
+            ActivityResultContracts.PickVisualMedia().createIntent(
+                context,
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        } else {
+            ActivityResultContracts.OpenDocument().createIntent(context, arrayOf("image/*"))
+        }
+    }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): ChatImageResult =
+        if (resultCode == Activity.RESULT_OK) {
+            ChatImageResult(intent?.data, intent?.flags ?: 0)
+        } else {
+            ChatImageResult(null)
+        }
+}
+
+/** 防止重复启动；取消和启动失败均以空结果结束。 */
+@Composable
+fun rememberChatImagePicker(onResult: (Uri?) -> Unit): () -> Unit {
+    val context = LocalContext.current
+    var picking by rememberSaveable { mutableStateOf(false) }
+    var pickerAccount by rememberSaveable { mutableStateOf<String?>(null) }
+    val launcher = rememberLauncherForActivityResult(ChatImageContract) { result ->
+        picking = false
+        val accountMatches = pickerAccount == AccountUtil.getUid()
+        pickerAccount = null
+        if (!accountMatches) {
+            Toast.makeText(context, "账号已切换，请重新选图", Toast.LENGTH_SHORT).show()
+            onResult(null)
+            return@rememberLauncherForActivityResult
+        }
+        result.uri?.let { uri ->
+            if (result.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0 &&
+                result.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0
+            ) {
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                } catch (_: SecurityException) {
+                    // 部分提供者只授予临时读取权限，仍可立即上传。
+                }
+            }
+        }
+        onResult(result.uri)
+    }
+    return {
+        if (!picking) {
+            picking = true
+            pickerAccount = AccountUtil.getUid()
+            try {
+                launcher.launch(Unit)
+            } catch (_: RuntimeException) {
+                picking = false
+                pickerAccount = null
+                Toast.makeText(context, "无法打开系统图片选择器，请稍后重新选图", Toast.LENGTH_SHORT).show()
+                onResult(null)
+            }
+        }
+    }
+}
 
 fun isPhotoPickerAvailable(): Boolean {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

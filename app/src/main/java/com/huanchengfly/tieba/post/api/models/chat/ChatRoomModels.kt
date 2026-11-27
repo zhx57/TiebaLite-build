@@ -16,6 +16,7 @@ data class ChatRoom(
     val avatar: String,
     val discussNum: Int,
     val announce: String,
+    val unreadNum: Int = 0,
 )
 
 data class ChatMention(

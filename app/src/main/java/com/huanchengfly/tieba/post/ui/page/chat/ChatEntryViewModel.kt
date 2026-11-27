@@ -2,6 +2,8 @@ package com.huanchengfly.tieba.post.ui.page.chat
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.snapshotFlow
+import com.huanchengfly.tieba.post.utils.AccountUtil
 import com.huanchengfly.tieba.post.api.chat.http.ChatRoomListApi
 import com.huanchengfly.tieba.post.api.models.chat.ChatRoom
 import com.huanchengfly.tieba.post.arch.BaseViewModel
@@ -19,15 +21,19 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.flatMapConcat
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 
 /**
  * 群聊列表 ViewModel。
  *
- * 官方消息中心的聊天 Tab 用 c/u/chat/getChatSubscriptionList 一次拿回用户加入的全部群，
- * 不需要先选贴吧再按 fid 拉。这里对齐官方，直接拉全量群列表。
+ * 订阅群先展示，关注贴吧的公开群逐批补充；刷新和失败期间保留已有群。
  */
 @Stable
 @HiltViewModel
@@ -51,17 +57,33 @@ class ChatEntryViewModel @Inject constructor() :
         override fun toPartialChangeFlow(
             intentFlow: Flow<ChatEntryUiIntent>,
         ): Flow<ChatEntryPartialChange> =
-            intentFlow.filterIsInstance<ChatEntryUiIntent.Load>()
-                .flatMapConcat { it.producePartialChange() }
+            merge(
+                intentFlow.filterIsInstance<ChatEntryUiIntent.Load>(),
+                snapshotFlow { AccountUtil.getUid() }.distinctUntilChanged().drop(1)
+                    .map { ChatEntryUiIntent.Load },
+            ).flatMapLatest { it.producePartialChange() }
 
         private fun ChatEntryUiIntent.Load.producePartialChange(): Flow<ChatEntryPartialChange.Load> =
             flow {
-                emit(ChatEntryPartialChange.Load.Start)
-                val rooms = ChatRoomListApi.fetchAllRooms()
-                emit(ChatEntryPartialChange.Load.Success(rooms.toImmutableList()))
-            }.catch {
-                if (it is kotlinx.coroutines.CancellationException) throw it
-                emit(ChatEntryPartialChange.Load.Failure(it))
+                val uid = AccountUtil.getUid()
+                emit(ChatEntryPartialChange.Load.Start(uid))
+                if (uid == null) {
+                    emit(ChatEntryPartialChange.Load.Update(persistentListOf(), true, accountUid = uid))
+                    return@flow
+                }
+                ChatRoomListApi.fetchAllRooms().catch { e ->
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    emit(ChatRoomListApi.RoomListUpdate(emptyList(), true, e, 1))
+                }.collect { update ->
+                    if (AccountUtil.getUid() != uid) {
+                        emit(ChatEntryPartialChange.Load.Start(AccountUtil.getUid()))
+                        throw kotlinx.coroutines.CancellationException("账号已切换")
+                    }
+                    emit(ChatEntryPartialChange.Load.Update(
+                        update.rooms.toImmutableList(), update.isComplete,
+                        update.error, update.failedCount, uid,
+                    ))
+                }
             }
     }
 }
@@ -74,18 +96,36 @@ sealed interface ChatEntryPartialChange : PartialChange<ChatEntryUiState> {
     sealed class Load : ChatEntryPartialChange {
         override fun reduce(oldState: ChatEntryUiState): ChatEntryUiState =
             when (this) {
-                is Start -> oldState.copy(isLoading = true)
-                is Success -> oldState.copy(isLoading = false, rooms = rooms)
-                is Failure -> oldState.copy(isLoading = false)
+                is Start -> if (oldState.accountUid == accountUid) {
+                    oldState.copy(isLoading = true, error = null, failedCount = 0)
+                } else ChatEntryUiState(isLoading = true, accountUid = accountUid)
+                is Update -> if (oldState.accountUid != accountUid) oldState else oldState.copy(
+                    isLoading = !isComplete,
+                    hasLoaded = oldState.hasLoaded || isComplete,
+                    rooms = when {
+                        error != null || !isComplete ->
+                            ChatRoomListApi.mergeRooms(rooms, oldState.rooms).toImmutableList()
+                        else -> rooms
+                    },
+                    error = error,
+                    failedCount = failedCount,
+                )
+                is Failure -> if (oldState.accountUid != accountUid) oldState else oldState.copy(
+                    isLoading = false, hasLoaded = true, error = error, failedCount = 1,
+                )
             }
 
-        data object Start : Load()
+        data class Start(val accountUid: String?) : Load()
 
-        data class Success(
+        data class Update(
             val rooms: ImmutableList<ChatRoom>,
+            val isComplete: Boolean,
+            val error: Throwable? = null,
+            val failedCount: Int = 0,
+            val accountUid: String?,
         ) : Load()
 
-        data class Failure(val error: Throwable) : Load()
+        data class Failure(val error: Throwable, val accountUid: String?) : Load()
     }
 }
 
@@ -93,6 +133,10 @@ sealed interface ChatEntryPartialChange : PartialChange<ChatEntryUiState> {
 data class ChatEntryUiState(
     val isLoading: Boolean = false,
     val rooms: ImmutableList<ChatRoom> = persistentListOf(),
+    val hasLoaded: Boolean = false,
+    val error: Throwable? = null,
+    val failedCount: Int = 0,
+    val accountUid: String? = null,
 ) : UiState
 
 sealed interface ChatEntryUiEvent : UiEvent
