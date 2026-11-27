@@ -21,6 +21,7 @@ import androidx.compose.material.Text
 import androidx.compose.material.TextButton
 import androidx.compose.material.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,7 +54,6 @@ import com.huanchengfly.tieba.post.ui.page.ProvideNavigator
 import com.huanchengfly.tieba.post.ui.page.destinations.UserProfilePageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.BackNavigationIcon
 import com.huanchengfly.tieba.post.ui.widgets.compose.ConfirmDialog
-import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoad
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyLazyColumn
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyScaffold
 import com.huanchengfly.tieba.post.ui.widgets.compose.TitleCentredToolbar
@@ -92,12 +92,16 @@ fun ChatRoomPage(
     viewModel: ChatRoomViewModel = pageViewModel(),
 ) {
     val context = LocalContext.current
-    DisposableEffect(viewModel, roomId) {
-        onDispose { viewModel.closeSendSession() }
+    val account = LocalAccount.current
+    val accountUid = account?.uid?.toLongOrNull() ?: 0L
+    DisposableEffect(viewModel, roomId, accountUid) {
+        onDispose {
+            viewModel.closeSendSession()
+            viewModel.send(ChatRoomUiIntent.Stop(roomId, accountUid))
+        }
     }
-    LazyLoad(loaded = viewModel.initialized) {
-        viewModel.send(ChatRoomUiIntent.Load(roomId))
-        viewModel.initialized = true
+    LaunchedEffect(viewModel, roomId, accountUid) {
+        viewModel.send(ChatRoomUiIntent.Load(roomId, accountUid, roomName, fid, account?.bduss.orEmpty()))
     }
 
     val isLoading by viewModel.uiState.collectPartialAsState(
@@ -129,10 +133,27 @@ fun ChatRoomPage(
     val sendRequestId by viewModel.uiState.collectPartialAsState(
         prop1 = ChatRoomUiState::sendRequestId, initial = 0L,
     )
-    val account = LocalAccount.current
+    val chatState by viewModel.uiState.collectAsState()
+    fun canSend(): Boolean = viewModel.uiState.value.let {
+        it.ready && it.sessionToken == chatState.sessionToken && accountUid > 0 &&
+            it.accountUid == accountUid && it.roomId == roomId &&
+            com.huanchengfly.tieba.post.utils.AccountUtil.getUid()?.toLongOrNull() == accountUid
+    }
+    var pendingDraftId by rememberSaveable(roomId, accountUid) { mutableStateOf<String?>(null) }
+    var pendingDraftText by rememberSaveable(roomId, accountUid) { mutableStateOf("") }
+    val composerEnabled = chatState.ready && chatState.accountUid == accountUid &&
+        chatState.roomId == roomId && accountUid > 0 && pendingDraftId == null
+    var photoSession by rememberSaveable { mutableStateOf<String?>(null) }
+    var photoRoom by rememberSaveable { mutableStateOf<Long?>(null) }
+    var photoAccount by rememberSaveable { mutableStateOf<Long?>(null) }
     val pickPhoto = rememberChatImagePicker { uri ->
         val acc = account
-        if (uri != null && acc != null) {
+        val matches = photoSession == viewModel.uiState.value.sessionToken &&
+            photoRoom == roomId && photoAccount == accountUid
+        photoSession = null
+        photoRoom = null
+        photoAccount = null
+        if (uri != null && acc != null && matches && canSend()) {
             viewModel.send(ChatRoomUiIntent.Send(
                 roomId = roomId,
                 text = "",
@@ -143,24 +164,43 @@ fun ChatRoomPage(
                 selfUid = acc.uid.toLongOrNull() ?: 0L,
                 cuidGalaxy2 = CuidUtils.getNewCuid(),
                 photoUri = uri,
+                sessionToken = chatState.sessionToken,
             ))
         }
     }
-    var input by rememberSaveable(roomId, stateSaver = TextFieldValue.Saver) {
+    var input by rememberSaveable(roomId, accountUid, stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue())
     }
-    var mentions by rememberSaveable(roomId, stateSaver = ChatMentionsSaver) {
+    var mentions by rememberSaveable(roomId, accountUid, stateSaver = ChatMentionsSaver) {
         mutableStateOf(emptyList<ChatMention>())
     }
-    var robotSkill by rememberSaveable(roomId) { mutableStateOf<Int?>(null) }
-    var robotTargetUk by rememberSaveable(roomId) { mutableStateOf<String?>(null) }
-    var robotCommandName by rememberSaveable(roomId) { mutableStateOf("") }
+    var robotSkill by rememberSaveable(roomId, accountUid) { mutableStateOf<Int?>(null) }
+    var robotTargetUk by rememberSaveable(roomId, accountUid) { mutableStateOf<String?>(null) }
+    var robotCommandName by rememberSaveable(roomId, accountUid) { mutableStateOf("") }
     var picker by remember { mutableStateOf<String?>(null) }
     var showEmoticonPanel by remember { mutableStateOf(false) }
-    var resendTarget by remember { mutableStateOf<ChatRoomMessage?>(null) }
+    var resendTarget by remember(roomId, accountUid) { mutableStateOf<ChatRoomMessage?>(null) }
+    LaunchedEffect(chatState.completedDraftId, chatState.sessionToken, chatState.ready) {
+        if (pendingDraftId == chatState.completedDraftId && chatState.accountUid == accountUid &&
+            chatState.roomId == roomId) {
+            if (chatState.draftPersisted && input.text == pendingDraftText) {
+                input = TextFieldValue()
+                mentions = emptyList()
+                robotSkill = null
+                robotTargetUk = null
+                robotCommandName = ""
+            }
+            pendingDraftId = null
+        } else if (!chatState.ready) {
+            pendingDraftId = null
+        }
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, roomId, accountUid) {
         val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_STOP) {
+                viewModel.send(ChatRoomUiIntent.Visibility(roomId, accountUid, event == Lifecycle.Event.ON_START))
+            }
             if (event == Lifecycle.Event.ON_STOP) {
                 showEmoticonPanel = false
                 picker = null
@@ -204,7 +244,7 @@ fun ChatRoomPage(
         mentions = (mentions + user).distinctBy { it.baiduUk }
     }
 
-    LaunchedEffect(roomId) { viewModel.send(ChatRoomUiIntent.LoadRobots(roomId)) }
+    LaunchedEffect(roomId, accountUid) { viewModel.send(ChatRoomUiIntent.LoadRobots(roomId)) }
 
     val listState = rememberLazyListState()
     // 倒序数据：index 0 是最新消息，贴在底部
@@ -213,11 +253,11 @@ fun ChatRoomPage(
     FollowLatestChatMessage(listState, roomId, sendRequestId)
 
     // 首次 Load 已经负责当前页，仅在页面可见时按固定间隔触发后续轮询。
-    LaunchedEffect(roomId, viewModel, lifecycleOwner) {
+    LaunchedEffect(roomId, accountUid, viewModel, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 delay(2_000)
-                viewModel.send(ChatRoomUiIntent.Poll(roomId))
+                viewModel.send(ChatRoomUiIntent.Poll(roomId, accountUid))
             }
         }
     }
@@ -225,7 +265,7 @@ fun ChatRoomPage(
     // 滑到视觉顶部时加载更早消息。
     // 把 hasMore / isLoadingMore / 消息数都纳入 snapshotFlow 的输入，
     // 这样加载完成后若仍停在顶部会自动继续取下一页，不会出现"划到顶不加载"。
-    LaunchedEffect(Unit) {
+    LaunchedEffect(roomId, accountUid) {
         snapshotFlow {
             val info = listState.layoutInfo
             LoadMoreSignal(
@@ -242,7 +282,7 @@ fun ChatRoomPage(
                 if (signal.total > 0 && signal.lastVisible >= signal.total - 2 &&
                     signal.oldestMsgId != 0L
                 ) {
-                    viewModel.send(ChatRoomUiIntent.LoadMore(roomId, signal.oldestMsgId))
+                    viewModel.send(ChatRoomUiIntent.LoadMore(roomId, signal.oldestMsgId, accountUid))
                 }
             }
     }
@@ -253,7 +293,7 @@ fun ChatRoomPage(
         onConfirm = {
             val target = resendTarget
             val acc = account
-            if (target != null && acc != null) {
+            if (target != null && acc != null && canSend() && target.senderUid == accountUid) {
                 viewModel.send(
                     ChatRoomUiIntent.Resend(
                         roomId = roomId,
@@ -280,7 +320,10 @@ fun ChatRoomPage(
         cancelText = stringResource(id = R.string.button_cancel),
     ) {
         Column {
-            resendTarget?.sendError?.let { Text(it, color = MaterialTheme.colors.error) }
+            val retryWarning = resendTarget?.sendError ?: if (
+                resendTarget?.sendState == com.huanchengfly.tieba.post.api.models.chat.SendState.UNKNOWN
+            ) UNCONFIRMED_SEND_MESSAGE else null
+            retryWarning?.let { Text(it, color = MaterialTheme.colors.error) }
             if (resendTarget?.localPhotoUri != null && resendTarget?.cloudMeme?.uploadedImageUrl == null) {
                 Text("若图片授权已失效，请取消重发并重新选图")
             }
@@ -327,6 +370,7 @@ fun ChatRoomPage(
                     Column {
                         ChatComposer(
                             value = input,
+                            enabled = composerEnabled,
                             onValueChange = { value ->
                                 val insertedAt = value.composition == null &&
                                     value.text.length > input.text.length &&
@@ -337,7 +381,10 @@ fun ChatRoomPage(
                             },
                             onSend = {
                                 val text = input.text.trim()
-                                if (text.isNotEmpty()) {
+                                if (text.isNotEmpty() && canSend() && pendingDraftId == null) {
+                                    val draftId = java.util.UUID.randomUUID().toString()
+                                    pendingDraftId = draftId
+                                    pendingDraftText = input.text
                                     viewModel.send(
                                         ChatRoomUiIntent.Send(
                                             roomId = roomId,
@@ -352,23 +399,27 @@ fun ChatRoomPage(
                                                 mentions.sortedBy { it.baiduUk != robotTargetUk }
                                             } else mentions,
                                             robotSkill = robotSkill,
+                                            draftId = draftId,
+                                            sessionToken = chatState.sessionToken,
                                         )
                                     )
-                                    input = TextFieldValue()
-                                    mentions = emptyList()
-                                    robotSkill = null
-                                    robotTargetUk = null
-                                    robotCommandName = ""
                                 }
                             },
                             showEmoticonPanel = showEmoticonPanel,
                             onToggleEmoticonPanel = { showEmoticonPanel = !showEmoticonPanel },
                             onDismissEmoticonPanel = { showEmoticonPanel = false },
-                            onPhotoClick = pickPhoto,
+                            onPhotoClick = {
+                                if (canSend()) {
+                                    photoSession = viewModel.uiState.value.sessionToken
+                                    photoRoom = roomId
+                                    photoAccount = accountUid
+                                    pickPhoto()
+                                }
+                            },
                             onMentionClick = { picker = "mention" },
                             onRobotClick = { picker = "robot" },
                             onCloudMemeClick = { meme ->
-                                viewModel.send(ChatRoomUiIntent.Send(
+                                if (canSend()) viewModel.send(ChatRoomUiIntent.Send(
                                     roomId = roomId,
                                     text = "",
                                     forumId = fid,
@@ -378,6 +429,7 @@ fun ChatRoomPage(
                                     selfUid = account.uid.toLongOrNull() ?: 0L,
                                     cuidGalaxy2 = CuidUtils.getNewCuid(),
                                     cloudMeme = meme,
+                                    sessionToken = chatState.sessionToken,
                                 ))
                             },
                             robotCommandName = robotCommandName.takeIf { robotSkill != null },

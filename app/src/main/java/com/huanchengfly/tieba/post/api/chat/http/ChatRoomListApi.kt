@@ -62,6 +62,10 @@ object ChatRoomListApi {
     internal fun mergeRooms(preferred: List<ChatRoom>, discovered: List<ChatRoom>): List<ChatRoom> =
         (preferred + discovered).distinctBy { it.roomId }
 
+    internal fun takeUnseenForumIds(ids: List<String>, seenForums: MutableSet<Long>): List<Long> =
+        ids.mapNotNull { it.toLongOrNull()?.takeIf { fid -> fid > 0 } }
+            .filter { seenForums.add(it) }
+
     /** 关注贴吧列表最多翻页数，防止异常 has_more 导致死循环。 */
     private const val MAX_FORUM_PAGES = 50
 
@@ -100,54 +104,64 @@ object ChatRoomListApi {
         recordFailure { rooms = fetchSubscriptionRooms() }
         emit(RoomListUpdate(rooms, error = error, failedCount = failedCount))
         val seenForums = mutableSetOf<Long>()
+        suspend fun scanForums(forumIds: List<String>) {
+            val ids = takeUnseenForumIds(forumIds, seenForums)
+            for (batch in ids.chunked(MAX_FALLBACK_CONCURRENCY)) {
+                val results = coroutineScope {
+                    batch.map { fid ->
+                        async {
+                            try {
+                                Result.success(fetchPublicRoomsByFid(fid))
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Result.failure<List<ChatRoom>>(e)
+                            }
+                        }
+                    }.awaitAll()
+                }
+                results.forEach { result ->
+                    result.fold(
+                        onSuccess = { rooms = mergeRooms(rooms, it) },
+                        onFailure = { failedCount++; if (error == null) error = it },
+                    )
+                }
+                emit(RoomListUpdate(rooms, error = error, failedCount = failedCount))
+            }
+        }
+        var initialForumIds = emptyList<String>()
+        recordFailure {
+            val bean = withTimeoutOrNull(30_000L) {
+                TiebaApi.getInstance().getForumListFlow().first()
+            } ?: throw ChatApiException(-1, "关注吧首批请求超时")
+            initialForumIds = bean.forumInfo.map { it.forumId }
+        }
+        scanForums(initialForumIds)
         val uid = AccountUtil.getUid()?.takeIf { it.isNotBlank() }
         if (uid != null) {
-                var page = 1
-                while (page <= MAX_FORUM_PAGES) {
-                    val pageResult = runCatching {
-                        withTimeoutOrNull(30_000L) {
-                            TiebaApi.getInstance().userLikeForumFlow(uid, page).first()
-                        } ?: throw ChatApiException(-1, "关注吧请求超时")
-                    }.onFailure { if (it is CancellationException) throw it }
-                    if (pageResult.isFailure) {
-                        failedCount++
-                        if (error == null) error = pageResult.exceptionOrNull()
-                        break
-                    }
-                    val bean = pageResult.getOrThrow()
-                    val forums = bean.forumList.forumList + bean.forumList.gconForumList
-                    val ids = forums.mapNotNull { it.id.toLongOrNull()?.takeIf { fid -> fid > 0 } }
-                        .filter { seenForums.add(it) }
-                    for (batch in ids.chunked(MAX_FALLBACK_CONCURRENCY)) {
-                        val results = coroutineScope {
-                            batch.map { fid ->
-                                async {
-                                    try {
-                                        Result.success(fetchPublicRoomsByFid(fid))
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (e: Exception) {
-                                        Result.failure<List<ChatRoom>>(e)
-                                    }
-                                }
-                            }.awaitAll()
-                        }
-                        results.forEach { result ->
-                            result.fold(
-                                onSuccess = { rooms = mergeRooms(rooms, it) },
-                                onFailure = { failedCount++; if (error == null) error = it },
-                            )
-                        }
-                        emit(RoomListUpdate(rooms, error = error, failedCount = failedCount))
-                    }
-                    if (bean.hasMore != "1") break
-                    if (forums.isEmpty() || page == MAX_FORUM_PAGES) {
-                        failedCount++
-                        if (error == null) error = ChatApiException(-1, "关注吧分页未完整返回，请重试")
-                        break
-                    }
-                    page++
+            var page = 1
+            while (page <= MAX_FORUM_PAGES) {
+                val pageResult = runCatching {
+                    withTimeoutOrNull(30_000L) {
+                        TiebaApi.getInstance().userLikeForumFlow(uid, page).first()
+                    } ?: throw ChatApiException(-1, "关注吧请求超时")
+                }.onFailure { if (it is CancellationException) throw it }
+                if (pageResult.isFailure) {
+                    failedCount++
+                    if (error == null) error = pageResult.exceptionOrNull()
+                    break
                 }
+                val bean = pageResult.getOrThrow()
+                val forums = bean.forumList.forumList + bean.forumList.gconForumList
+                scanForums(forums.map { it.id })
+                if (bean.hasMore != "1") break
+                if (forums.isEmpty() || page == MAX_FORUM_PAGES) {
+                    failedCount++
+                    if (error == null) error = ChatApiException(-1, "关注吧分页未完整返回，请重试")
+                    break
+                }
+                page++
+            }
         }
         emit(RoomListUpdate(rooms, isComplete = true, error = error, failedCount = failedCount))
     }.flowOn(Dispatchers.IO)
@@ -288,7 +302,7 @@ object ChatRoomListApi {
         val rooms = mutableListOf<ChatRoom>()
         for (i in 0 until list.length()) {
             val group = list.optJSONObject(i) ?: continue
-            rooms += parseRoomList(group.readOptionalArray("room_list"), fid, filterHidden = false)
+            rooms += parseRoomList(group.optJSONArray("room_list"), fid, filterHidden = false)
         }
         return rooms
     }

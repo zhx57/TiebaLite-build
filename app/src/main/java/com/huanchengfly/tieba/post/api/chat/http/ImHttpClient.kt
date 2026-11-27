@@ -88,9 +88,12 @@ object ImHttpClient {
      * @param path 接口路径，例如 fetch_session。
      * @param params 业务参数，会与公共参数合并后一起签名。
      */
-    suspend fun post(path: String, params: Map<String, Any> = emptyMap()): JSONObject =
-        withContext(Dispatchers.IO) {
-            val bduss = AccountUtil.getBduss().orEmpty()
+    suspend fun post(
+        path: String,
+        params: Map<String, Any> = emptyMap(),
+        accountBduss: String = AccountUtil.getBduss().orEmpty(),
+    ): JSONObject = withContext(Dispatchers.IO) {
+            val bduss = accountBduss
             val body = commonParams().apply { putAll(params) }
             body.put("sign", sign(body))
             val request = Request.Builder()
@@ -101,10 +104,10 @@ object ImHttpClient {
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    throw ImHttpException(response.code, "HTTP ${response.code}")
+                    throw ImHttpTransportException("HTTP ${response.code}")
                 }
                 runCatching { JSONObject(text) }
-                    .getOrElse { throw ImHttpException(response.code, "响应不是合法 JSON") }
+                    .getOrElse { throw ImHttpTransportException("响应不是合法 JSON", it) }
             }
         }
 
@@ -139,6 +142,9 @@ object ImHttpClient {
 
 /** IM HTTP 接口异常。 */
 class ImHttpException(val code: Int, message: String) : Exception(message)
+
+class ImHttpTransportException(message: String, cause: Throwable? = null) :
+    java.io.IOException(message, cause)
 
 /** IM 接口用到的常量。 */
 object ImHttpConstants {

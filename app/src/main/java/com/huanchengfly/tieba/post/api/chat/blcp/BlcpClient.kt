@@ -229,7 +229,8 @@ class BlcpClient {
         // RPC 无错只代表传输已接收，仍需检查业务回包。
         val rpcError = response.meta.response?.error_code ?: 0
         if (rpcError != 0) {
-            throw IllegalStateException(
+            throw BlcpBusinessException(
+                rpcError,
                 "send group message failed: RPC $rpcError ${response.meta.response?.error_text.orEmpty()}"
             )
         }
@@ -378,11 +379,13 @@ class BlcpClient {
         val errCode = payload.opt("err_code")?.toString()?.toIntOrNull()
             ?: throw IllegalStateException("$scene failed: business err_code missing or invalid")
         if (errCode != 0) {
-            throw IllegalStateException("$scene failed: $errCode ${payload.optString("msg")}")
+            throw BlcpBusinessException(errCode, "$scene failed: $errCode ${payload.optString("msg")}")
         }
         return payload
     }
 }
+
+class BlcpBusinessException(val code: Int, message: String) : IllegalStateException(message)
 
 /**
  * IM 登录后拿到的聊天身份。

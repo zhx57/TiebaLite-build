@@ -9,6 +9,9 @@ import androidx.compose.material.Tab
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.runtime.LaunchedEffect
+import com.huanchengfly.tieba.post.ui.page.destinations.ChatEntryPageDestination
+import com.huanchengfly.tieba.post.ui.page.destinations.ConversationsPageDestination
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -21,8 +24,6 @@ import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.page.LocalNavigator
 import com.huanchengfly.tieba.post.ui.page.ProvideNavigator
 import com.huanchengfly.tieba.post.ui.page.destinations.SearchPageDestination
-import com.huanchengfly.tieba.post.ui.page.chat.ChatEntryPage
-import com.huanchengfly.tieba.post.ui.page.chat.PrivateChatListPage
 import com.huanchengfly.tieba.post.ui.page.main.notifications.list.NotificationsListPage
 import com.huanchengfly.tieba.post.ui.page.main.notifications.list.NotificationsType
 import com.huanchengfly.tieba.post.ui.widgets.compose.ActionItem
@@ -39,6 +40,16 @@ import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.coroutines.launch
 
+@Composable
+private fun RedirectLegacyChatTab(initialTab: Int, navigator: DestinationsNavigator) {
+    LaunchedEffect(initialTab) {
+        when (initialTab) {
+            2 -> navigator.navigate(ConversationsPageDestination)
+            3 -> navigator.navigate(ChatEntryPageDestination)
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Destination(
     deepLinks = [
@@ -50,22 +61,17 @@ fun NotificationsPage(
     navigator: DestinationsNavigator,
     initialTab: Int = 0,
 ) {
+    RedirectLegacyChatTab(initialTab, navigator)
     val pages = listOf<Pair<String, (@Composable () -> Unit)>>(
         stringResource(id = R.string.title_reply_me) to @Composable {
             NotificationsListPage(type = NotificationsType.ReplyMe)
         },
         stringResource(id = R.string.title_at_me) to @Composable {
             NotificationsListPage(type = NotificationsType.AtMe)
-        },
-        stringResource(id = R.string.title_private_chat) to @Composable {
-            PrivateChatListPage()
-        },
-        stringResource(id = R.string.title_chat_rooms) to @Composable {
-            ChatEntryPage()
         }
     )
     val pagerState = rememberPagerState(
-        initialPage = initialTab,
+        initialPage = initialTab.coerceIn(0, pages.lastIndex),
     ) { pages.size }
     val coroutineScope = rememberCoroutineScope()
     ProvideNavigator(navigator = navigator) {
@@ -130,22 +136,17 @@ fun NotificationsPage(
     initialTab: Int = 0,
 ) {
     val navigator = LocalNavigator.current
+    RedirectLegacyChatTab(initialTab, navigator)
     val pages = listOf<Pair<String, (@Composable () -> Unit)>>(
         stringResource(id = R.string.title_reply_me) to @Composable {
             NotificationsListPage(type = NotificationsType.ReplyMe)
         },
         stringResource(id = R.string.title_at_me) to @Composable {
             NotificationsListPage(type = NotificationsType.AtMe)
-        },
-        stringResource(id = R.string.title_private_chat) to @Composable {
-            PrivateChatListPage()
-        },
-        stringResource(id = R.string.title_chat_rooms) to @Composable {
-            ChatEntryPage()
         }
     )
     val pagerState = rememberPagerState(
-        initialPage = initialTab,
+        initialPage = initialTab.coerceIn(0, pages.lastIndex),
     ) { pages.size }
     val coroutineScope = rememberCoroutineScope()
     Scaffold(

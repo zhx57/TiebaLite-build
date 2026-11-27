@@ -17,6 +17,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.clickable
+import com.huanchengfly.tieba.post.api.models.chat.SendState
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -43,6 +49,7 @@ import com.huanchengfly.tieba.post.ui.widgets.compose.MyScaffold
 import com.huanchengfly.tieba.post.ui.widgets.compose.TitleCentredToolbar
 import com.huanchengfly.tieba.post.ui.widgets.compose.rememberDialogState
 import com.huanchengfly.tieba.post.utils.Emoticon
+import com.huanchengfly.tieba.post.utils.AccountUtil.LocalAccount
 import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlinx.collections.immutable.persistentListOf
@@ -63,27 +70,52 @@ fun PrivateChatPage(
     viewModel: PrivateChatViewModel = pageViewModel(),
 ) {
     val context = LocalContext.current
+    val accountUid = LocalAccount.current?.uid?.toLongOrNull() ?: 0L
+    val stateAccountUid by viewModel.uiState.collectPartialAsState(
+        prop1 = PrivateChatUiState::accountUid, initial = 0L,
+    )
+    var photoAccountUid by remember { mutableStateOf(0L) }
     val pickPhoto = rememberChatImagePicker { result ->
         result?.let { uri ->
-            viewModel.send(PrivateChatUiIntent.Send(peerUid, "", photoUri = uri))
+            if (photoAccountUid == accountUid && accountUid > 0L &&
+                com.huanchengfly.tieba.post.utils.AccountUtil.getUid()?.toLongOrNull() == accountUid
+            ) viewModel.send(PrivateChatUiIntent.Send(peerUid, "", photoUri = uri, accountUid = accountUid))
         }
     }
     val isLoading by viewModel.uiState.collectPartialAsState(
         prop1 = PrivateChatUiState::isLoading,
         initial = true,
     )
-    val messages by viewModel.uiState.collectPartialAsState(
+    val storedMessages by viewModel.uiState.collectPartialAsState(
         prop1 = PrivateChatUiState::messages,
         initial = persistentListOf(),
     )
 
-    var input by rememberSaveable(peerUid, stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue())
+    val messages = if (stateAccountUid == accountUid && accountUid > 0L) storedMessages else persistentListOf()
+
+    var drafts by rememberSaveable { mutableStateOf(hashMapOf<String, String>()) }
+    val draftKey = "$accountUid:$peerUid"
+    var input by rememberSaveable(peerUid, accountUid, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(drafts[draftKey].orEmpty()))
+    }
+    var draftId by rememberSaveable(peerUid, accountUid) { mutableStateOf(java.util.UUID.randomUUID().toString()) }
+    fun updateInput(value: TextFieldValue) {
+        input = value
+        drafts = HashMap(drafts).apply { put(draftKey, value.text) }
+        draftId = java.util.UUID.randomUUID().toString()
+    }
+    val acceptedDraftId by viewModel.uiState.collectPartialAsState(
+        prop1 = PrivateChatUiState::acceptedDraftId, initial = null,
+    )
+    LaunchedEffect(acceptedDraftId, accountUid, stateAccountUid) {
+        if (accountUid > 0L && stateAccountUid == accountUid && acceptedDraftId == draftId) {
+            updateInput(TextFieldValue())
+        }
     }
     var showEmoticonPanel by remember { mutableStateOf(false) }
-    var resendTarget by remember { mutableStateOf<ChatWsMessage?>(null) }
+    var resendTarget by remember(peerUid, accountUid) { mutableStateOf<ChatWsMessage?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, viewModel, peerUid, accountUid) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
                 showEmoticonPanel = false
@@ -93,11 +125,23 @@ fun PrivateChatPage(
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             showEmoticonPanel = false
+            viewModel.send(PrivateChatUiIntent.Stop(peerUid, accountUid))
         }
     }
 
     val listState = rememberLazyListState()
     val reversedMessages = remember(messages) { messages.asReversed() }
+    val historyLimit by viewModel.uiState.collectPartialAsState(
+        prop1 = PrivateChatUiState::historyLimit, initial = 60,
+    )
+    LaunchedEffect(listState, peerUid, historyLimit, messages.size) {
+        snapshotFlow {
+            listState.isScrollInProgress && messages.size >= historyLimit &&
+                listState.layoutInfo.visibleItemsInfo.any { it.index >= messages.lastIndex }
+        }.distinctUntilChanged().filter { it }.collect {
+            viewModel.send(PrivateChatUiIntent.LoadMore(peerUid, historyLimit, accountUid = accountUid))
+        }
+    }
 
     val sendRequestId by viewModel.uiState.collectPartialAsState(
         prop1 = PrivateChatUiState::sendRequestId, initial = 0L,
@@ -105,17 +149,17 @@ fun PrivateChatPage(
     FollowLatestChatMessage(listState, peerUid, sendRequestId)
 
     // 可见时通过 HTTP 每 5 秒轮询，回到页面立即补拉。
-    LaunchedEffect(peerUid, viewModel, lifecycleOwner) {
+    LaunchedEffect(peerUid, accountUid, viewModel, lifecycleOwner) {
+        if (accountUid <= 0L) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            if (!viewModel.initialized) {
-                viewModel.send(PrivateChatUiIntent.Load(peerUid))
-                viewModel.initialized = true
-            } else {
-                viewModel.send(PrivateChatUiIntent.Poll(peerUid))
-            }
-            while (true) {
-                delay(5_000)
-                viewModel.send(PrivateChatUiIntent.Poll(peerUid))
+            try {
+                viewModel.send(PrivateChatUiIntent.Load(peerUid, peerName, peerPortrait, accountUid))
+                while (true) {
+                    delay(5_000)
+                    viewModel.send(PrivateChatUiIntent.Poll(peerUid, accountUid = accountUid))
+                }
+            } finally {
+                viewModel.send(PrivateChatUiIntent.Stop(peerUid, accountUid))
             }
         }
     }
@@ -133,6 +177,7 @@ fun PrivateChatPage(
                         cloudMeme = target.cloudMeme,
                         photoUri = target.localPhotoUri?.takeIf { target.cloudMeme?.uploadedImageUrl == null }
                             ?.let(android.net.Uri::parse),
+                        accountUid = accountUid,
                     )
                 )
             }
@@ -143,6 +188,10 @@ fun PrivateChatPage(
         cancelText = stringResource(id = R.string.button_cancel),
     ) {
         Column {
+            if (resendTarget?.sendState == SendState.UNKNOWN) {
+                Text("发送结果未确认，对方可能已收到。继续重试可能产生重复消息。")
+            }
+            resendTarget?.sendError?.takeIf { it.isNotBlank() }?.let { Text(it) }
             if (resendTarget?.localPhotoUri != null && resendTarget?.cloudMeme?.uploadedImageUrl == null) {
                 Text("若图片授权已失效，请取消重发并重新选图")
             }
@@ -164,12 +213,11 @@ fun PrivateChatPage(
             bottomBar = {
                 ChatComposer(
                     value = input,
-                    onValueChange = { input = it },
+                    onValueChange = { updateInput(it) },
                     onSend = {
                         val text = input.text.trim()
                         if (text.isNotEmpty()) {
-                            viewModel.send(PrivateChatUiIntent.Send(peerUid, text))
-                            input = TextFieldValue()
+                            viewModel.send(PrivateChatUiIntent.Send(peerUid, text, draftId = draftId, accountUid = accountUid))
                         }
                     },
                     showEmoticonPanel = showEmoticonPanel,
@@ -177,16 +225,19 @@ fun PrivateChatPage(
                     onEmoticonClick = { emoticon: Emoticon ->
                         val token = "#(${emoticon.name})"
                         val selection = input.selection
-                        input = TextFieldValue(
+                        updateInput(TextFieldValue(
                             text = input.text.replaceRange(selection.min, selection.max, token),
                             selection = TextRange(selection.min + token.length),
                             composition = null,
-                        )
+                        ))
                     },
                     onDismissEmoticonPanel = { showEmoticonPanel = false },
-                    onPhotoClick = pickPhoto,
+                    onPhotoClick = {
+                        photoAccountUid = accountUid
+                        pickPhoto()
+                    },
                     onCloudMemeClick = { meme ->
-                        viewModel.send(PrivateChatUiIntent.Send(peerUid, "", cloudMeme = meme))
+                        viewModel.send(PrivateChatUiIntent.Send(peerUid, "", cloudMeme = meme, accountUid = accountUid))
                     },
                 )
             },
@@ -200,7 +251,7 @@ fun PrivateChatPage(
                 ) {
                     items(
                         items = reversedMessages,
-                        key = { "${it.msgId}_${it.peerUid}" },
+                        key = { it.localId.ifBlank { "${it.msgId}_${it.peerUid}" } },
                     ) { message ->
                         ChatMessageRow(
                             text = message.content,
@@ -219,6 +270,14 @@ fun PrivateChatPage(
                                 if (message.peerUid > 0L) {
                                     navigateToUserProfile(navigator, message.peerUid)
                                 }
+                            },
+                        )
+                    }
+                    item(key = "private_history_more") {
+                        Text(
+                            text = "加载更早消息",
+                            modifier = Modifier.padding(16.dp).clickable {
+                                viewModel.send(PrivateChatUiIntent.LoadMore(peerUid, historyLimit, accountUid = accountUid))
                             },
                         )
                     }

@@ -16,6 +16,11 @@ import androidx.core.app.NotificationCompat
 import com.huanchengfly.tieba.post.R
 import com.huanchengfly.tieba.post.api.TiebaApi
 import com.huanchengfly.tieba.post.api.chat.http.ImSessionApi
+import com.huanchengfly.tieba.post.api.chat.http.ImMessageApi
+import com.huanchengfly.tieba.post.repository.ChatHistoryEntryPoint
+import com.huanchengfly.tieba.post.repository.ChatHistoryRepository
+import dagger.hilt.android.EntryPointAccessors
+import kotlinx.coroutines.flow.first
 import com.huanchengfly.tieba.post.api.models.MsgBean
 import com.huanchengfly.tieba.post.pendingIntentFlagImmutable
 import com.huanchengfly.tieba.post.ui.common.theme.utils.ThemeUtils
@@ -205,13 +210,56 @@ class NotifyJobService : JobService() {
                 // 官方消息中心本身就是 fetch_session 驱动的，未读数直接取自会话列表，
                 // 不再依赖长连接逐条比对消息游标。
                 val accountUid = AccountUtil.getUid()?.toLongOrNull() ?: return
-                val accountToken = AccountUtil.getBduss()
-                val sessions = ImSessionApi.fetchSessions()
+                val accountToken = AccountUtil.getBduss().orEmpty()
+                val sessions = ImSessionApi.fetchSessions(accountBduss = accountToken)
                 if (AccountUtil.getUid()?.toLongOrNull() != accountUid ||
                     AccountUtil.getBduss() != accountToken
                 ) return
-                val incoming = sessions.filter { it.isPrivateChat && it.peerUid > 0L }
-                    .sumOf { it.unreadNum }.coerceAtLeast(0)
+                val history = EntryPointAccessors.fromApplication(
+                    context.applicationContext,
+                    ChatHistoryEntryPoint::class.java,
+                ).chatHistoryRepository()
+                history.importLegacyPrivate(accountUid)
+                for (session in sessions.filter {
+                    it.isPrivateChat && it.peerUid > 0L && it.peerUid != accountUid && it.paUid == 0L
+                }) {
+                    if (AccountUtil.getUid()?.toLongOrNull() != accountUid ||
+                        AccountUtil.getBduss().orEmpty() != accountToken
+                    ) return
+                    history.upsertConversation(
+                        accountUid, ChatHistoryRepository.PRIVATE, session.peerUid,
+                        summary = session.summary,
+                        lastMessageTime = session.lastTime,
+                        unreadCount = session.unreadNum,
+                    )
+                    if (session.unreadNum > 0) {
+                        try {
+                            val messages = ImMessageApi.fetchMessages(
+                                peerUid = session.peerUid,
+                                accountBduss = accountToken,
+                            ).mapNotNull { ImMessageApi.toChatMessage(it, accountUid, session.peerUid) }
+                            if (AccountUtil.getUid()?.toLongOrNull() != accountUid ||
+                                AccountUtil.getBduss().orEmpty() != accountToken
+                            ) return
+                            history.savePrivate(accountUid, session.peerUid, messages)
+                            history.upsertConversation(
+                                accountUid, ChatHistoryRepository.PRIVATE, session.peerUid,
+                                summary = session.summary,
+                                lastMessageTime = session.lastTime,
+                                unreadCount = session.unreadNum,
+                            )
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            Log.w(TAG, "私信历史同步失败，保留已有会话", error)
+                        }
+                    }
+                }
+                if (AccountUtil.getUid()?.toLongOrNull() != accountUid ||
+                    AccountUtil.getBduss().orEmpty() != accountToken
+                ) return
+                val incoming = history.observeConversations(accountUid).first()
+                    .sumOf { it.unreadCount.toLong() }.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
                 context.sendBroadcast(
                     Intent(ACTION_NEW_MESSAGE)
                         .setPackage(context.packageName)

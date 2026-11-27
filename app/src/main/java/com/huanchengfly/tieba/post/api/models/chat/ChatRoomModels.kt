@@ -162,6 +162,8 @@ data class ChatRoomMessage(
     val voiceUrl: String? = null,
     /** 语音时长，单位毫秒，仅用于气泡初始文案，播放时以解码出的真实时长为准。 */
     val voiceDurationMs: Int = 0,
+    val localId: String = "",
+    val msgKey: String = "",
 ) {
     val localPendingId: Long?
         get() = msgId.takeIf { isLocal && it < 0 }
@@ -185,4 +187,7 @@ enum class SendState {
 
     /** 发送失败，界面显示感叹号，可点击重发。 */
     FAILED,
+
+    /** 发送结果尚未确认，不自动重发。 */
+    UNKNOWN,
 }

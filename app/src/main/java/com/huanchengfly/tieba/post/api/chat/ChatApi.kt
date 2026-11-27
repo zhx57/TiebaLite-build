@@ -168,6 +168,8 @@ object ChatApi {
     suspend fun getChatRoomMessages(
         roomId: Long,
         lastMsgId: Long = 0L,
+        accountBduss: String = AccountUtil.getBduss().orEmpty(),
+        selfUid: Long? = AccountUtil.getUid()?.toLongOrNull(),
     ): List<ChatRoomMessage> = withContext(Dispatchers.IO) {
         val bodyJson = buildChatRoomHistoryRequest(
             roomId = roomId,
@@ -180,7 +182,7 @@ object ChatApi {
             .url("https://pim.baidu.com/rest/3.0/im/fetch_mcast_msg_client")
             .post(bodyJson.toString().toRequestBody(jsonMediaType))
             .header("User-Agent", "okhttp/3.11.0")
-            .header("Cookie", "BDUSS=${AccountUtil.getBduss() ?: ""}")
+            .header("Cookie", "BDUSS=$accountBduss")
             .build()
 
         val body = execute(request)
@@ -190,9 +192,8 @@ object ChatApi {
             throw ChatApiException(errCode, root.optString("err_msg"))
         }
         val messages = root.optJSONArray("messages") ?: return@withContext emptyList()
-        val myUid = AccountUtil.getUid()?.toLongOrNull()
         (0 until messages.length()).mapNotNull { index ->
-            parseMessage(messages.optJSONObject(index) ?: return@mapNotNull null, myUid)
+            parseMessage(messages.optJSONObject(index) ?: return@mapNotNull null, selfUid)
         }
     }
 
@@ -359,6 +360,8 @@ object ChatApi {
             senderBaiduUk = senderBduk,
             voiceUrl = voiceUrl,
             voiceDurationMs = voiceDurationMs,
+            msgKey = sequenceOf(json, envelope, textObj)
+                .filterNotNull().map { it.optString("msg_key") }.firstOrNull { it.isNotBlank() }.orEmpty(),
         )
     }
 

@@ -611,6 +611,10 @@ data class ChatWsMessage(
     /** 实际发送者，与会话对端分开保存。 */
     val senderUid: Long = 0L,
     val deliveryConfirmed: Boolean = !isLocal && semantics.protocolSource != "local_outgoing",
+    val localId: String = "",
+    val msgKey: String = "",
+    val sendError: String? = null,
+    val transmissionStarted: Boolean = false,
 ) {
     val localPendingId: Long? get() = msgId.takeIf { isLocal && it < 0L }
     val serverMsgId: Long? get() = msgId.takeIf { !isLocal && it > 0L }

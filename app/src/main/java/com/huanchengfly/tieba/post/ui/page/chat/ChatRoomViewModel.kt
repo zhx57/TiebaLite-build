@@ -6,6 +6,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
 import com.huanchengfly.tieba.post.api.chat.ChatApi
 import com.huanchengfly.tieba.post.api.chat.blcp.ChatSendApi
 import com.huanchengfly.tieba.post.api.models.chat.ChatCloudMeme
@@ -29,34 +30,27 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.conflate
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.flatMapConcat
-import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.merge
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 /**
  * 群聊消息页 ViewModel。
  *
  * 状态里只保存一份按时间正序的消息列表（最早在前、最新在后），UI 层倒序渲染。
- * 三类拉取职责严格分离：Load 全量替换、LoadMore 头部追加、Poll 增量合并，
- * 轮询绝不删除已加载历史。发送使用 flatMapMerge 并发，每条消息带独立 pendingId，
- * 不再用全局 isSending 锁禁止连续发送。
+ * 页面只消费本地历史快照，网络拉取和发送状态先写仓库。
+ * 每个账号及群拥有独立任务，切换或离开取消观察与发送；重试保留消息身份。
  */
 @Stable
 @HiltViewModel
-class ChatRoomViewModel @Inject constructor() :
+class ChatRoomViewModel @Inject constructor(
+    private val history: com.huanchengfly.tieba.post.repository.ChatHistoryRepository,
+) :
     BaseViewModel<ChatRoomUiIntent, ChatRoomPartialChange, ChatRoomUiState, ChatRoomUiEvent>() {
 
     override fun createInitialState(): ChatRoomUiState = ChatRoomUiState()
@@ -77,7 +71,7 @@ class ChatRoomViewModel @Inject constructor() :
         super.onCleared()
     }
 
-    override fun createPartialChangeProducer() = ChatRoomPartialChangeProducer { sendSession() }
+    override fun createPartialChangeProducer() = ChatRoomPartialChangeProducer({ history }, { closeSendSession() }) { sendSession() }
 
     override fun dispatchEvent(partialChange: ChatRoomPartialChange): UiEvent? =
         when (partialChange) {
@@ -91,77 +85,161 @@ class ChatRoomViewModel @Inject constructor() :
             is ChatRoomPartialChange.Send.Unconfirmed ->
                 if (uiState.value.messages.any { it.msgId == partialChange.pendingId && it.isLocal })
                     CommonUiEvent.Toast(UNCONFIRMED_SEND_MESSAGE) else null
+            is ChatRoomPartialChange.ForSession ->
+                if (uiState.value.sessionToken == partialChange.token) dispatchEvent(partialChange.change) else null
             else -> null
         }
 
-    class ChatRoomPartialChangeProducer(private val sender: () -> ChatSendApi.Session) :
-        PartialChangeProducer<ChatRoomUiIntent, ChatRoomPartialChange, ChatRoomUiState> {
+    class ChatRoomPartialChangeProducer(
+        private val historyProvider: () -> com.huanchengfly.tieba.post.repository.ChatHistoryRepository,
+        private val closeSender: () -> Unit,
+        private val sender: () -> ChatSendApi.Session,
+    ) : PartialChangeProducer<ChatRoomUiIntent, ChatRoomPartialChange, ChatRoomUiState> {
+        private val history get() = historyProvider()
 
-        /** 本地占位用递减负数，避免与服务端正数 msgId 冲突。 */
-        private val pendingSeq = AtomicLong(0)
-
-        private fun newPendingId(): Long = pendingSeq.decrementAndGet()
-
-        @OptIn(ExperimentalCoroutinesApi::class)
-        override fun toPartialChangeFlow(intentFlow: Flow<ChatRoomUiIntent>): Flow<ChatRoomPartialChange> =
-            merge(
-                // 拉取串行执行且只保留最新待处理意图，不取消慢请求，也不堆积轮询。
-                intentFlow
-                    .filter { it is ChatRoomUiIntent.Load || it is ChatRoomUiIntent.Poll }
-                    .conflate()
-                    .flatMapConcat {
-                        when (it) {
-                            is ChatRoomUiIntent.Load -> it.producePartialChange()
-                            is ChatRoomUiIntent.Poll -> it.producePartialChange()
-                            else -> error("Unexpected message fetch intent")
+        override fun toPartialChangeFlow(intentFlow: Flow<ChatRoomUiIntent>): Flow<ChatRoomPartialChange> = channelFlow {
+            var active: ChatRoomUiIntent.Load? = null
+            var generation = ""
+            var sessionJob: kotlinx.coroutines.Job? = null
+            var observer: kotlinx.coroutines.Job? = null
+            var fetch: kotlinx.coroutines.Job? = null
+            var paging: kotlinx.coroutines.Job? = null
+            var ready = false
+            var visible = true
+            var limit = 60
+            val sending = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
+            val recovered = HashSet<Pair<Long, Long>>()
+            suspend fun publish(token: String, change: ChatRoomPartialChange) {
+                if (token == generation) send(ChatRoomPartialChange.ForSession(token, change))
+            }
+            intentFlow.collect { intent ->
+                if (intent is ChatRoomUiIntent.Load) {
+                    closeSender()
+                    sessionJob?.cancelAndJoin()
+                    active = intent
+                    generation = java.util.UUID.randomUUID().toString()
+                    val token = generation
+                    sessionJob = kotlinx.coroutines.Job(coroutineContext[kotlinx.coroutines.Job])
+                    ready = false
+                    visible = true
+                    limit = 60
+                    sending.clear()
+                    send(ChatRoomPartialChange.OpenSession(token, intent.accountUid, intent.roomId))
+                    launch(sessionJob!!) {
+                        try {
+                            if (intent.accountUid <= 0) return@launch
+                            if ((intent.accountUid to intent.roomId) !in recovered) {
+                                history.recoverInterrupted(intent.accountUid, "group", intent.roomId)
+                                recovered.add(intent.accountUid to intent.roomId)
+                            }
+                            history.reopenConversation(intent.accountUid, "group", intent.roomId)
+                            history.upsertConversation(intent.accountUid, "group", intent.roomId,
+                                name = intent.roomName, forumId = intent.forumId)
+                            val cached = history.loadGroup(intent.accountUid, intent.roomId, limit)
+                            publish(token, ChatRoomPartialChange.LocalSnapshot(cached.toImmutableList()))
+                            if (visible) history.markRead(intent.accountUid, "group", intent.roomId)
+                            observer = launch {
+                                history.observeGroup(intent.accountUid, intent.roomId, limit).distinctUntilChanged().collect { messages ->
+                                    publish(token, ChatRoomPartialChange.LocalSnapshot(messages.toImmutableList()))
+                                    if (visible) history.markRead(intent.accountUid, "group", intent.roomId)
+                                }
+                            }
+                            ready = true
+                            publish(token, ChatRoomPartialChange.Ready(true))
+                            fetch = launch {
+                                try {
+                                    history.saveGroup(intent.accountUid, intent.roomId, ChatApi.getChatRoomMessages(intent.roomId, accountBduss = intent.accountBduss, selfUid = intent.accountUid))
+                                } catch (e: CancellationException) { throw e }
+                                catch (e: Exception) { publish(token, ChatRoomPartialChange.Load.Failure(e)) }
+                            }
+                        } catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { publish(token, ChatRoomPartialChange.Load.Failure(e)) }
+                    }
+                    return@collect
+                }
+                val room = active ?: return@collect
+                val token = generation
+                val job = sessionJob ?: return@collect
+                when (intent) {
+                    is ChatRoomUiIntent.Stop -> if (intent.roomId == room.roomId && intent.accountUid == room.accountUid) {
+                        publish(token, ChatRoomPartialChange.Ready(false))
+                        generation = ""
+                        ready = false
+                        active = null
+                        closeSender()
+                        sessionJob?.cancelAndJoin()
+                    }
+                    is ChatRoomUiIntent.Visibility -> if (intent.roomId == room.roomId && intent.accountUid == room.accountUid) {
+                        visible = intent.visible
+                        if (visible && ready) launch(job) { history.markRead(room.accountUid, "group", room.roomId) }
+                    }
+                    is ChatRoomUiIntent.Poll -> if (ready && intent.roomId == room.roomId &&
+                        intent.accountUid == room.accountUid && fetch?.isActive != true) {
+                        fetch = launch(job) {
+                            try { history.saveGroup(room.accountUid, room.roomId, ChatApi.getChatRoomMessages(room.roomId, accountBduss = room.accountBduss, selfUid = room.accountUid)) }
+                            catch (e: CancellationException) { throw e }
+                            catch (e: Exception) { Log.w("ChatRoom", "poll failed: ${e.javaClass.simpleName}") }
                         }
-                    },
-                intentFlow.filterIsInstance<ChatRoomUiIntent.LoadMore>()
-                    .flatMapMerge { it.producePartialChange() },
-                intentFlow.filterIsInstance<ChatRoomUiIntent.Send>()
-                    .flatMapMerge { it.producePartialChange() },
-                intentFlow.filterIsInstance<ChatRoomUiIntent.Resend>()
-                    .flatMapMerge { it.producePartialChange() },
-                intentFlow.filterIsInstance<ChatRoomUiIntent.LoadRobots>()
-                    .flatMapMerge { it.producePartialChange() },
-            ).withSendConfirmationTimeout()
-
-        private fun ChatRoomUiIntent.Load.producePartialChange(): Flow<ChatRoomPartialChange.Load> =
-            flow<ChatRoomPartialChange.Load> {
-                emit(ChatRoomPartialChange.Load.Start)
-                val messages = ChatApi.getChatRoomMessages(roomId)
-                    .sortedBy { it.msgTime }
-                    .toImmutableList()
-                emit(ChatRoomPartialChange.Load.Success(messages))
-            }.catch<ChatRoomPartialChange.Load> {
-                if (it is CancellationException) throw it
-                emit(ChatRoomPartialChange.Load.Failure(it))
+                    }
+                    is ChatRoomUiIntent.LoadMore -> if (ready && intent.roomId == room.roomId &&
+                        intent.accountUid == room.accountUid && paging?.isActive != true) {
+                        paging = launch(job) {
+                            publish(token, ChatRoomPartialChange.LoadMore.Start)
+                            try {
+                                limit += 60
+                                observer?.cancelAndJoin()
+                                var cached = history.loadGroup(room.accountUid, room.roomId, limit)
+                                publish(token, ChatRoomPartialChange.LocalSnapshot(cached.toImmutableList()))
+                                var hasMore = true
+                                if (cached.size < limit) {
+                                    val cursor = cached.firstOrNull { !it.isLocal && it.msgId > 0 }?.msgId ?: 0L
+                                    val older = ChatApi.getChatRoomMessages(room.roomId, cursor, accountBduss = room.accountBduss, selfUid = room.accountUid)
+                                    history.saveGroup(room.accountUid, room.roomId, older)
+                                    hasMore = older.size >= 60
+                                    cached = history.loadGroup(room.accountUid, room.roomId, limit)
+                                }
+                                publish(token, ChatRoomPartialChange.LocalSnapshot(cached.toImmutableList(), hasMore))
+                                publish(token, ChatRoomPartialChange.PageComplete)
+                                observer = launch(job) {
+                                    history.observeGroup(room.accountUid, room.roomId, limit).distinctUntilChanged().collect { messages ->
+                                        publish(token, ChatRoomPartialChange.LocalSnapshot(messages.toImmutableList()))
+                                        if (visible) history.markRead(room.accountUid, "group", room.roomId)
+                                    }
+                                }
+                            } catch (e: CancellationException) { throw e }
+                            catch (e: Exception) {
+                                publish(token, ChatRoomPartialChange.LoadMore.Failure(e))
+                                // 网络分页失败不能中止本地历史的实时观察。
+                                observer = launch(job) {
+                                    history.observeGroup(room.accountUid, room.roomId, limit).distinctUntilChanged().collect { messages ->
+                                        publish(token, ChatRoomPartialChange.LocalSnapshot(messages.toImmutableList()))
+                                        if (visible) history.markRead(room.accountUid, "group", room.roomId)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    is ChatRoomUiIntent.Send -> if (ready && intent.roomId == room.roomId && intent.selfUid == room.accountUid &&
+                        (intent.sessionToken.isBlank() || intent.sessionToken == token)) {
+                        launch(job) { persistSend(intent, null, room, sending) { publish(token, it) } }
+                    } else if (intent.draftId.isNotBlank()) {
+                        publish(token, ChatRoomPartialChange.DraftResult(intent.draftId, false))
+                    }
+                    is ChatRoomUiIntent.Resend -> if (ready && intent.roomId == room.roomId && intent.selfUid == room.accountUid) {
+                        launch(job) {
+                            persistSend(ChatRoomUiIntent.Send(intent.roomId, intent.text, intent.forumId,
+                                intent.forumLevel, intent.bduss, intent.selfName, intent.selfPortrait,
+                                intent.selfUid, intent.cuidGalaxy2, intent.mentions, intent.robotSkill,
+                                intent.cloudMeme, intent.photoUri), intent.failedMsgId, room, sending) { publish(token, it) }
+                        }
+                    }
+                    is ChatRoomUiIntent.LoadRobots -> if (intent.roomId == room.roomId) launch(job) {
+                        intent.producePartialChange().collect { publish(token, it) }
+                    }
+                    else -> Unit
+                }
             }
-
-        /** 定时轮询：只上报新拉取到的一页，由 reduce 增量合并，不清空历史。 */
-        private fun ChatRoomUiIntent.Poll.producePartialChange(): Flow<ChatRoomPartialChange.Poll> =
-            flow<ChatRoomPartialChange.Poll> {
-                val latest = ChatApi.getChatRoomMessages(roomId)
-                emit(ChatRoomPartialChange.Poll.Success(latest.toImmutableList()))
-            }.catch<ChatRoomPartialChange.Poll> {
-                if (it is CancellationException) throw it
-                // 轮询失败不该打断用户，但需要留下日志便于排查
-                Log.w("ChatRoom", "poll messages failed", it)
-                emit(ChatRoomPartialChange.Poll.Failure)
-            }
-
-        /** 向上翻页：以当前最旧消息 msgId 为游标，只把旧消息追加到头部。 */
-        private fun ChatRoomUiIntent.LoadMore.producePartialChange(): Flow<ChatRoomPartialChange.LoadMore> =
-            flow<ChatRoomPartialChange.LoadMore> {
-                emit(ChatRoomPartialChange.LoadMore.Start)
-                val older = ChatApi.getChatRoomMessages(roomId, oldestMsgId)
-                    .sortedBy { it.msgTime }
-                    .toImmutableList()
-                emit(ChatRoomPartialChange.LoadMore.Success(older))
-            }.catch<ChatRoomPartialChange.LoadMore> {
-                if (it is CancellationException) throw it
-                emit(ChatRoomPartialChange.LoadMore.Failure(it))
-            }
+        }
 
         private fun ChatRoomUiIntent.LoadRobots.producePartialChange(): Flow<ChatRoomPartialChange.Robots> =
             flow<ChatRoomPartialChange.Robots> {
@@ -172,84 +250,91 @@ class ChatRoomViewModel @Inject constructor() :
                 emit(ChatRoomPartialChange.Robots.Failure(it.getErrorMessage()))
             }
 
-        private fun ChatRoomUiIntent.Send.producePartialChange(): Flow<ChatRoomPartialChange.Send> {
-            val pendingId = newPendingId()
-            val session = sender()
-            return channelFlow<ChatRoomPartialChange.Send> {
-                send(
-                    ChatRoomPartialChange.Send.Start(
-                        pendingId = pendingId,
-                        text = text,
-                        selfUid = selfUid,
-                        selfName = selfName,
-                        selfPortrait = selfPortrait,
-                        mentions = mentions,
-                        robotSkill = robotSkill,
-                        cloudMeme = cloudMeme,
-                        localPhotoUri = photoUri?.toString(),
-                    )
+        private suspend fun persistSend(
+            request: ChatRoomUiIntent.Send,
+            retryId: Long?,
+            room: ChatRoomUiIntent.Load,
+            sending: MutableSet<Long>,
+            publish: suspend (ChatRoomPartialChange) -> Unit,
+        ) {
+            val pendingId = retryId ?: newGroupPendingId()
+            if (!sending.add(pendingId)) return
+            lateinit var message: ChatRoomMessage
+            var persisted = false
+            try {
+                var previous = retryId?.let { id ->
+                    history.loadGroup(room.accountUid, room.roomId, Int.MAX_VALUE)
+                        .firstOrNull { it.msgId == id && it.isLocal }
+                }
+                if (retryId != null && (previous == null || previous.sendState == SendState.SENDING ||
+                        previous.sendState == SendState.SENT)) return
+                if (previous?.sendState == SendState.UNKNOWN) {
+                    // 用户已确认重复风险；先按精确键同步，已送达则不再发送。
+                    history.saveGroup(room.accountUid, room.roomId, ChatApi.getChatRoomMessages(room.roomId, accountBduss = room.accountBduss, selfUid = room.accountUid))
+                    previous = history.findGroup(room.accountUid, room.roomId, previous) ?: return
+                    if (!previous.isLocal || previous.sendState == SendState.SENT) return
+                }
+                message = previous?.copy(sendState = SendState.SENDING, sendError = null,
+                    transportAccepted = false, transmissionStarted = false) ?: ChatRoomPartialChange.Send.Start(
+                    pendingId, request.text, request.selfUid, request.selfName, request.selfPortrait,
+                    mentions = request.mentions, robotSkill = request.robotSkill,
+                    cloudMeme = request.cloudMeme, localPhotoUri = request.photoUri?.toString(),
+                ).reduce(ChatRoomUiState()).messages.single().copy(localId = java.util.UUID.randomUUID().toString())
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    history.saveGroup(room.accountUid, room.roomId, listOf(message))
+                    persisted = true
+                }
+                publish(ChatRoomPartialChange.SendRequested)
+                if (request.draftId.isNotBlank()) publish(ChatRoomPartialChange.DraftResult(request.draftId, true))
+                suspend fun update(updated: ChatRoomMessage) {
+                    history.saveGroup(room.accountUid, room.roomId, listOf(updated))
+                    message = history.findGroup(room.accountUid, room.roomId, updated) ?: updated
+                }
+                val source = message.localPhotoUri?.let(Uri::parse)
+                if (message.cloudMeme == null && source != null) {
+                    val retained = history.retainAttachment(room.accountUid, source)
+                    update(message.copy(localPhotoUri = retained.toString(), images = listOf(retained.toString())))
+                    val prepared = uploadChatPhoto(retained)
+                    update(message.copy(cloudMeme = prepared, images = listOf(prepared.sendImageUrl)))
+                }
+                if (message.sendState == SendState.SENT || message.serverMsgId != null) return
+                val prepared = message.cloudMeme
+                sender().sendChatRoomMessage(
+                    chatroomId = room.roomId, text = message.text, forumId = request.forumId,
+                    forumLevel = request.forumLevel, accountBduss = request.bduss,
+                    selfName = request.selfName, selfPortrait = request.selfPortrait,
+                    cuidGalaxy2 = request.cuidGalaxy2, mentions = message.mentions,
+                    robotSkill = message.robotSkill, cloudMeme = prepared,
+                    onTransmitting = { update(message.copy(transmissionStarted = true)) },
+                    msgKey = message.msgKey.ifBlank { null },
+                    onMessageKey = { key -> update(message.copy(msgKey = key)) },
                 )
-                val preparedCloudMeme = photoUri?.let { uploadChatPhoto(it) } ?: cloudMeme
-                send(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
-                session.sendChatRoomMessage(
-                    chatroomId = roomId,
-                    text = text,
-                    forumId = forumId,
-                    forumLevel = forumLevel,
-                    accountBduss = bduss,
-                    selfName = selfName,
-                    selfPortrait = selfPortrait,
-                    cuidGalaxy2 = cuidGalaxy2,
-                    mentions = mentions,
-                    robotSkill = robotSkill,
-                    cloudMeme = preparedCloudMeme,
-                    onTransmitting = { send(ChatRoomPartialChange.Send.Transmitting(pendingId)) },
-                )
-                send(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
-            }.catch {
-                if (it is CancellationException) throw it
-                emit(ChatRoomPartialChange.Send.Failure(pendingId, it))
-            }
-        }
-
-        private fun ChatRoomUiIntent.Resend.producePartialChange(): Flow<ChatRoomPartialChange.Send> {
-            val pendingId = newPendingId()
-            val session = sender()
-            return channelFlow<ChatRoomPartialChange.Send> {
-                send(
-                    ChatRoomPartialChange.Send.Start(
-                        pendingId = pendingId,
-                        text = text,
-                        selfUid = selfUid,
-                        selfName = selfName,
-                        selfPortrait = selfPortrait,
-                        mentions = mentions,
-                        robotSkill = robotSkill,
-                        cloudMeme = cloudMeme,
-                        localPhotoUri = photoUri?.toString(),
-                        removeMsgId = failedMsgId,
-                    )
-                )
-                val preparedCloudMeme = photoUri?.let { uploadChatPhoto(it) } ?: cloudMeme
-                send(ChatRoomPartialChange.Send.Prepared(pendingId, preparedCloudMeme))
-                session.sendChatRoomMessage(
-                    chatroomId = roomId,
-                    text = text,
-                    forumId = forumId,
-                    forumLevel = forumLevel,
-                    accountBduss = bduss,
-                    selfName = selfName,
-                    selfPortrait = selfPortrait,
-                    cuidGalaxy2 = cuidGalaxy2,
-                    mentions = mentions,
-                    robotSkill = robotSkill,
-                    cloudMeme = preparedCloudMeme,
-                    onTransmitting = { send(ChatRoomPartialChange.Send.Transmitting(pendingId)) },
-                )
-                send(ChatRoomPartialChange.Send.Success(pendingId, preparedCloudMeme))
-            }.catch {
-                if (it is CancellationException) throw it
-                emit(ChatRoomPartialChange.Send.Failure(pendingId, it))
+                update(message.copy(transportAccepted = true, transmissionStarted = true))
+                if (message.sendState == SendState.SENT || message.serverMsgId != null) return
+                delay(20_000)
+                message = history.findGroup(room.accountUid, room.roomId, message) ?: message
+                if (message.sendState != SendState.SENT && message.serverMsgId == null) {
+                    update(message.copy(sendState = SendState.UNKNOWN, sendError = UNCONFIRMED_SEND_MESSAGE))
+                }
+            } catch (error: Exception) {
+                if (persisted) {
+                    val failed = message
+                    val state = groupSendFailureState(failed.transmissionStarted, error)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        history.saveGroup(room.accountUid, room.roomId, listOf(failed.copy(
+                            sendState = state,
+                            sendError = if (state == SendState.UNKNOWN) UNCONFIRMED_SEND_MESSAGE
+                                else if (error is CancellationException) "发送在传输前已中断，请重试"
+                                else error.getErrorMessage(),
+                        )))
+                    }
+                } else if (error !is CancellationException) {
+                    if (request.draftId.isNotBlank()) publish(ChatRoomPartialChange.DraftResult(request.draftId, false))
+                    publish(ChatRoomPartialChange.Load.Failure(error))
+                }
+                if (error is CancellationException) throw error
+            } finally {
+                sending.remove(pendingId)
             }
         }
     }
@@ -270,15 +355,25 @@ internal fun Flow<ChatRoomPartialChange>.withSendConfirmationTimeout(
 }
 
 sealed interface ChatRoomUiIntent : UiIntent {
+    data class Stop(val roomId: Long, val accountUid: Long) : ChatRoomUiIntent
+    data class Visibility(val roomId: Long, val accountUid: Long, val visible: Boolean) : ChatRoomUiIntent
     /** 首次进入，加载最新一页。 */
-    data class Load(val roomId: Long) : ChatRoomUiIntent
+    data class Load(
+        val roomId: Long,
+        val accountUid: Long = 0L,
+        val roomName: String = "",
+        val forumId: Long = 0L,
+        val accountBduss: String = "",
+    ) : ChatRoomUiIntent {
+        override fun toString() = "Load(roomId=$roomId, accountUid=$accountUid)"
+    }
 
     data class LoadRobots(val roomId: Long) : ChatRoomUiIntent
 
     /** 定时增量拉取，不得清空已有历史。 */
-    data class Poll(val roomId: Long) : ChatRoomUiIntent
+    data class Poll(val roomId: Long, val accountUid: Long = 0L) : ChatRoomUiIntent
 
-    data class LoadMore(val roomId: Long, val oldestMsgId: Long) : ChatRoomUiIntent
+    data class LoadMore(val roomId: Long, val oldestMsgId: Long, val accountUid: Long = 0L) : ChatRoomUiIntent
 
     data class Send(
         val roomId: Long,
@@ -294,7 +389,11 @@ sealed interface ChatRoomUiIntent : UiIntent {
         val robotSkill: Int? = null,
         val cloudMeme: ChatCloudMeme? = null,
         val photoUri: Uri? = null,
-    ) : ChatRoomUiIntent
+        val draftId: String = "",
+        val sessionToken: String = "",
+    ) : ChatRoomUiIntent {
+        override fun toString() = "Outgoing(roomId=$roomId, accountUid=$selfUid)"
+    }
 
     data class Resend(
         val roomId: Long,
@@ -311,7 +410,9 @@ sealed interface ChatRoomUiIntent : UiIntent {
         val robotSkill: Int? = null,
         val cloudMeme: ChatCloudMeme? = null,
         val photoUri: Uri? = null,
-    ) : ChatRoomUiIntent
+    ) : ChatRoomUiIntent {
+        override fun toString() = "Outgoing(roomId=$roomId, accountUid=$selfUid)"
+    }
 }
 
 /** 增量合并服务端消息，并在上传完成后关联已见的回显。 */
@@ -320,63 +421,74 @@ internal fun mergeServerMessages(
     incoming: List<ChatRoomMessage>,
 ): ImmutableList<ChatRoomMessage> {
     val merged = current.toMutableList()
-    val reserved = current.mapNotNullTo(HashSet()) { it.echoForPendingId }
-    val locals = current.filter {
-        it.isLocal && it.transmissionStarted &&
-            (it.sendState != SendState.FAILED || it.transportAccepted) && it.msgId !in reserved
-    }.toMutableList()
-    fun comparableImage(url: String): String = url.toHttpUrlOrNull()?.let {
-        val port = if (it.port == (if (it.scheme == "https") 443 else 80)) "" else ":${it.port}"
-        it.host + port + it.encodedPath + (it.encodedQuery?.let { query -> "?$query" } ?: "")
-    } ?: url
-    val servers = incoming.filterNot { it.isLocal }.distinctBy { it.msgId }.sortedBy { it.msgTime }
     var changed = false
-    for (server in servers) {
-        val existingIndex = merged.indexOfFirst { it.msgId == server.msgId && !it.isLocal }
-        val existing = existingIndex.takeIf { it >= 0 }?.let { merged[it] }
-        val candidate = if (server.isSelf && existing?.echoForPendingId == null) locals.firstOrNull { local ->
-            server.msgId !in local.knownServerIdsAtSend &&
-                local.text == server.text && local.contentType == server.contentType &&
-                local.images.map(::comparableImage) == server.images.map(::comparableImage) &&
-                local.robotSkill == server.robotSkill &&
-                local.mentions.map { it.baiduUk } == server.mentions.map { it.baiduUk } &&
-                server.msgTime >= local.msgTime - 5_000L &&
-                    server.msgTime <= local.msgTime + 120_000L
-        } else null
-        if (candidate != null) {
-            locals.remove(candidate)
-            val message = server.copy(
-                displayTime = candidate.displayTime,
-                echoForPendingId = candidate.msgId,
-                cloudMeme = candidate.cloudMeme,
-            )
-            val candidateIndex = merged.indexOf(candidate)
-            if (existingIndex >= 0) {
-                merged.removeAt(existingIndex)
-                merged[candidateIndex - if (existingIndex < candidateIndex) 1 else 0] = message
-            } else {
-                merged[candidateIndex] = message
-            }
+    for (server in incoming.filterNot { it.isLocal }.distinctBy { it.msgId }) {
+        val existing = merged.indexOfFirst { !it.isLocal && it.msgId == server.msgId }
+        val local = merged.indexOfFirst {
+            it.isLocal && it.msgKey.isNotBlank() && it.msgKey == server.msgKey
+        }
+        if (local >= 0) {
+            val pending = merged[local]
+            merged[local] = server.copy(localId = pending.localId, displayTime = pending.displayTime,
+                echoForPendingId = pending.msgId, cloudMeme = pending.cloudMeme ?: server.cloudMeme)
+            if (existing >= 0) merged.removeAt(existing)
             changed = true
-        } else if (existingIndex < 0) {
-            var low = 0
-            var high = merged.size
-            while (low < high) {
-                val mid = (low + high) ushr 1
-                if (merged[mid].displayTime <= server.msgTime) low = mid + 1 else high = mid
-            }
-            merged.add(low, server)
+        } else if (existing < 0) {
+            merged.add(server)
             changed = true
         }
     }
     if (!changed) return current as? ImmutableList<ChatRoomMessage> ?: current.toImmutableList()
-    return merged.toImmutableList()
+    // 仅精确身份能够确认送达，正文或时间相同不构成证据。
+    return merged.sortedBy { it.displayTime }.toImmutableList()
 }
 
 internal const val UNCONFIRMED_SEND_MESSAGE =
     "接口已返回，但暂未在群历史中确认此消息。可能仍在审核或同步，请先检查再重发，避免重复。"
 
+internal fun newGroupPendingId(): Long =
+    -(java.util.UUID.randomUUID().mostSignificantBits and Long.MAX_VALUE).coerceAtLeast(1L)
+
+internal fun groupSendFailureState(transmissionStarted: Boolean, error: Throwable): SendState {
+    val rejected = generateSequence(error) { it.cause }.any {
+        it is com.huanchengfly.tieba.post.api.chat.blcp.BlcpBusinessException ||
+            it is com.huanchengfly.tieba.post.api.chat.ChatApiException
+    }
+    return if (transmissionStarted && !rejected) SendState.UNKNOWN else SendState.FAILED
+}
+
 sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
+    data class Ready(val ready: Boolean) : ChatRoomPartialChange {
+        override fun reduce(oldState: ChatRoomUiState) = oldState.copy(ready = ready)
+    }
+    data class DraftResult(val draftId: String, val persisted: Boolean) : ChatRoomPartialChange {
+        override fun reduce(oldState: ChatRoomUiState) = oldState.copy(
+            completedDraftId = draftId, draftPersisted = persisted,
+        )
+    }
+    data class OpenSession(val token: String, val accountUid: Long, val roomId: Long) : ChatRoomPartialChange {
+        override fun reduce(oldState: ChatRoomUiState) = ChatRoomUiState(
+            sessionToken = token, accountUid = accountUid, roomId = roomId,
+            isLoading = accountUid > 0,
+        )
+    }
+    data class ForSession(val token: String, val change: ChatRoomPartialChange) : ChatRoomPartialChange {
+        override fun reduce(oldState: ChatRoomUiState) =
+            if (oldState.sessionToken == token) change.reduce(oldState) else oldState
+    }
+    data class LocalSnapshot(
+        val messages: ImmutableList<ChatRoomMessage>, val hasMore: Boolean? = null,
+    ) : ChatRoomPartialChange {
+        override fun reduce(oldState: ChatRoomUiState) = oldState.copy(
+            messages = messages, isLoading = false, hasMore = hasMore ?: oldState.hasMore,
+        )
+    }
+    data object PageComplete : ChatRoomPartialChange {
+        override fun reduce(oldState: ChatRoomUiState) = oldState.copy(isLoadingMore = false)
+    }
+    data object SendRequested : ChatRoomPartialChange {
+        override fun reduce(oldState: ChatRoomUiState) = oldState.copy(sendRequestId = oldState.sendRequestId + 1)
+    }
     sealed class Load : ChatRoomPartialChange {
         override fun reduce(oldState: ChatRoomUiState): ChatRoomUiState =
             when (this) {
@@ -512,7 +624,7 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
 
                 is Unconfirmed -> oldState.copy(messages = oldState.messages.map {
                     if (it.msgId == pendingId && it.isLocal && it.transportAccepted)
-                        it.copy(sendState = SendState.FAILED, sendError = UNCONFIRMED_SEND_MESSAGE)
+                        it.copy(sendState = SendState.UNKNOWN, sendError = UNCONFIRMED_SEND_MESSAGE)
                     else it
                 }.toImmutableList())
 
@@ -521,7 +633,9 @@ sealed interface ChatRoomPartialChange : PartialChange<ChatRoomUiState> {
                     oldState.copy(messages = oldState.messages.mapNotNull {
                         when {
                             it.msgId == pendingId && echoed -> null
-                            it.msgId == pendingId -> it.copy(sendState = SendState.FAILED, sendError = error.getErrorMessage())
+                            it.msgId == pendingId -> it.copy(sendState = groupSendFailureState(it.transmissionStarted, error),
+                                sendError = if (groupSendFailureState(it.transmissionStarted, error) == SendState.UNKNOWN)
+                                    UNCONFIRMED_SEND_MESSAGE else error.getErrorMessage())
                             else -> it
                         }
                     }.toImmutableList())
@@ -567,6 +681,12 @@ data class ChatRoomUiState(
     val isLoadingRobots: Boolean = false,
     val robotError: String? = null,
     val sendRequestId: Long = 0L,
+    val ready: Boolean = false,
+    val completedDraftId: String = "",
+    val draftPersisted: Boolean = false,
+    val sessionToken: String = "",
+    val accountUid: Long = 0L,
+    val roomId: Long = 0L,
 ) : UiState
 
 sealed interface ChatRoomUiEvent : UiEvent

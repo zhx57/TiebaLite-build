@@ -22,6 +22,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import com.huanchengfly.tieba.post.ui.page.ProvideNavigator
+import com.huanchengfly.tieba.post.ui.widgets.compose.BackNavigationIcon
+import com.huanchengfly.tieba.post.ui.widgets.compose.MyScaffold
+import com.huanchengfly.tieba.post.ui.widgets.compose.Toolbar
+import com.ramcosta.composedestinations.annotation.Destination
+import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,29 +40,40 @@ import com.huanchengfly.tieba.post.ui.page.LocalNavigator
 import com.huanchengfly.tieba.post.ui.page.destinations.ChatRoomPageDestination
 import com.huanchengfly.tieba.post.ui.widgets.compose.Avatar
 import com.huanchengfly.tieba.post.ui.widgets.compose.Container
-import com.huanchengfly.tieba.post.ui.widgets.compose.LazyLoad
 import com.huanchengfly.tieba.post.ui.widgets.compose.MyLazyColumn
 import com.huanchengfly.tieba.post.ui.widgets.compose.Sizes
 import com.huanchengfly.tieba.post.ui.widgets.compose.debounceClickable
 import com.huanchengfly.tieba.post.utils.StringUtil
 import kotlinx.collections.immutable.persistentListOf
 
-/**
- * 消息页的群聊 Tab：优先展示订阅群，再渐进补充全部关注贴吧的公开群。
- */
+@OptIn(ExperimentalMaterialApi::class)
+@Destination
+@Composable
+fun ChatEntryPage(navigator: DestinationsNavigator) {
+    ProvideNavigator(navigator) {
+        MyScaffold(topBar = {
+            Toolbar(title = "发现群聊", navigationIcon = { BackNavigationIcon { navigator.navigateUp() } })
+        }) { padding ->
+            Box(Modifier.fillMaxSize().padding(padding)) { ChatEntryPage() }
+        }
+    }
+}
+
+/** 优先展示订阅群，再渐进补充全部关注贴吧的公开群。 */
 @OptIn(ExperimentalMaterialApi::class)
 @Composable
 fun ChatEntryPage(
     viewModel: ChatEntryViewModel = pageViewModel(),
 ) {
-    LazyLoad(loaded = viewModel.initialized) {
+    val accountUid = AccountUtil.LocalAccount.current?.uid
+    LaunchedEffect(accountUid) {
         viewModel.send(ChatEntryUiIntent.Load)
         viewModel.initialized = true
     }
     val navigator = LocalNavigator.current
     val state by viewModel.uiState.collectAsState()
     // Compose 账号状态变化时立即隐藏旧列表，不等待旧请求返回。
-    val accountMatches = state.accountUid == AccountUtil.getUid()
+    val accountMatches = state.accountUid == accountUid
     val rooms = if (accountMatches) state.rooms else persistentListOf()
     val loading = !accountMatches || state.isLoading || !state.hasLoaded
     val refresh = { viewModel.send(ChatEntryUiIntent.Load) }

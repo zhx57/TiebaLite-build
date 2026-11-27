@@ -2,6 +2,9 @@ package com.huanchengfly.tieba.post.database
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
+import com.huanchengfly.tieba.post.models.database.ChatConversation
+import com.huanchengfly.tieba.post.models.database.ChatLegacyImport
+import com.huanchengfly.tieba.post.models.database.ChatMessageEntity
 import com.huanchengfly.tieba.post.models.database.Account
 import com.huanchengfly.tieba.post.models.database.Block
 import com.huanchengfly.tieba.post.models.database.Draft
@@ -22,11 +25,15 @@ import dagger.hilt.components.SingletonComponent
         TopForum::class,
         SearchHistory::class,
         SearchPostHistory::class,
+        ChatMessageEntity::class,
+        ChatConversation::class,
+        ChatLegacyImport::class,
     ],
-    version = 40,
+    version = 41,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
+    abstract fun chatHistoryDao(): ChatHistoryDao
     abstract fun accountDao(): AccountDao
     abstract fun draftDao(): DraftDao
     abstract fun historyDao(): HistoryDao

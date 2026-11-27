@@ -1,6 +1,5 @@
 package com.huanchengfly.tieba.post.ui.page.chat
 
-import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -28,7 +27,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.huanchengfly.tieba.post.arch.pageViewModel
-import com.huanchengfly.tieba.post.services.NotifyJobService
 import com.huanchengfly.tieba.post.ui.common.theme.compose.ExtendedTheme
 import com.huanchengfly.tieba.post.ui.page.LocalNavigator
 import com.huanchengfly.tieba.post.ui.page.destinations.PrivateChatPageDestination
@@ -52,7 +50,6 @@ import kotlinx.coroutines.delay
 fun PrivateChatListPage(
     viewModel: PrivateChatListViewModel = pageViewModel(),
 ) {
-    val context = LocalContext.current
     val navigator = LocalNavigator.current
     val state by viewModel.uiState.collectAsState()
     val accountUid = AccountUtil.LocalAccount.current?.uid?.toLongOrNull() ?: 0L
@@ -69,9 +66,6 @@ fun PrivateChatListPage(
     LaunchedEffect(lifecycleOwner, shouldLoad, accountUid) {
         if (!shouldLoad) return@LaunchedEffect
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            context.sendBroadcast(
-                Intent(NotifyJobService.ACTION_CLEAR_PRIVATE).setPackage(context.packageName),
-            )
             while (true) {
                 viewModel.send(PrivateChatListUiIntent.Load)
                 delay(5_000L)

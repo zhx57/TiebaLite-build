@@ -58,7 +58,10 @@ object ImSessionApi {
      *
      * @param peerUid 指定对方 uid 时只拉该会话，传 0 表示拉全部。
      */
-    suspend fun fetchSessions(peerUid: Long = 0L): List<Session> {
+    suspend fun fetchSessions(
+        peerUid: Long = 0L,
+        accountBduss: String = com.huanchengfly.tieba.post.utils.AccountUtil.getBduss().orEmpty(),
+    ): List<Session> {
         val params = linkedMapOf<String, Any>(
             "need_top" to 1,
             "count" to MAX_FETCH_COUNT,
@@ -67,7 +70,7 @@ object ImSessionApi {
             params["contacter"] = ImBduid.transBDUID(peerUid.toString())
             params["contacter_type"] = 0
         }
-        val response = ImHttpClient.post("fetch_session", params)
+        val response = ImHttpClient.post("fetch_session", params, accountBduss)
         if (ImHttpClient.errorCode(response) != 0) {
             val code = ImHttpClient.errorCode(response)
             val message = ImHttpClient.errorMessage(response)

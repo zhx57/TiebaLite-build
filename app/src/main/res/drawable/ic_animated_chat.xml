@@ -1,0 +1,16 @@
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt">
+    <aapt:attr name="android:drawable">
+        <vector android:width="24dp" android:height="24dp"
+            android:viewportWidth="24" android:viewportHeight="24">
+            <path android:name="bubble" android:fillColor="#000000"
+                android:pathData="M20,2H4C2.9,2 2,2.9 2,4V22L6,18H20C21.1,18 22,17.1 22,16V4C22,2.9 21.1,2 20,2ZM20,16H5.17L4,17.17V4H20ZM6,7H18V9H6ZM6,11H15V13H6Z" />
+        </vector>
+    </aapt:attr>
+    <target android:name="bubble">
+        <aapt:attr name="android:animation">
+            <objectAnimator android:duration="150" android:propertyName="fillAlpha"
+                android:valueFrom="0.8" android:valueTo="1" android:valueType="floatType" />
+        </aapt:attr>
+    </target>
+</animated-vector>

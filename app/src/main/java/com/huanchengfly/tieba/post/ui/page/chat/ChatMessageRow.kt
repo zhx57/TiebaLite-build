@@ -380,7 +380,7 @@ fun navigateToUserProfile(navigator: DestinationsNavigator, uid: Long) {
 /**
  * 传输阶段转圈，ACK 后静默核对回显；失败显示感叹号并可点击重发。
  *
- * 固定 44dp 触控区、20dp 图标，三种状态位置一致，切换时不会引起布局跳动。
+ * 固定 48dp 触控区、20dp 图标，状态位置一致，切换时不会引起布局跳动。
  */
 @Composable
 private fun ChatSendStateIndicator(
@@ -388,7 +388,7 @@ private fun ChatSendStateIndicator(
     transportAccepted: Boolean,
     onRetryClick: () -> Unit,
 ) {
-    Box(modifier = Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+    Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
         when (state) {
             SendState.SENDING -> {
                 if (!transportAccepted) CircularProgressIndicator(
@@ -398,13 +398,17 @@ private fun ChatSendStateIndicator(
                 )
             }
 
-            SendState.FAILED -> IconButton(
+            SendState.FAILED, SendState.UNKNOWN -> IconButton(
                 onClick = onRetryClick,
-                modifier = Modifier.size(44.dp),
+                modifier = Modifier.size(48.dp),
             ) {
                 Icon(
                     imageVector = Icons.Outlined.ErrorOutline,
-                    contentDescription = stringResource(id = R.string.btn_resend),
+                    contentDescription = if (state == SendState.UNKNOWN) {
+                        "发送结果未确认，点击查看并重试"
+                    } else {
+                        "发送失败，点击重试"
+                    },
                     tint = MaterialTheme.colors.error,
                     modifier = Modifier.size(20.dp),
                 )

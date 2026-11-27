@@ -204,6 +204,7 @@ fun NavigationDrawerContent(
                             } else {
                                 onChangePosition(index)
                             }
+                            navigationItem.onClick?.invoke()
                         },
                         label = { Text(text = navigationItem.title(index == currentPosition)) },
                         icon = {
@@ -309,7 +310,7 @@ fun NavigationRail(
         }
     ) {
         Column(
-            modifier = Modifier.fillMaxHeight(),
+            modifier = Modifier.fillMaxHeight().verticalScroll(rememberScrollState()),
             verticalArrangement = if (navigationContentPosition == MainNavigationContentPosition.TOP) Arrangement.Top else Arrangement.Center
         ) {
             navigationItems.forEachIndexed { index, navigationItem ->
@@ -321,6 +322,7 @@ fun NavigationRail(
                         } else {
                             onChangePosition(index)
                         }
+                        navigationItem.onClick?.invoke()
                     },
                     icon = {
                         Box {

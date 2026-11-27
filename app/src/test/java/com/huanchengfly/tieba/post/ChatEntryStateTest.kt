@@ -24,6 +24,25 @@ class ChatEntryStateTest {
     }
 
     @Test
+    fun forumSourcesShareDeduplicationAcrossInitialAndPaginatedLists() {
+        val seenForums = mutableSetOf<Long>()
+        assertEquals(
+            listOf(1L, 2L),
+            ChatRoomListApi.takeUnseenForumIds(listOf("1", "2", "1", "bad", "0", "-1"), seenForums),
+        )
+        assertEquals(
+            listOf(3L, 4L),
+            ChatRoomListApi.takeUnseenForumIds(listOf("2", "3") + listOf("1", "4", "3"), seenForums),
+        )
+        assertEquals(
+            listOf(5L),
+            ChatRoomListApi.takeUnseenForumIds(listOf("4", "2", "5"), seenForums),
+        )
+        assertTrue(ChatRoomListApi.takeUnseenForumIds(listOf("1", "3", "5"), seenForums).isEmpty())
+        assertEquals(setOf(1L, 2L, 3L, 4L, 5L), seenForums)
+    }
+
+    @Test
     fun progressRefreshAndFailureKeepVisibleRoomsUntilSuccessfulCompletion() {
         val old = ChatEntryUiState(rooms = persistentListOf(room(1)), hasLoaded = true, accountUid = "a")
         val start = ChatEntryPartialChange.Load.Start("a").reduce(old)
@@ -89,6 +108,16 @@ class ChatEntryStateTest {
     }
 
     @Test
+    fun malformedPublicGroupBetweenValidGroupsDoesNotDiscardRooms() {
+        val data = JSONObject("""{"list":[{"room_list":[{"room_id":"1"}]},{"room_list":{}},{"room_list":[null,{"room_id":"bad"},{"room_id":"2","is_show":0}]}]}""")
+        listOf(data, data.toString()).forEach { encoded ->
+            val rooms = ChatRoomListApi.parseRoomListResponse(JSONObject().put("data", encoded), 74075L)
+            assertEquals(listOf(1L, 2L), rooms.map { it.roomId })
+            assertTrue(rooms.all { it.forumId == 74075L })
+        }
+    }
+
+    @Test
     fun subscriptionSkipsBrokenItemsWithoutDiscardingValidRooms() {
         val data = JSONObject("""{"room_list":[null,{"room_id":"bad"},{"room_id":"1"},{"room_id":"2","is_show":0},{"room_id":"3","room_info":{"name":"已订阅"}}]}""")
         val rooms = ChatRoomListApi.parseSubscriptionRooms(JSONObject().put("data", data))
@@ -124,7 +153,6 @@ class ChatEntryStateTest {
             """{"data":"not-json"}""",
             """{"data":[]}""",
             """{"data":{"list":{}}}""",
-            """{"data":{"list":[{"room_list":{}}]}}""",
         ).forEach { raw ->
             try {
                 ChatRoomListApi.parseRoomListResponse(JSONObject(raw))

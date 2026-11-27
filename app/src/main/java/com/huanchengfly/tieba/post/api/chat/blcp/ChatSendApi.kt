@@ -154,6 +154,8 @@ object ChatSendApi {
             robotSkill: Int? = null,
             cloudMeme: ChatCloudMeme? = null,
             onTransmitting: suspend () -> Unit = {},
+            msgKey: String? = null,
+            onMessageKey: suspend (String) -> Unit = {},
         ): ChatCloudMeme? = withContext(Dispatchers.IO) {
             var stage = "连接"
             try {
@@ -240,8 +242,9 @@ object ChatSendApi {
                             chatroomId, text, forumId, forumLevel, authenticated.uk,
                             BlcpCrypto.userId2Bduk(authenticated.userId), authenticated.triggerId,
                             selfName, selfPortrait, accountBduss, mentions, robotSkill,
-                            synchronized(lifecycleLock) { securityToken }.orEmpty(), cloudMeme,
+                            synchronized(lifecycleLock) { securityToken }.orEmpty(), cloudMeme, msgKey,
                         )
+                        onMessageKey(payload.getString("msg_key"))
                         onTransmitting()
                         connection.sendMcastMsg(chatroomId, payload)
                         cloudMeme
@@ -256,7 +259,7 @@ object ChatSendApi {
                 if (e is CancellationException && e !is TimeoutCancellationException) throw e
                 val detail = e.message.orEmpty().replace(accountBduss, "[已隐藏]")
                     .replace(cuidGalaxy2, "[已隐藏]").take(300)
-                throw IllegalStateException("群聊$stage 失败：${detail.ifBlank { e.javaClass.simpleName }}")
+                throw IllegalStateException("群聊$stage 失败：${detail.ifBlank { e.javaClass.simpleName }}", e)
             }
         }
     }
@@ -281,6 +284,7 @@ object ChatSendApi {
         robotSkill: Int?,
         zid: String,
         cloudMeme: ChatCloudMeme? = null,
+        msgKey: String? = null,
     ): JSONObject {
         if (cloudMeme != null) {
             require(text.isBlank() && mentions.isEmpty() && robotSkill == null) {
@@ -415,7 +419,7 @@ object ChatSendApi {
             put("type", 81)
             put("app_safe_ext", JSONObject().put("haotianjing", JSONObject().put("zid", zid)).toString())
             put("content", JSONObject().put("text", textData.toString()).toString())
-            put("msg_key", BlcpCrypto.computeMsgKey(bduk))
+            put("msg_key", msgKey?.takeIf { it.isNotBlank() } ?: BlcpCrypto.computeMsgKey(bduk))
             put("account_type", 1)
             put("sdk_version", BlcpConstants.CHAT_SDK_VERSION)
             put("event_list", JSONArray().apply {

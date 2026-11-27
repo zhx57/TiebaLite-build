@@ -1,6 +1,11 @@
 package com.huanchengfly.tieba.post.api.chat.http
 
 import org.json.JSONObject
+import com.huanchengfly.tieba.post.utils.AccountUtil
+import com.huanchengfly.tieba.post.api.chat.ws.ChatWsConstants
+import com.huanchengfly.tieba.post.api.chat.ws.ChatWsMessage
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageKind
+import com.huanchengfly.tieba.post.api.models.chat.ChatMessageSemantics
 
 /**
  * 私信消息的拉取与发送。
@@ -11,6 +16,41 @@ import org.json.JSONObject
  *   不带 buid/tobuid/ext 包装，那是 WebSocket 路径的格式
  */
 object ImMessageApi {
+
+    /** 前后台统一过滤无法归属当前账号及会话的消息。 */
+    fun toChatMessage(message: Message, selfUid: Long, peerUid: Long): ChatWsMessage? {
+        if (selfUid <= 0L || peerUid <= 0L || selfUid == peerUid || message.msgId <= 0L ||
+            (message.fromUid != selfUid && message.fromUid != peerUid)
+        ) return null
+        val image = message.imageUrl.isNotBlank()
+        val kind = when {
+            image -> ChatMessageKind.IMAGE
+            message.type == ImHttpConstants.TYPE_VOICE -> ChatMessageKind.VOICE
+            else -> ChatMessageKind.TEXT
+        }
+        return ChatWsMessage(
+            msgId = message.msgId,
+            msgKey = message.msgKey,
+            peerUid = peerUid,
+            conversationUid = peerUid,
+            senderUid = message.fromUid,
+            peerName = "",
+            peerPortrait = "",
+            content = message.text,
+            images = if (image) listOf(message.imageUrl) else emptyList(),
+            msgTime = message.msgTime,
+            isSelf = message.fromUid == selfUid,
+            msgType = if (image) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+            semantics = ChatMessageSemantics(
+                kind = kind,
+                protocolSource = "private_http",
+                transportType = if (image) ChatWsConstants.MSG_TYPE_PRIVATE_IMAGE else ChatWsConstants.MSG_TYPE_PRIVATE,
+                businessType = when (kind) { ChatMessageKind.IMAGE -> 2; ChatMessageKind.VOICE -> 3; else -> 1 },
+                summary = message.text.ifBlank { when (kind) { ChatMessageKind.IMAGE -> "图片消息"; ChatMessageKind.VOICE -> "语音消息"; else -> "聊天消息" } },
+                rawPayload = ChatMessageSemantics.limitedRawPayload(message.rawContent),
+            ),
+        )
+    }
 
     /** 一次拉取的消息条数上限。 */
     private const val FETCH_COUNT = 20
@@ -54,6 +94,7 @@ object ImMessageApi {
         peerUid: Long,
         beginTime: Long = 0L,
         endTime: Long = 0L,
+        accountBduss: String = AccountUtil.getBduss().orEmpty(),
     ): List<Message> {
         val params = linkedMapOf<String, Any>(
             "count" to FETCH_COUNT,
@@ -62,7 +103,7 @@ object ImMessageApi {
         )
         if (beginTime > 0L) params["begin_time"] = beginTime
         if (endTime > 0L) params["end_time"] = endTime
-        val response = ImHttpClient.post("fetch_msg", params)
+        val response = ImHttpClient.post("fetch_msg", params, accountBduss)
         if (ImHttpClient.errorCode(response) != 0) {
             throw ImHttpException(
                 ImHttpClient.errorCode(response),
@@ -159,6 +200,9 @@ object ImMessageApi {
         thumbnailUrl: String? = null,
         width: Int = 0,
         height: Int = 0,
+        msgKey: String = createMsgKey(),
+        clientIdentifier: String = buildClientIdentifier(),
+        accountBduss: String = AccountUtil.getBduss().orEmpty(),
     ): Long {
         val isImage = !imageUrl.isNullOrBlank()
         val content = if (isImage) {
@@ -179,13 +223,13 @@ object ImMessageApi {
             "contacter_type" to 0,
             "type" to if (isImage) ImHttpConstants.TYPE_IMAGE else ImHttpConstants.TYPE_TEXT,
             "content" to content,
-            "msg_key" to createMsgKey(),
+            "msg_key" to msgKey,
             // 官方 send_msg 在 category != 4 且 != 9 时必须带 client_identifier，
             // 内容是 {"zid":"...","version_code":"..."} 的 JSON 字符串。
             // 缺了它服务端会拒绝发送，这是私信一直发不出去的根因之一。
-            "client_identifier" to buildClientIdentifier(),
+            "client_identifier" to clientIdentifier,
         )
-        val response = ImHttpClient.post("send_msg", params)
+        val response = ImHttpClient.post("send_msg", params, accountBduss)
         if (ImHttpClient.errorCode(response) != 0) {
             throw ImHttpException(
                 ImHttpClient.errorCode(response),
@@ -194,7 +238,7 @@ object ImMessageApi {
         }
         val msgId = response.optLong("msgid", 0L)
         if (msgId <= 0L) {
-            throw ImHttpException(ImHttpClient.errorCode(response), "发送私信未返回消息 id")
+            throw ImHttpTransportException("发送私信未返回消息 id，结果未确认")
         }
         return msgId
     }
@@ -206,7 +250,7 @@ object ImMessageApi {
      * {"zid":"<zid>","version_code":"<version_code>"}，两值都是字符串且可为空。
      * 服务端用它做设备安全校验，缺失会被判为非法请求。
      */
-    private fun buildClientIdentifier(): String {
+    internal fun buildClientIdentifier(): String {
         val zid = com.huanchengfly.tieba.post.utils.AccountUtil
             .getAccountInfo { zid }.orEmpty()
         return JSONObject().apply {

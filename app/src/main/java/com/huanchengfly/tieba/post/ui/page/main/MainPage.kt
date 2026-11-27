@@ -11,6 +11,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.setValue
+import com.huanchengfly.tieba.post.arch.hiltViewModel
+import com.huanchengfly.tieba.post.ui.page.chat.ConversationsPage
+import com.huanchengfly.tieba.post.ui.page.chat.ConversationsViewModel
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -58,6 +63,20 @@ import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.launch
 import com.huanchengfly.tieba.post.utils.AccountUtil.LocalAccount
+
+internal fun mapLegacyMainStartIndex(defaultStart: Int, hideExplore: Boolean): Int {
+    val legacyIndex = defaultStart.coerceIn(0, 3)
+    val expandedIndex = if (legacyIndex == 3) 4 else legacyIndex
+    return if (hideExplore && expandedIndex > 0) expandedIndex - 1 else expandedIndex
+}
+
+internal fun mapMainIndexForExplore(index: Int, wasHidden: Boolean, hidden: Boolean): Int {
+    val allIds = listOf("home", "explore", "notification", "chat", "user")
+    val previousIds = allIds.filter { !wasHidden || it != "explore" }
+    val nextIds = allIds.filter { !hidden || it != "explore" }
+    val selectedId = previousIds[index.coerceIn(0, previousIds.lastIndex)]
+    return nextIds.indexOf(selectedId).coerceAtLeast(0)
+}
 
 @Composable
 private fun NavigationWrapper(
@@ -108,6 +127,13 @@ fun MainPage(
 ) {
     val windowSizeClass = LocalWindowSizeClass.current
     val account = LocalAccount.current
+    val accountUid = account?.uid?.toLongOrNull() ?: 0L
+    val conversationsViewModel: ConversationsViewModel = hiltViewModel()
+    val conversationsState by conversationsViewModel.state.collectAsState()
+    val chatUnreadCount = if (conversationsState.accountUid == accountUid) {
+        conversationsState.conversations.sumOf { it.unreadCount.coerceAtLeast(0).toLong() }
+    } else 0L
+    LaunchedEffect(accountUid) { conversationsViewModel.bindAccount(accountUid) }
     val windowHeightSizeClass by rememberUpdatedState(newValue = windowSizeClass.heightSizeClass)
     val windowWidthSizeClass by rememberUpdatedState(newValue = windowSizeClass.widthSizeClass)
     val foldingDevicePosture by LocalDevicePosture.current
@@ -134,17 +160,20 @@ fun MainPage(
     )
     val pageCount by remember {
         derivedStateOf {
-            if (hideExplore) 3 else 4
+            if (hideExplore) 4 else 5
         }
     }
     val pagerState = rememberPagerState(
         pageCount = { pageCount },
-        initialPage = if (hideExplore && defaultStart > 0) defaultStart - 1 else defaultStart
+        initialPage = mapLegacyMainStartIndex(defaultStart, hideExplore)
     )
 
+    var previousHideExplore by remember { mutableStateOf(hideExplore) }
     LaunchedEffect(hideExplore) {
-        if (pagerState.currentPage == 3 && hideExplore) {
-            pagerState.scrollToPage(2)
+        if (previousHideExplore != hideExplore) {
+            val newIndex = mapMainIndexForExplore(pagerState.currentPage, previousHideExplore, hideExplore)
+            previousHideExplore = hideExplore
+            pagerState.scrollToPage(newIndex.coerceIn(0, pageCount - 1))
         }
     }
 
@@ -154,7 +183,7 @@ fun MainPage(
 
     val coroutineScope = rememberCoroutineScope()
     val themeColors = ExtendedTheme.colors
-    val navigationItems by remember {
+    val navigationItems by remember(chatUnreadCount, accountUid, homeViewModel, conversationsViewModel) {
         derivedStateOf {
             listOfNotNull(
                 NavigationItem(
@@ -197,6 +226,14 @@ fun MainPage(
                     content = {
                         NotificationsPage()
                     }
+                ),
+                NavigationItem(
+                    id = "chat",
+                    icon = { AnimatedImageVector.animatedVectorResource(R.drawable.ic_animated_chat) },
+                    title = { "聊天" },
+                    badge = chatUnreadCount > 0L,
+                    badgeText = if (chatUnreadCount > 99L) "99+" else "$chatUnreadCount",
+                    content = { ConversationsPage(viewModel = conversationsViewModel) },
                 ),
                 NavigationItem(
                     id = "user",
@@ -293,12 +330,12 @@ fun MainPage(
                 LazyLoadHorizontalPager(
                     contentPadding = paddingValues,
                     state = pagerState,
-                    key = { navigationItems[it].id },
+                    key = { navigationItems.getOrNull(it)?.id ?: "navigation-transition-$it" },
                     modifier = Modifier.fillMaxSize(),
                     verticalAlignment = Alignment.Top,
                     userScrollEnabled = false
                 ) {
-                    navigationItems[it].content()
+                    navigationItems.getOrNull(it)?.content?.invoke()
                 }
             }
         }

@@ -98,7 +98,9 @@ class ChatRoomStateTest {
             val text = if (meme == null) "你好" else ""
             val started = ChatRoomPartialChange.Send.Start(-1L, text, 42L, "测试用户", "portrait",
                 cloudMeme = meme).reduce(ChatRoomUiState())
-            val transmitting = ChatRoomPartialChange.Send.Transmitting(-1L).reduce(started)
+            val transmitting = ChatRoomPartialChange.Send.Transmitting(-1L).reduce(started).let {
+                it.copy(messages = persistentListOf(it.messages.single().copy(msgKey = "exact-key")))
+            }
             val local = transmitting.messages.single()
             assertEquals(type, local.contentType)
             assertEquals(type, local.semantics.businessType)
@@ -106,7 +108,7 @@ class ChatRoomStateTest {
                 1L, text, 2L, 0, 123L, BlcpCrypto.userId2Bduk(42L), 1L,
                 "测试用户", "portrait", "test-only", emptyList(), null, "", cloudMeme = meme,
             )
-            val echo = received(request).copy(msgTime = local.msgTime)
+            val echo = received(request).copy(msgTime = local.msgTime, msgKey = local.msgKey)
             val delivered = ChatRoomPartialChange.Poll.Success(persistentListOf(echo)).reduce(transmitting)
             val confirmed = delivered.messages.single()
             assertFalse(confirmed.isLocal)
@@ -368,17 +370,17 @@ class ChatRoomStateTest {
         assertEquals(SendState.SENDING, accepted.messages.single().sendState)
         assertTrue(accepted.messages.single().transportAccepted)
         val timedOut = ChatRoomPartialChange.Send.Unconfirmed(-1L).reduce(accepted)
-        assertEquals(SendState.FAILED, timedOut.messages.single().sendState)
+        assertEquals(SendState.UNKNOWN, timedOut.messages.single().sendState)
         assertEquals(UNCONFIRMED_SEND_MESSAGE, timedOut.messages.single().sendError)
     }
 
     @Test
     fun lateHistoryEchoResolvesUnconfirmedSend() {
-        val local = message(-1, local = true, state = SendState.SENDING)
+        val local = message(-1, local = true, state = SendState.SENDING).copy(msgKey = "late-key")
         val accepted = ChatRoomPartialChange.Send.Success(-1L)
             .reduce(ChatRoomUiState(messages = persistentListOf(local)))
         val unconfirmed = ChatRoomPartialChange.Send.Unconfirmed(-1L).reduce(accepted)
-        val delivered = ChatRoomPartialChange.Poll.Success(persistentListOf(message(10))).reduce(unconfirmed)
+        val delivered = ChatRoomPartialChange.Poll.Success(persistentListOf(message(10).copy(msgKey = "late-key"))).reduce(unconfirmed)
         assertEquals(1, delivered.messages.size)
         assertFalse(delivered.messages.single().isLocal)
         assertEquals(SendState.SENT, delivered.messages.single().sendState)
@@ -435,12 +437,12 @@ class ChatRoomStateTest {
     }
 
     @Test
-    fun singleEchoOnlyReconcilesOneOfTwoIdenticalSends() {
+    fun singleEchoWithoutKeyDoesNotReconcileEitherIdenticalSend() {
         val first = message(-1, local = true)
         val second = message(-2, time = 101_000L, local = true)
         val merged = mergeServerMessages(persistentListOf(first, second), listOf(message(10)))
-        assertEquals(2, merged.size)
-        assertEquals(1, merged.count { it.isLocal })
+        assertEquals(3, merged.size)
+        assertEquals(2, merged.count { it.isLocal })
         assertEquals(1, merged.count { it.msgId == 10L })
         assertSame(merged, mergeServerMessages(merged, listOf(message(10))))
     }
@@ -465,9 +467,9 @@ class ChatRoomStateTest {
     fun lateConfirmationReconcilesEchoAndRetainsMentionPayload() {
         val mention = ChatMention(99L, "target-bduk", "机器人", "robot-portrait")
         val local = message(-1, local = true, state = SendState.SENDING)
-            .copy(mentions = listOf(mention), robotSkill = 7)
+            .copy(mentions = listOf(mention), robotSkill = 7, msgKey = "mention-key")
         val state = ChatRoomUiState(messages = persistentListOf(local))
-        val earlyEcho = message(10).copy(mentions = listOf(mention), robotSkill = 7)
+        val earlyEcho = message(10).copy(mentions = listOf(mention), robotSkill = 7, msgKey = "mention-key")
         val polled = ChatRoomPartialChange.Poll.Success(persistentListOf(earlyEcho)).reduce(state)
         val confirmed = ChatRoomPartialChange.Send.Success(-1L).reduce(polled)
         assertEquals(1, confirmed.messages.size)
@@ -483,15 +485,16 @@ class ChatRoomStateTest {
         val state = ChatRoomUiState(messages = persistentListOf(first, second))
         val polled = ChatRoomPartialChange.Poll.Success(persistentListOf(message(10))).reduce(state)
         val confirmed = ChatRoomPartialChange.Send.Success(-1L).reduce(polled)
-        assertEquals(2, confirmed.messages.size)
+        assertEquals(3, confirmed.messages.size)
+        assertEquals(2, confirmed.messages.count { it.isLocal })
         assertTrue(confirmed.messages.any { it.msgId == -2L && it.isLocal })
         assertSame(confirmed.messages, mergeServerMessages(confirmed.messages, listOf(message(10))))
     }
 
     @Test
     fun observedServerDeliveryWinsOverTransportTimeout() {
-        val local = message(-1, local = true, state = SendState.SENDING)
-        val polled = ChatRoomPartialChange.Poll.Success(persistentListOf(message(10)))
+        val local = message(-1, local = true, state = SendState.SENDING).copy(msgKey = "observed-key")
+        val polled = ChatRoomPartialChange.Poll.Success(persistentListOf(message(10).copy(msgKey = "observed-key")))
             .reduce(ChatRoomUiState(messages = persistentListOf(local)))
         val failed = ChatRoomPartialChange.Send.Failure(-1L, IllegalStateException("timeout")).reduce(polled)
         assertEquals(1, failed.messages.size)
@@ -599,7 +602,9 @@ class ChatRoomStateTest {
         assertEquals(meme, retried.messages.single().cloudMeme)
         assertEquals(listOf(meme.imageUrl), retried.messages.single().images)
         assertEquals(2L, retried.sendRequestId)
-        val accepted = ChatRoomPartialChange.Send.Success(-2L).reduce(retried)
+        val accepted = ChatRoomPartialChange.Send.Success(-2L).reduce(retried).let {
+            it.copy(messages = persistentListOf(it.messages.single().copy(msgKey = "image-retry-key")))
+        }
         assertEquals(SendState.SENDING, accepted.messages.single().sendState)
         assertTrue(accepted.messages.single().transportAccepted)
         val confirmed = accepted.messages.single().copy(msgId = 101L, isLocal = false, sendState = SendState.SENT)
@@ -610,7 +615,7 @@ class ChatRoomStateTest {
     }
 
     @Test
-    fun preparedImageReconcilesAnAlreadySeenEchoAtLocalPosition() {
+    fun preparedImageDoesNotClaimAnAlreadySeenEchoWithoutKey() {
         val original = "https://example.com/original.gif"
         val uploaded = "https://chat.example/uploaded.gif?token=1"
         val local = message(-1, time = 200_000L, text = "", local = true).copy(
@@ -625,10 +630,10 @@ class ChatRoomStateTest {
             ChatRoomUiState(messages = beforePrepared)
         )
         val afterPrepared = preparedState.messages
-        assertEquals(listOf(10L), afterPrepared.map { it.msgId })
-        assertEquals(-1L, afterPrepared.single().echoForPendingId)
-        assertEquals(200_000L, afterPrepared.single().displayTime)
-        assertEquals(200_001L, afterPrepared.single().msgTime)
+        assertEquals(setOf(-1L, 10L), afterPrepared.map { it.msgId }.toSet())
+        assertTrue(afterPrepared.single { it.isLocal }.echoForPendingId == null)
+        assertEquals(prepared, afterPrepared.single { it.isLocal }.cloudMeme)
+        assertEquals(200_001L, afterPrepared.single { !it.isLocal }.msgTime)
     }
 
     @Test
@@ -648,7 +653,7 @@ class ChatRoomStateTest {
         assertEquals(2, accepted.messages.size)
         val echo = old.copy(msgId = 11L, msgTime = System.currentTimeMillis())
         val confirmed = ChatRoomPartialChange.Poll.Success(persistentListOf(echo)).reduce(accepted)
-        assertEquals(listOf(10L, 11L), confirmed.messages.map { it.msgId }.sorted())
+        assertEquals(listOf(-1L, 10L, 11L), confirmed.messages.map { it.msgId }.sorted())
     }
 
     @Test
@@ -705,7 +710,8 @@ class ChatRoomStateTest {
         val original = "https://example.com/original.gif"
         val uploaded = "https://chat.example/uploaded.gif?token=1"
         val local = message(-1, text = "", local = true).copy(
-            contentType = 1, images = listOf(original), cloudMeme = ChatCloudMeme("meme", original)
+            contentType = 1, images = listOf(original), cloudMeme = ChatCloudMeme("meme", original),
+            msgKey = "prepared-exact-key",
         )
         val echo = local.copy(msgId = 10, isLocal = false, images = listOf(uploaded))
         val state = ChatRoomPartialChange.Send.Prepared(-1L,
@@ -725,22 +731,23 @@ class ChatRoomStateTest {
         val text = message(-3, text = "", local = true)
         val echo = second.copy(msgId = 10, isLocal = false)
         val merged = mergeServerMessages(listOf(first, second, text), listOf(echo))
-        assertEquals(3, merged.size)
+        assertEquals(4, merged.size)
         assertTrue(merged.any { it.msgId == -1L })
+        assertTrue(merged.any { it.msgId == -2L })
         assertTrue(merged.any { it.msgId == -3L })
-        assertEquals(-2L, merged.single { it.msgId == 10L }.echoForPendingId)
+        assertEquals(null, merged.single { it.msgId == 10L }.echoForPendingId)
     }
 
     @Test
     fun sameImageEchoesAreMatchedOneToOneAndLateTimeoutCannotUndoDelivery() {
         val local = message(-1, text = "", local = true, state = SendState.SENDING).copy(
-            contentType = 1, images = listOf("https://example.com/a.gif"),
+            contentType = 1, images = listOf("https://example.com/a.gif"), msgKey = "first-image-key",
         )
-        val second = local.copy(msgId = -2)
+        val second = local.copy(msgId = -2, msgKey = "second-image-key")
         val echo = local.copy(msgId = 10, isLocal = false, sendState = SendState.SENT)
         val firstPoll = mergeServerMessages(listOf(local, second), listOf(echo))
         assertEquals(1, firstPoll.count { it.isLocal })
-        val finalPoll = mergeServerMessages(firstPoll, listOf(echo, echo.copy(msgId = 11)))
+        val finalPoll = mergeServerMessages(firstPoll, listOf(echo, echo.copy(msgId = 11, msgKey = "second-image-key")))
         assertEquals(2, finalPoll.size)
         assertTrue(finalPoll.none { it.isLocal })
         assertEquals(setOf(-1L, -2L), finalPoll.map { it.echoForPendingId }.toSet())
@@ -780,7 +787,9 @@ class ChatRoomStateTest {
         assertTrue(mergeServerMessages(listOf(local), listOf(differentHost, differentQuery, differentPort)).any { it.isLocal })
         val httpEcho = local.copy(msgId = 12, isLocal = false,
             images = listOf("http://example.com/a.gif?token=one"))
-        assertFalse(mergeServerMessages(listOf(local), listOf(httpEcho)).single().isLocal)
+        val samePath = mergeServerMessages(listOf(local), listOf(httpEcho))
+        assertEquals(2, samePath.size)
+        assertTrue(samePath.any { it.isLocal })
     }
 
     @Test
@@ -1244,7 +1253,7 @@ class ChatRoomStateTest {
     fun confirmationAndFailureDoNotClearSendingParameters() {
         val mention = ChatMention(99L, "target-bduk", "机器人", "robot-portrait")
         val local = message(-1, local = true, state = SendState.SENDING)
-            .copy(mentions = listOf(mention), robotSkill = 7)
+            .copy(mentions = listOf(mention), robotSkill = 7, msgKey = "mention-key")
         val state = ChatRoomUiState(messages = persistentListOf(local))
         val sent = ChatRoomPartialChange.Send.Success(-1L).reduce(state).messages.single()
         val failed = ChatRoomPartialChange.Send.Failure(-1L, IllegalStateException("timeout"))

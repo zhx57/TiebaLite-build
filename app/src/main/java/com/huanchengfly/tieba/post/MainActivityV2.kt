@@ -169,7 +169,6 @@ class MainActivityV2 : BaseComposeActivity() {
     private val notificationCountFlow: MutableSharedFlow<Int> =
         MutableSharedFlow(replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     private var foregroundChatJob: Job? = null
-    private var foregroundPrivateCount = 0
     private var regularNotificationCount = 0
 
     private val pickMediasLauncher =
@@ -612,7 +611,6 @@ class MainActivityV2 : BaseComposeActivity() {
         @SuppressLint("RestrictedApi")
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == NotifyJobService.ACTION_CLEAR_PRIVATE) {
-                foregroundPrivateCount = 0
                 notificationCountFlow.tryEmit(regularNotificationCount)
                 (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                     .cancel(NotifyJobService.ID_PRIVATE)
@@ -625,11 +623,10 @@ class MainActivityV2 : BaseComposeActivity() {
                     if (intent.getLongExtra("account_uid", 0L) !=
                         (AccountUtil.getUid()?.toLongOrNull() ?: 0L)
                     ) return
-                    foregroundPrivateCount = count.coerceAtLeast(0)
-                    notificationCountFlow.tryEmit(regularNotificationCount + foregroundPrivateCount)
+                    // 聊天未读由本地会话表提供，不再加到贴吧通知角标。
                 } else if (channel == NotifyJobService.CHANNEL_TOTAL) {
                     regularNotificationCount = count
-                    notificationCountFlow.tryEmit(regularNotificationCount + foregroundPrivateCount)
+                    notificationCountFlow.tryEmit(regularNotificationCount)
                 }
             }
         }

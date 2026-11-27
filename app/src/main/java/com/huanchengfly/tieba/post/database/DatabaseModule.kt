@@ -11,6 +11,16 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
+internal val MIGRATION_40_41 = Migration(40, 41) { db ->
+    db.execSQL("CREATE TABLE IF NOT EXISTS `chat_message` (`accountUid` INTEGER NOT NULL, `kind` TEXT NOT NULL, `conversationId` INTEGER NOT NULL, `localId` TEXT NOT NULL, `serverId` INTEGER, `msgKey` TEXT, `sortTime` INTEGER NOT NULL, `payload` TEXT NOT NULL, PRIMARY KEY(`accountUid`, `kind`, `conversationId`, `localId`))")
+    db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_chat_message_accountUid_kind_conversationId_serverId` ON `chat_message` (`accountUid`, `kind`, `conversationId`, `serverId`)")
+    db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_chat_message_accountUid_kind_conversationId_msgKey` ON `chat_message` (`accountUid`, `kind`, `conversationId`, `msgKey`)")
+    db.execSQL("CREATE INDEX IF NOT EXISTS `index_chat_message_accountUid_kind_conversationId_sortTime_localId` ON `chat_message` (`accountUid`, `kind`, `conversationId`, `sortTime`, `localId`)")
+    db.execSQL("CREATE TABLE IF NOT EXISTS `chat_conversation` (`accountUid` INTEGER NOT NULL, `kind` TEXT NOT NULL, `conversationId` INTEGER NOT NULL, `name` TEXT NOT NULL, `avatar` TEXT NOT NULL, `forumId` INTEGER NOT NULL, `summary` TEXT NOT NULL, `lastMessageTime` INTEGER NOT NULL, `unreadCount` INTEGER NOT NULL, `pinned` INTEGER NOT NULL, `hiddenAt` INTEGER NOT NULL, `readAt` INTEGER NOT NULL, PRIMARY KEY(`accountUid`, `kind`, `conversationId`))")
+    db.execSQL("CREATE INDEX IF NOT EXISTS `index_chat_conversation_accountUid_pinned_lastMessageTime_conversationId` ON `chat_conversation` (`accountUid`, `pinned`, `lastMessageTime`, `conversationId`)")
+    db.execSQL("CREATE TABLE IF NOT EXISTS `chat_legacy_import` (`accountUid` INTEGER NOT NULL, PRIMARY KEY(`accountUid`))")
+}
+
 private val MIGRATION_39_40 = Migration(39, 40) { db ->
     db.execSQL("CREATE TABLE IF NOT EXISTS `draft_new` (`id` INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, `hash` TEXT NOT NULL, `content` TEXT NOT NULL)")
     db.execSQL("INSERT OR REPLACE INTO `draft_new` (`id`, `hash`, `content`) SELECT `id`, `hash`, `content` FROM `draft` WHERE `id` IN (SELECT MAX(`id`) FROM `draft` GROUP BY `hash`)")
@@ -70,9 +80,12 @@ object DatabaseModule {
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase {
         return Room.databaseBuilder(context, AppDatabase::class.java, "tblite.db")
-            .addMigrations(MIGRATION_38_39, MIGRATION_39_40)
+            .addMigrations(MIGRATION_38_39, MIGRATION_39_40, MIGRATION_40_41)
             .build()
     }
+
+    @Provides
+    fun provideChatHistoryDao(db: AppDatabase) = db.chatHistoryDao()
 
     @Provides
     fun provideAccountDao(db: AppDatabase) = db.accountDao()
